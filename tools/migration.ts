@@ -28,15 +28,26 @@ export interface Migration {
 export function planMigration(
   config: Config,
   release: string,
-  options: { fresh?: boolean; nativeUsage?: boolean } = {},
+  options: {
+    fresh?: boolean;
+    nativeUsage?: boolean;
+    consolidated?: boolean;
+  } = {},
 ): Migration {
   const previous = config.plugins ?? {};
   const enabled = (id: string) =>
     previous[id] ? previous[id].enabled !== false : options.fresh === true;
   const modules = Object.fromEntries(
-    Object.entries(uiModules).map(([id, legacy]) => [id, enabled(legacy)]),
+    Object.entries(uiModules).map(([id, legacy]) => [
+      id,
+      options.consolidated ? true : enabled(legacy),
+    ]),
   ) as Migration["ui"]["modules"];
-  const sync = { backup: enabled("settings-sync"), relay: enabled("aster") };
+  // An existing Suite already stores module flags separately. Their defaults
+  // must stay unchanged if a settings file is absent; seed() retains saved flags.
+  const sync = options.consolidated
+    ? { backup: true, relay: true }
+    : { backup: enabled("settings-sync"), relay: enabled("aster") };
   const replaced = new Set([
     ...Object.values(uiModules),
     "aster",
@@ -48,7 +59,9 @@ export function planMigration(
   plugins["terminal-tabs"] = {
     source: "directory",
     path: path.join(release, "plugins/ui"),
-    enabled: Object.values(modules).some(Boolean),
+    enabled: options.consolidated
+      ? enabled("terminal-tabs")
+      : Object.values(modules).some(Boolean),
   };
   plugins.aster = {
     source: "directory",
@@ -58,7 +71,9 @@ export function planMigration(
   plugins["settings-sync"] = {
     source: "directory",
     path: path.join(release, "plugins/settings-sync"),
-    enabled: sync.backup || sync.relay,
+    enabled: options.consolidated
+      ? enabled("settings-sync")
+      : sync.backup || sync.relay,
   };
   if (options.nativeUsage) delete plugins["claude-windows-usage"];
   return {

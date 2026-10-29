@@ -11,6 +11,34 @@ const entry = (name: string, enabled = true): PluginSource => ({
   path: `/plugins/${name}`,
   enabled,
 });
+test("Suite upgrades preserve disabled plugins independently of Aster and module defaults", () => {
+  for (const ui of [false, true])
+    for (const aster of [false, true])
+      for (const sync of [false, true]) {
+        const config = {
+          pluginsEnabled: false,
+          plugins: {
+            "terminal-tabs": entry("ui", ui),
+            aster: entry("aster", aster),
+            "settings-sync": entry("sync", sync),
+          },
+        };
+        const result = planMigration(config, "/next", { consolidated: true });
+        assert.equal(result.config.pluginsEnabled, false);
+        assert.equal(result.config.plugins?.["terminal-tabs"].enabled, ui);
+        assert.equal(result.config.plugins?.aster.enabled, aster);
+        assert.equal(result.config.plugins?.["settings-sync"].enabled, sync);
+        assert.ok(Object.values(result.ui.modules).every(Boolean));
+        assert.deepEqual(result.sync, { backup: true, relay: true });
+      }
+  const removed = planMigration(
+    { plugins: { aster: entry("aster") } },
+    "/next",
+    { consolidated: true },
+  );
+  assert.equal(removed.config.plugins?.["terminal-tabs"].enabled, false);
+  assert.equal(removed.config.plugins?.["settings-sync"].enabled, false);
+});
 test("migration preserves config, disabled modules and the original caller object", () => {
   const config = {
     pluginsEnabled: false,

@@ -138,6 +138,7 @@ export async function prepare(context: Context) {
   const migration = planMigration(config, release, {
     fresh: raw === null,
     nativeUsage: !running,
+    consolidated: oldState !== null,
   });
   if (
     running &&
