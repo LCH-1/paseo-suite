@@ -46,7 +46,7 @@ export default function contribute(client) {
   }
   if (!modules) throw new Error("Global Workspace Tabs: unsupported Paseo module exports");
   const leaseKey = "__PASEO_GLOBAL_TABS_LEASE__";
-  const revision = "639e7166b4ed059017fead8eff0c784a60b8c50c01beaf248b2576c8107bdd24";
+  const revision = "9a588b2a8fbf7ecec04877835262359b50d6235120ba3679ab5bdfdd63af8a0e";
   let lease = globalThis[leaseKey];
   function retain(current) {
     const owner = Symbol();
@@ -830,11 +830,12 @@ export default function contribute(client) {
       for (const serverId of Object.keys(state)) {
         const workspacePrefix = "sidebar-workspace-row-" + serverId + ":";
         const agentPrefix = "agent-row-" + serverId + "-";
-        if (!id.startsWith(workspacePrefix) && !id.startsWith(agentPrefix)) continue;
+        const activityPrefix = "sidebar-activity-session-" + serverId + "-";
+        if (!id.startsWith(workspacePrefix) && !id.startsWith(agentPrefix) && !id.startsWith(activityPrefix)) continue;
         if (actionInside(element, node)) return;
         pinIntent = { serverId, expires: Date.now() + 2500,
           ...(id.startsWith(workspacePrefix) ? { workspaceId: id.slice(workspacePrefix.length) }
-            : { agentId: id.slice(agentPrefix.length) }) };
+            : { agentId: id.slice(id.startsWith(activityPrefix) ? activityPrefix.length : agentPrefix.length) }) };
         flushPinIntent();
         return;
       }
