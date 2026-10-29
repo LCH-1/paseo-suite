@@ -1,6 +1,6 @@
 {
   "name": "paseo-aster",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "license": "UNLICENSED",
   "repository": {
@@ -24,7 +24,9 @@
     "server/profile-usage-runtime.js",
     "server/profile-usage-runtime.d.ts",
     "server/usage-revision.ts",
-    "server/legacy-credential-rpc.ts"
+    "server/legacy-credential-rpc.ts",
+    "server/core-profiles.ts",
+    "server/host-usage.ts"
   ],
   "type": "module",
   "scripts": {

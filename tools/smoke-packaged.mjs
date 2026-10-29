@@ -122,8 +122,17 @@ try {
     );
   const catalog = await client.getPluginCatalog();
   assert.ok(
-    catalog.some((plugin) => plugin.id === "claude-windows-usage"),
-    "Built-in Windows usage must start",
+    catalog.some((plugin) => plugin.id === "claude-usage-source") &&
+      !catalog.some((plugin) => plugin.id === "claude-windows-usage"),
+    "One built-in Claude engine must own Windows compatibility",
+  );
+  assert.deepEqual(
+    await client.invokePluginRpc(
+      "claude-usage-source",
+      "claude.profiles.read.request",
+      { providerIds: [] },
+    ),
+    { version: 1, profiles: [] },
   );
   await assert.rejects(
     client.invokePluginRpc(
@@ -141,7 +150,8 @@ try {
     JSON.stringify({
       passed: true,
       plugins: plugins.map(({ id, status }) => ({ id, status })),
-      builtin: "claude-windows-usage",
+      builtin: "claude-usage-source",
+      compatibilitySource: "claude-windows",
       legacyForwarding: true,
       isolatedHome: temporary,
     }),
