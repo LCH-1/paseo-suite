@@ -1,11 +1,27 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, writeFile, rename, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  writeFile,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { Account } from "./accounts";
 import { accountKey } from "./routing-cache";
+import {
+  coreProfileReader,
+  matchesAccount,
+  type ReadProfiles,
+} from "./core-profiles";
 import { credentialStore } from "../../settings-sync/server/relay/credential-store";
-import type { CredentialProviders, CredentialState } from "../../settings-sync/server/relay/credential-types";
+import type {
+  CredentialProviders,
+  CredentialState,
+} from "../../settings-sync/server/relay/credential-types";
 
 const profileSchema = z.object({
   account: z.object({
@@ -21,7 +37,11 @@ const profileSchema = z.object({
   }),
 });
 const stateSchema = z
-  .object({ version: z.literal(1), at: z.number().finite().nonnegative(), denied: z.boolean() })
+  .object({
+    version: z.literal(1),
+    at: z.number().finite().nonnegative(),
+    denied: z.boolean(),
+  })
   .strict();
 type AccessState = z.infer<typeof stateSchema>;
 const interval = 60_000;
@@ -29,7 +49,11 @@ const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 
 /** Flags describe present access; a scheduled cancellation can still have paid access. */
-export function subscriptionAccess(value: unknown, identity: string, now: number): boolean | null {
+export function subscriptionAccess(
+  value: unknown,
+  identity: string,
+  now: number,
+): boolean | null {
   const parsed = profileSchema.safeParse(value);
   if (!parsed.success) return null;
   const { account, organization } = parsed.data;
@@ -38,18 +62,26 @@ export function subscriptionAccess(value: unknown, identity: string, now: number
     .digest("hex");
   if (actual !== identity) return null;
   if (
-    ["unpaid", "expired", "paused", "incomplete", "incomplete_expired"].includes(
-      organization.subscription_status ?? "",
-    )
+    [
+      "unpaid",
+      "expired",
+      "paused",
+      "incomplete",
+      "incomplete_expired",
+    ].includes(organization.subscription_status ?? "")
   )
     return false;
-  if (account.has_claude_max === true || account.has_claude_pro === true) return true;
-  if (Date.parse(organization.claude_code_trial_ends_at ?? "") > now) return true;
+  if (account.has_claude_max === true || account.has_claude_pro === true)
+    return true;
+  if (Date.parse(organization.claude_code_trial_ends_at ?? "") > now)
+    return true;
   // Team/Enterprise seats and unknown future profile shapes are not personal Free plans.
   if (
     account.has_claude_max === false &&
     account.has_claude_pro === false &&
-    /^(?:claude_)?(?:free|pro|max|personal|individual)$/.test(organization.organization_type ?? "")
+    /^(?:claude_)?(?:free|pro|max|personal|individual)$/.test(
+      organization.organization_type ?? "",
+    )
   )
     return false;
   return null;
@@ -106,6 +138,7 @@ export class SubscriptionGuard {
   private readonly now;
   private readonly fetchApi;
   private readonly capture;
+  private readonly readProfiles: ReadProfiles | undefined;
   constructor(
     private readonly directory: string,
     home: string,
@@ -113,11 +146,17 @@ export class SubscriptionGuard {
       now?: () => number;
       fetchApi?: typeof fetch;
       capture?: (providers: CredentialProviders) => Promise<CredentialState>;
+      readProfiles?: ReadProfiles;
     } = {},
   ) {
     this.now = options.now ?? Date.now;
     this.fetchApi = options.fetchApi ?? fetch;
     this.capture = options.capture ?? credentialStore(home).read;
+    this.readProfiles =
+      options.readProfiles ??
+      (options.capture || options.fetchApi
+        ? undefined
+        : coreProfileReader(home));
   }
   private async regular(file: string, directory = false) {
     const stat = await lstat(file).catch((error: NodeJS.ErrnoException) => {
@@ -134,7 +173,11 @@ export class SubscriptionGuard {
   }
   private async load(key: string) {
     const dir = join(this.directory, key);
-    if (!(await this.regular(this.directory, true)) || !(await this.regular(dir, true))) return;
+    if (
+      !(await this.regular(this.directory, true)) ||
+      !(await this.regular(dir, true))
+    )
+      return;
     // Immutable observations prevent an old plugin instance's late response overwriting newer denial.
     const files = (await readdir(dir))
       .filter((file) => /^\d{16}-[01]-[a-f0-9-]{36}\.json$/.test(file))
@@ -146,14 +189,25 @@ export class SubscriptionGuard {
     const state = stateSchema.parse(JSON.parse(await readFile(file, "utf8")));
     if (
       state.at > this.now() + interval ||
-      !files[0].startsWith(`${String(state.at).padStart(16, "0")}-${Number(state.denied)}-`)
+      !files[0].startsWith(
+        `${String(state.at).padStart(16, "0")}-${Number(state.denied)}-`,
+      )
     )
       throw Error("Invalid subscription observation");
     const previous = this.states.get(key);
-    if (!previous || state.at > previous.at || (state.at === previous.at && state.denied))
+    if (
+      !previous ||
+      state.at > previous.at ||
+      (state.at === previous.at && state.denied)
+    )
       this.states.set(key, state);
   }
-  private async remember(key: string, denied: boolean, at: number, current = () => true) {
+  private async remember(
+    key: string,
+    denied: boolean,
+    at: number,
+    current = () => true,
+  ) {
     try {
       await this.load(key);
     } catch {
@@ -163,7 +217,10 @@ export class SubscriptionGuard {
     }
     if (!current()) return;
     const previous = this.states.get(key);
-    if (previous && (previous.at > at || (previous.at === at && previous.denied && !denied)))
+    if (
+      previous &&
+      (previous.at > at || (previous.at === at && previous.denied && !denied))
+    )
       return;
     const state: AccessState = { version: 1, at, denied };
     this.states.set(key, state);
@@ -180,7 +237,10 @@ export class SubscriptionGuard {
         ),
         temporary = file + ".tmp";
       try {
-        await writeFile(temporary, JSON.stringify(state), { mode: 0o600, flag: "wx" });
+        await writeFile(temporary, JSON.stringify(state), {
+          mode: 0o600,
+          flag: "wx",
+        });
         await rename(temporary, file);
       } finally {
         await rm(temporary, { force: true });
@@ -210,14 +270,18 @@ export class SubscriptionGuard {
     signal = AbortSignal.any([signal, this.lifetime.signal]);
     signal.throwIfAborted();
     const unique = [
-      ...new Map(accounts.map((account) => [accountKey(account), account])).entries(),
+      ...new Map(
+        accounts.map((account) => [accountKey(account), account]),
+      ).entries(),
     ];
     for (const [key] of unique)
       if (!this.loaded.has(key)) {
         try {
           await this.load(key);
         } catch {
-          console.warn("[aster] 구독 상태 캐시를 읽지 못해 공식 프로필에서 다시 확인합니다.");
+          console.warn(
+            "[aster] 구독 상태 캐시를 읽지 못해 공식 프로필에서 다시 확인합니다.",
+          );
         }
         this.loaded.add(key);
       }
@@ -229,6 +293,11 @@ export class SubscriptionGuard {
     );
     let snapshot: Promise<CredentialState> | undefined;
     const capture = () => (snapshot ??= providers().then(this.capture));
+    const requested = accounts
+      .filter((account) => due.some(([key]) => accountKey(account) === key))
+      .map((account) => account.id);
+    let core: ReturnType<ReadProfiles> | undefined;
+    const coreSnapshot = () => (core ??= this.readProfiles!(requested, signal));
     await Promise.all(
       due.map(([key, account]) => {
         if (this.pending.has(key)) return this.pending.get(key);
@@ -236,6 +305,34 @@ export class SubscriptionGuard {
         this.checked.set(key, at);
         const task = (async () => {
           try {
+            if (this.readProfiles) {
+              const profiles = await coreSnapshot();
+              signal.throwIfAborted();
+              if (profiles !== null) {
+                const ids = accounts
+                  .filter((candidate) => accountKey(candidate) === key)
+                  .map((candidate) => candidate.id);
+                const entries = profiles.filter((entry) =>
+                  ids.includes(entry.providerId),
+                );
+                const current = entries.find(
+                  (entry) =>
+                    entry.status === "ready" &&
+                    "profile" in entry &&
+                    matchesAccount(account, entry.profile),
+                );
+                if (current && "profile" in current) {
+                  const allowed = subscriptionAccess(
+                    current.profile,
+                    current.identity,
+                    this.now(),
+                  );
+                  if (allowed !== null) await this.remember(key, !allowed, at);
+                } else if (entries.some((entry) => entry.status === 402))
+                  await this.remember(key, true, at);
+                return;
+              }
+            }
             const state = await capture();
             signal.throwIfAborted();
             const ids = accounts
@@ -247,23 +344,35 @@ export class SubscriptionGuard {
               .filter((record) => record && record.expiresAt! > this.now())
               .sort((a, b) => b!.expiresAt! - a!.expiresAt!)[0];
             const oauth = record?.credential.claudeAiOauth;
-            if (!record || !object(oauth) || typeof oauth.accessToken !== "string") return;
-            const response = await this.fetchApi("https://api.anthropic.com/api/oauth/profile", {
-              redirect: "error",
-              headers: {
-                Authorization: `Bearer ${oauth.accessToken}`,
-                Accept: "application/json",
-                "anthropic-beta": "oauth-2025-04-20",
+            if (
+              !record ||
+              !object(oauth) ||
+              typeof oauth.accessToken !== "string"
+            )
+              return;
+            const response = await this.fetchApi(
+              "https://api.anthropic.com/api/oauth/profile",
+              {
+                redirect: "error",
+                headers: {
+                  Authorization: `Bearer ${oauth.accessToken}`,
+                  Accept: "application/json",
+                  "anthropic-beta": "oauth-2025-04-20",
+                },
+                signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
               },
-              signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
-            });
+            );
             signal.throwIfAborted();
             if (response.status === 402) {
               await this.remember(key, true, at);
               return;
             }
             if (!response.ok) return;
-            const allowed = subscriptionAccess(await response.json(), record.identity, this.now());
+            const allowed = subscriptionAccess(
+              await response.json(),
+              record.identity,
+              this.now(),
+            );
             signal.throwIfAborted();
             if (allowed !== null) await this.remember(key, !allowed, at);
           } catch {
@@ -277,6 +386,8 @@ export class SubscriptionGuard {
       }),
     );
     signal.throwIfAborted();
-    return accounts.filter((account) => !this.states.get(accountKey(account))?.denied);
+    return accounts.filter(
+      (account) => !this.states.get(accountKey(account))?.denied,
+    );
   }
 }
