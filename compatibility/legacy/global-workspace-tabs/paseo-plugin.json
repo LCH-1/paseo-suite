@@ -1,0 +1,6 @@
+{
+  "id": "global-workspace-tabs",
+  "name": "Global Workspace Tabs",
+  "description": "워크스페이스를 바꿔도 대화 탭을 같은 줄에 유지합니다.",
+  "requirements": { "paseo": ">=0.12.0 <0.13.0" }
+}

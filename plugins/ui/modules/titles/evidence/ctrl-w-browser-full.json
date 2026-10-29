@@ -1,0 +1,154 @@
+{
+  "passed": true,
+  "browser": "145.0.7632.6",
+  "sourceHashes": {
+    "model.js": "42300a6b02bd4d55257b39fca0f3a1dd015f0d0503f2e64bfedd9f0d3572ef0b",
+    "metadata.js": "35d70ec7d71fad44184ecd127e5f6c31e51a006a3442a6c96187f0044a412e69",
+    "client.js": "685c766b26da15ae6cf3e54cd41ee6f8e3c7ac08a95c1e2d61cfbc93fd4f8681",
+    "native/keyboard-action-dispatcher.ts": "145d54685ddf7e2a134c6eede10322fa5bea31cf9257dffc0ececd7a68dca5f2"
+  },
+  "verificationScope": {
+    "productionCode": "Global tab projection, presentation, completion, keyboard, close, reorder, cleanup handlers, and native keyboard-action dispatcher source",
+    "fixtureOwned": "Bridge snapshots, router commits, native row callbacks, hook effect adapter, Ctrl+W action routing, and per-draft form payloads",
+    "excluded": "OS/Electron menu accelerators, native Paseo React form state persistence, and actual host installation"
+  },
+  "results": [
+    {
+      "name": "single click replaces exactly one preview across workspaces",
+      "passed": true
+    },
+    {
+      "name": "sidebar double click pins the selected conversation",
+      "passed": true
+    },
+    {
+      "name": "tab double click pins the exact global conversation",
+      "passed": true
+    },
+    {
+      "name": "double click pin intent follows delayed workspace navigation without pinning the previous agent",
+      "passed": true
+    },
+    {
+      "name": "composer draft input pins without sending a message",
+      "passed": true
+    },
+    {
+      "name": "IME composition input pins the owning conversation",
+      "passed": true
+    },
+    {
+      "name": "search and command inputs leave the preview temporary",
+      "passed": true
+    },
+    {
+      "name": "workspace setup dialog input does not pin a conversation",
+      "passed": true
+    },
+    {
+      "name": "composer input with a stale route refuses to pin another workspace",
+      "passed": true
+    },
+    {
+      "name": "same agent ID on another host remains distinct while the remote draft is pinned",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+Tab and Ctrl+Shift+Tab follow reordered visible tabs and wrap across hosts",
+      "passed": true
+    },
+    {
+      "name": "file and terminal tabs cycle in displayed order while terminal input owns focus",
+      "passed": true
+    },
+    {
+      "name": "keyboard navigation preserves the preview, pin flags, storage, and tab order",
+      "passed": true
+    },
+    {
+      "name": "archived conversations are excluded from both the visible row and keyboard cycle",
+      "passed": true
+    },
+    {
+      "name": "rapid trusted key presses advance before delayed cross-workspace navigation commits",
+      "passed": true
+    },
+    {
+      "name": "a stale secondary pane rendered last does not replace the focused pane's native tabs",
+      "passed": true
+    },
+    {
+      "name": "single-tab cycling avoids navigation and missing selection chooses the first or last tab",
+      "passed": true
+    },
+    {
+      "name": "settings, visible overlays, prior default prevention, and alternate modifiers keep their focus",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+Tab during IME composition does not switch the conversation",
+      "passed": true
+    },
+    {
+      "name": "unmount removes the committed keyboard source instead of navigating a stale pane",
+      "passed": true
+    },
+    {
+      "name": "multiple new-workspace tabs preserve pinned conversations and the existing preview without virtual metadata lookup",
+      "passed": true
+    },
+    {
+      "name": "tab activation preserves fixture-owned form payloads independently for each draft",
+      "passed": true
+    },
+    {
+      "name": "trusted keyboard cycling includes new-workspace drafts in both directions and wraps back to conversations",
+      "passed": true
+    },
+    {
+      "name": "middle-click closing a draft selects its neighbor and keeps all other conversations and drafts",
+      "passed": true
+    },
+    {
+      "name": "draft reordering affects display slots without adding virtual tabs to native layout persistence",
+      "passed": true
+    },
+    {
+      "name": "exact agent completion replaces its draft slot with a pinned agent while preserving the prior preview",
+      "passed": true
+    },
+    {
+      "name": "an intermediate native draft hands off to the exact final agent without duplicating the slot",
+      "passed": true
+    },
+    {
+      "name": "closing a terminal handoff delegates its real tab id and does not resurrect a native duplicate",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+W closes the current agent through global X once before native priority100 and preserves preview and pins",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+W closes a creation tab through its X callback and keeps agent metadata unchanged",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+W delegates each current native file and terminal close exactly once",
+      "passed": true
+    },
+    {
+      "name": "Ctrl+W ignores stale panes and cleanup restores native dispatcher handling",
+      "passed": true
+    },
+    {
+      "name": "plugin reload removes its bridge subscription and bar, then projects existing drafts exactly once",
+      "passed": true
+    },
+    {
+      "name": "dispose removes production listeners and reload registers exactly one set",
+      "passed": true
+    }
+  ],
+  "pageErrors": []
+}

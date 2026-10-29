@@ -1,0 +1,24 @@
+{
+  "name": "sidebar-title-sync",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "files": ["paseo-plugin.json", "index.client.tsx", "index.server.ts", "client/", "server/", "shared/", "tests/", "scripts/", "docs/", "evidence/", "README.md", "VALIDATION.md", "CHANGELOG.md", "host/README.md", "host/BASELINE.json", "host/LICENSE", "host/sidebar-title-resolver.patch"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check:bundle": "esbuild index.client.tsx --bundle --platform=browser --format=esm --packages=external --outfile=.check/client.js && esbuild index.server.ts --bundle --platform=node --format=esm --packages=external --outfile=.check/server.js",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.12.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "~19.2.0",
+    "esbuild": "0.28.2",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}

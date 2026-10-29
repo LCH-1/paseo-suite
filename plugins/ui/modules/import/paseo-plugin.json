@@ -1,0 +1,6 @@
+{
+  "id": "session-import",
+  "name": "Session Import",
+  "description": "프로젝트 경로·모델 필터가 있는 공통 세션 불러오기",
+  "requirements": { "paseo": ">=0.12.0 <0.13.0" }
+}

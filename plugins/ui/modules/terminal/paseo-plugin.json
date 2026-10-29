@@ -1,0 +1,9 @@
+{
+  "id": "terminal-tabs",
+  "name": "Terminal Tabs",
+  "description": "터미널처럼 탭으로 전환하는 가벼운 에이전트 대화 화면",
+  "media": ["assets/terminal-tabs-preview.png"],
+  "requirements": {
+    "paseo": ">=0.12.0 <0.13.0"
+  }
+}

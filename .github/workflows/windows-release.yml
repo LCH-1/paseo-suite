@@ -1,0 +1,75 @@
+name: Windows Suite
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: paseo-suite
+      - uses: actions/checkout@v4
+        with:
+          repository: LCH-1/paseo
+          ref: suite-core-v1.0.0
+          path: paseo-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Core dependencies and patched runtime
+        working-directory: paseo-core
+        run: |
+          npm ci --ignore-scripts
+          npm run postinstall
+          npm run build:server
+          npm run build:app-deps
+      - name: Electron web export
+        working-directory: paseo-core/packages/app
+        env:
+          PASEO_WEB_PLATFORM: electron
+        run: npx expo export --platform web
+      - name: Desktop main
+        working-directory: paseo-core
+        run: |
+          npm run build:main --workspace=@getpaseo/desktop
+          git restore -- packages/cli/bin/paseo
+          git diff --exit-code
+      - name: Suite verification and package
+        working-directory: paseo-suite
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm run lint
+          npm run build
+          npm test
+          npm run package:win
+          npm run smoke
+      - name: Upload private build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: paseo-suite-windows-x64
+          path: |
+            paseo-suite/dist/installers/*.exe
+            paseo-suite/dist/installers/*.blockmap
+            paseo-suite/dist/installers/latest.yml
+            paseo-suite/dist/suite-lock.json
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: paseo-suite
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $assets = @(Get-ChildItem dist/installers -File | Where-Object { $_.Name -match '\.(exe|blockmap)$|^latest\.yml$' } | ForEach-Object FullName)
+          $assets += (Resolve-Path dist/suite-lock.json).Path
+          $sums = $assets | ForEach-Object { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLower(), (Split-Path $_ -Leaf) }
+          $sums | Set-Content dist/SHA256SUMS -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME @assets dist/SHA256SUMS --repo $env:GITHUB_REPOSITORY --title "Paseo Suite $env:GITHUB_REF_NAME" --generate-notes

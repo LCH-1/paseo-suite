@@ -1,0 +1,5 @@
+{
+  "id": "settings-sync", "name": "Settings Sync",
+  "description": "암호화된 백업으로 호스트, 앱 설정, 플러그인 환경을 다른 기기에 복원합니다.",
+  "requirements": { "paseo": ">=0.12.0 <0.13.0" }
+}

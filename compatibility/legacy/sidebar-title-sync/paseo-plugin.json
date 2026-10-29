@@ -1,0 +1,6 @@
+{
+  "id": "sidebar-title-sync",
+  "name": "Sidebar Title Sync",
+  "description": "원래 대화 제목을 보존하면서 내장 탭에 프로젝트와 워크스페이스를 두 줄로 표시합니다.",
+  "requirements": { "paseo": ">=0.12.0 <0.14.0" }
+}

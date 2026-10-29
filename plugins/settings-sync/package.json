@@ -1,0 +1,42 @@
+{
+  "name": "paseo-settings-sync",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LCH-1/paseo-suite.git"
+  },
+  "files": [
+    "paseo-plugin.json",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/",
+    "install/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check:dist": "node scripts/build.mjs --check",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:installers": "node scripts/check-installers.mjs",
+    "check:client": "esbuild index.client.tsx --bundle --platform=browser --format=esm --packages=external --outfile=.check/client.js",
+    "check:server": "esbuild index.server.ts --bundle --platform=node --format=esm --packages=external --outfile=.check/server.js"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.12.0",
+    "@getpaseo/plugin": "0.12.0",
+    "@getpaseo/protocol": "0.12.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "~19.2.0",
+    "esbuild": "0.28.2",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "passed": true,
+  "browser": "145.0.7632.6",
+  "sourceHashes": {
+    "model.js": "42300a6b02bd4d55257b39fca0f3a1dd015f0d0503f2e64bfedd9f0d3572ef0b",
+    "metadata.js": "35d70ec7d71fad44184ecd127e5f6c31e51a006a3442a6c96187f0044a412e69",
+    "client.js": "6c27fdeba242f0a92dd77e7d08f6dd8d2ea1903cdaee92ffa7b2a5d409916842",
+    "native/keyboard-action-dispatcher.ts": "145d54685ddf7e2a134c6eede10322fa5bea31cf9257dffc0ececd7a68dca5f2"
+  },
+  "verificationScope": {
+    "productionCode": "Global tab projection, presentation, completion, keyboard, close, reorder, cleanup handlers, and native keyboard-action dispatcher source",
+    "fixtureOwned": "Bridge snapshots, router commits, native row callbacks, hook effect adapter, Ctrl+W action routing, and per-draft form payloads",
+    "excluded": "OS/Electron menu accelerators, native Paseo React form state persistence, and actual host installation"
+  },
+  "results": [
+    {
+      "name": "trusted Ctrl+W closes the current agent through global X once before native priority100 and preserves preview and pins",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+W closes a creation tab through its X callback and keeps agent metadata unchanged",
+      "passed": true
+    },
+    {
+      "name": "trusted Ctrl+W delegates each current native file and terminal close exactly once",
+      "passed": true
+    },
+    {
+      "name": "Ctrl+W ignores stale panes and cleanup restores native dispatcher handling",
+      "passed": true
+    }
+  ],
+  "pageErrors": []
+}

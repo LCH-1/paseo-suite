@@ -1,0 +1,42 @@
+{
+  "name": "terminal-tabs",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "files": [
+    "paseo-plugin.json",
+    "README.md",
+    "assets/",
+    "index.client.ts",
+    "index.client.tsx",
+    "index.server.ts",
+    "index.server.tsx",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check:bundle": "esbuild index.client.tsx --bundle --platform=browser --format=esm --packages=external --outfile=.preview-dist/plugin.js",
+    "test": "tsx --test tests/*.test.tsx",
+    "preview": "vite --config .preview/vite.config.mts --host 127.0.0.1",
+    "preview:build": "vite build --config .preview/vite.config.mts"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.12.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "~19.2.0",
+    "@types/react-dom": "19.1.0",
+    "@types/react-test-renderer": "^19.3.0",
+    "esbuild": "0.28.2",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-web": "^0.21.4",
+    "react-test-renderer": "19.1.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "id": "terminal-tabs",
+  "name": "Paseo UI",
+  "description": "전역 탭, 제목 표시, 호스트 순서, 기록 불러오기와 터미널 대화 화면",
+  "requirements": { "paseo": ">=0.12.0 <0.13.0" }
+}
