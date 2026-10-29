@@ -10,3 +10,5 @@ dist/
 plugins/ui/modules/titles/CHANGELOG.md
 plugins/ui/modules/titles/VALIDATION.md
 plugins/ui/modules/titles/docs/
+plugins/ui/modules/titles/evidence/
+plugins/ui/modules/titles/host/
