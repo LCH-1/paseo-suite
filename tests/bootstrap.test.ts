@@ -93,6 +93,29 @@ test("offline setup preserves every non-plugin config value, title settings and 
       ),
     );
     assert.equal(flag.values.enabled, false);
+    current.plugins["terminal-tabs"].enabled = false;
+    current.plugins.aster.enabled = true;
+    current.plugins["settings-sync"].enabled = false;
+    await fs.writeFile(path.join(home, "config.json"), JSON.stringify(current));
+    const nextLock = { ...lock, release: "next" };
+    await fs.writeFile(
+      path.join(resourcesPath, "suite/suite-lock.json"),
+      JSON.stringify({
+        ...nextLock,
+        treeHash: createHash("sha256")
+          .update(JSON.stringify(nextLock))
+          .digest("hex"),
+      }),
+    );
+    await prepare(context);
+    const upgraded = JSON.parse(
+      await fs.readFile(path.join(home, "config.json"), "utf8"),
+    );
+    assert.equal(upgraded.plugins["terminal-tabs"].enabled, false);
+    assert.equal(upgraded.plugins.aster.enabled, true);
+    assert.equal(upgraded.plugins["settings-sync"].enabled, false);
+    assert.equal(await fs.readFile(settings, "utf8"), edited);
+    assert.deepEqual(upgraded.custom, original.custom);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
