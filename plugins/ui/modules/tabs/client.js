@@ -275,11 +275,12 @@
       for (const serverId of Object.keys(state)) {
         const workspacePrefix = "sidebar-workspace-row-" + serverId + ":";
         const agentPrefix = "agent-row-" + serverId + "-";
-        if (!id.startsWith(workspacePrefix) && !id.startsWith(agentPrefix)) continue;
+        const activityPrefix = "sidebar-activity-session-" + serverId + "-";
+        if (!id.startsWith(workspacePrefix) && !id.startsWith(agentPrefix) && !id.startsWith(activityPrefix)) continue;
         if (actionInside(element, node)) return;
         pinIntent = { serverId, expires: Date.now() + 2500,
           ...(id.startsWith(workspacePrefix) ? { workspaceId: id.slice(workspacePrefix.length) }
-            : { agentId: id.slice(agentPrefix.length) }) };
+            : { agentId: id.slice(id.startsWith(activityPrefix) ? activityPrefix.length : agentPrefix.length) }) };
         flushPinIntent();
         return;
       }

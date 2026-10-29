@@ -745,6 +745,30 @@ test("상단 탭과 사이드바의 중첩 텍스트 더블클릭은 고정하�
   assert.equal(app.model.preview(), null);
 });
 
+test("활동 사이드바 중첩 텍스트 더블클릭은 미리보기 대화를 고정한다", () => {
+  const app = harness();
+  app.render(app.props("b", [row("b")]));
+  app.setLayout("b", row("b").tab);
+  const activity = element({ "data-testid": "sidebar-activity-session-host-agent-b" }, null, "BUTTON");
+  app.emit("dblclick", { target: element({}, activity, "BUTTON") });
+  assert.equal(app.model.preview().agentId, "agent-b");
+  app.emit("dblclick", { target: element({}, activity) });
+  assert.equal(app.model.preview(), null);
+  assert.equal(app.model.isPinned(app.model.entries()[0].key), true);
+});
+
+test("활동 사이드바 더블클릭은 늦게 열린 대화를 고정하고 다른 미리보기에는 적용하지 않는다", () => {
+  const app = harness();
+  app.render(app.props("a", [row("a")]));
+  const activity = element({ "data-testid": "sidebar-activity-session-host-agent-b" });
+  app.emit("dblclick", { target: element({}, activity) });
+  assert.equal(app.model.preview().agentId, "agent-a");
+  app.render(app.props("b", [row("b")]));
+  app.setLayout("b", row("b").tab);
+  assert.equal(app.model.preview(), null);
+  assert.equal(app.model.entries()[0].agentId, "agent-b");
+});
+
 test("사이드바 워크스페이스 더블클릭을 늦은 라우팅과 레이아웃 반영 이후 한 번 적용한다", () => {
   const app = harness();
   app.render(app.props("a", [row("a")]));
