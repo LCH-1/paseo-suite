@@ -56,6 +56,8 @@ for (const [destination, source, id] of sources) {
   }
   const files = [];
   async function copy(relative) {
+    if (relative.split(/[\\/]/).some((part) => ["evidence", "host", "deployment", "docs"].includes(part))) return;
+    if (/\.md$/i.test(relative) && path.basename(relative) !== "README.md") return;
     const file = path.join(source, relative);
     let stat;
     try {
