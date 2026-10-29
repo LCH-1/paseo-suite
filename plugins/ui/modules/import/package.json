@@ -1,0 +1,21 @@
+{
+  "name": "paseo-session-import",
+  "version": "0.1.1",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "files": ["paseo-plugin.json", "index.client.ts", "client/", "README.md"],
+  "scripts": {
+    "test": "tsx --test server/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify:bundle": "tsx server/check-bundle.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "engines": { "node": ">=22.12.0" },
+  "packageManager": "pnpm@12.4.1"
+}

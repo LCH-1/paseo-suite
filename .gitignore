@@ -1,0 +1,12 @@
+node_modules/
+.check/
+dist/
+.local/
+*.log
+*.tmp
+.agent/
+.env*
+!.env.example
+plugins/ui/modules/titles/CHANGELOG.md
+plugins/ui/modules/titles/VALIDATION.md
+plugins/ui/modules/titles/docs/

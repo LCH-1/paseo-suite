@@ -1,0 +1,320 @@
+[
+  {
+    "id": "terminal-tabs",
+    "version": "0.1.2",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "54f087e9cb74baf34dffa9a1a971725e598b0d546770658585ea33200395d992"
+      },
+      {
+        "path": "index.client.tsx",
+        "sha256": "c8cfa8ee34ff4a69611003def6a9dbcddc305c8d874079f143b7c1abc445ab13"
+      },
+      {
+        "path": "client/paseo.ts",
+        "sha256": "ba502af6175014d6b04cd1f7067cc322c3d5fc05e54453bbd7e9507c46e255fa"
+      },
+      {
+        "path": "client/session.ts",
+        "sha256": "d34bc3b41a0a8e3ab63c6bd4af02e5ec093f6f9f7c679d54511c99f83bca6638"
+      },
+      {
+        "path": "client/terminal.tsx",
+        "sha256": "34e413182eedae2f48a6f56a4157c47293f469d596ee725d49fc203f6ccebeea"
+      },
+      {
+        "path": "client/timeline.tsx",
+        "sha256": "ce540d8f8c3e065752392200a2315aa9e27a15e26d01cad0b5568d1a6ac03d2e"
+      },
+      {
+        "path": "client/web.ts",
+        "sha256": "876a7e0d44f1bf6e206701dd78f5edb58ecc0a72132b35067f528b79fe677c50"
+      },
+      {
+        "path": "assets/terminal-tabs-preview.png",
+        "sha256": "dd6248178ea6ac1670529318283df9193b0c6ebc0cb8cc01590552a93045642f"
+      }
+    ]
+  },
+  {
+    "id": "global-workspace-tabs",
+    "version": "0.1.2",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "1a20bdaae7ee88d6c6dfa7b92f6af0ef619a46cab2b43b0bb6890cdde4b83fb4"
+      },
+      {
+        "path": "index.client.ts",
+        "sha256": "e88e173fb69f27b23ccf4e381f3ddb871c56c0b2d16da2d4d2d39287d6a70ac8"
+      }
+    ]
+  },
+  {
+    "id": "host-order",
+    "version": "0.1.2",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "6d1974b8b6aa7483720618939f746500f179037a7bdf21bbc18a0745c94491f0"
+      },
+      {
+        "path": "index.client.tsx",
+        "sha256": "bed2f3d467489cbf3781fc79f1f51890d20902fcd0c1193d2ad7cd46655329aa"
+      },
+      {
+        "path": "client/bridge.ts",
+        "sha256": "0923fd27613acbce4e185933153e091c27c6715a5f689f71dd70e2308fb03bae"
+      },
+      {
+        "path": "client/controller.ts",
+        "sha256": "497de75f4aca333fa6122ad2e2d64bd61a54828c33b36a0335895f9c3c9b7e89"
+      },
+      {
+        "path": "client/module-maps.ts",
+        "sha256": "8d7e024cc1fd29af6287dcc75ecf08aa2f81544964b88ac80357dbbc7d314b4c"
+      },
+      {
+        "path": "client/resolve-modules.ts",
+        "sha256": "abb865186dd85d984e3078ebfdb82f76b6c8165997a3b9dd68ad38cafa165faf"
+      },
+      {
+        "path": "client/settings.tsx",
+        "sha256": "8a56a47d8a3a4df469632d45749054be841caa05c1ef6baec70a74bbb137ddb7"
+      },
+      {
+        "path": "client/sidebar-drag.ts",
+        "sha256": "4485c39f0831f557a380d7e536ebaaeaa5291bfa691ba211289cec5e01424dd4"
+      }
+    ]
+  },
+  {
+    "id": "sidebar-title-sync",
+    "version": "0.3.0",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "ab7959d5d76ec35e3f3e2cbf45660d0967e43134b1ee9f928aba0968dc8e77e5"
+      },
+      {
+        "path": "index.client.tsx",
+        "sha256": "ab1ba2ad953d7ac68517ccb1d2d76dbcaa6e20117b68dec09fb905c7d84bdcea"
+      },
+      {
+        "path": "index.server.ts",
+        "sha256": "1512f088ebe6771cf2e92084d35d1df08abc74bd291c60d38b29e3c4d0babc60"
+      },
+      {
+        "path": "client/controller.ts",
+        "sha256": "9f34e5e7bfa4cc2585830fc9d764e1a97e67b451775b47874e360263a0da804a"
+      },
+      {
+        "path": "client/project-title-cache.ts",
+        "sha256": "8aab2c6440d570a9a06904834483d5d67a46554e50cab5c4a41df27818f78d3e"
+      },
+      {
+        "path": "client/sdk-extension.ts",
+        "sha256": "bc99cf4a92b501cfcb2740dc8779cba8bc9a22595cc39490534a35b352a84763"
+      },
+      {
+        "path": "client/settings-screen.tsx",
+        "sha256": "11bdff52d8ff0eab98664f07ffe8a8b3df789b6d1be265928771a9aaab3148c0"
+      },
+      {
+        "path": "client/title-resolver.ts",
+        "sha256": "d67c2ef33055475bcb4c0aad93efd6a78b0f2db9677961e05fb835cd39017205"
+      },
+      {
+        "path": "server/settings.ts",
+        "sha256": "01b71ebeb87002503dedf4adb64bf1ea611b82514dc446cc331bcea764e3fb58"
+      },
+      {
+        "path": "shared/settings.ts",
+        "sha256": "fb3414715c182f3923e7f9627c1d0f562ea91962b58bc576a1b21406f5353f89"
+      }
+    ]
+  },
+  {
+    "id": "session-import",
+    "version": "0.1.1",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "53402f96cc02ed62be8762ed9a34b909e00f7e4015a4d191691a013ee37c912f"
+      },
+      {
+        "path": "index.client.ts",
+        "sha256": "d9b377c4a40b6aab0e1922e7aaed4befd966b107cc66efbec6336d0d916dccd9"
+      },
+      {
+        "path": "client/import-component.ts",
+        "sha256": "66b30c2a6e53e06deb77e79d42c0ce20f4065029cd9b4402cb778a8ad60617c1"
+      },
+      {
+        "path": "client/import-presentation.ts",
+        "sha256": "381b6e1131a312bdf01a3a3acee9b5a4d0ea59729b8557969aef2968d620587a"
+      },
+      {
+        "path": "client/import-scope.ts",
+        "sha256": "50b9958d00ec3fa6cb1115b4ead17bf7cebbfb879800c8d6727e458cb7a4b597"
+      },
+      {
+        "path": "client/import-sheet-source.tsx",
+        "sha256": "043dee81ab99a664f22a913d3f4125e61aa76510ba86a1b878ac19fc889d5d1d"
+      },
+      {
+        "path": "client/import-sheet-view-model.tsx",
+        "sha256": "15c423d9f415310eadc9b596b9936e000fdbb0bf37e8687dcd9b997be6a9afbe"
+      },
+      {
+        "path": "client/new-workspace-scope.ts",
+        "sha256": "7f824882cccbf020544dd8151ea69d3eb53fd1adabb5fdf918f1ddee7acced4f"
+      }
+    ]
+  },
+  {
+    "id": "aster",
+    "version": "0.1.13",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "3367981d09df20caa51f84434ab35f5f32d266dc87f5bb4c483754176ba87336"
+      },
+      {
+        "path": "index.client.ts",
+        "sha256": "320eff2e6739f9e38a0cf25117bfad61f6999e9fc9b0e62e9a94458b5941b257"
+      },
+      {
+        "path": "index.server.ts",
+        "sha256": "c04eb63626af90a252c3b16df9793e8c872891eb8681301b404d9dab92ba2a8b"
+      },
+      {
+        "path": "client/credential-relay.ts",
+        "sha256": "170bf0c97202f84e93926bbe5649e71d028c9d8e92ac5a43b8bf0a2dfc3e1b8f"
+      },
+      {
+        "path": "client/menu.ts",
+        "sha256": "699992944c375c1b03f3089c7684b6aafc9ebfe9f33940bc5063d799534d5b25"
+      },
+      {
+        "path": "client/modules.ts",
+        "sha256": "f719bc87ef1ea3c9def5daaae6c6d728323d2ace6601ad2e15975de2116f612e"
+      },
+      {
+        "path": "server/accounts.ts",
+        "sha256": "4659d021959bcc42f03392fcdba7d089576c161b32204bfaaed493f5c45ccf06"
+      },
+      {
+        "path": "server/auth-recovery.ts",
+        "sha256": "2a075346c0c174076524f4aae0eb602c90b46f39823b7e8d11df6c17aa3ade9d"
+      },
+      {
+        "path": "server/build-credential-runtime.cjs",
+        "sha256": "bb19c696014294ba1f2ee8032c5a8dd4476c1bc52e89f110a9c6e63f85114879"
+      },
+      {
+        "path": "server/configure-menu.ts",
+        "sha256": "8365fadaf261ced158c346087a0168619487190fe2bf0cfc9f251f74af3a6bdc"
+      },
+      {
+        "path": "server/controller.ts",
+        "sha256": "2365f30412b9ed3dffa9d31c7b566b754ef09be144cc8d19320c0cdbd528d9f2"
+      },
+      {
+        "path": "server/credential-runtime.d.ts",
+        "sha256": "88ca51c11562c95220e9b0c8478491e0974e5eda314291c2dcd5d5a42c31bfce"
+      },
+      {
+        "path": "server/credential-runtime.js",
+        "sha256": "48d82de31fd0ffdc82f014f89af6e7d5bda3c9be3fc1c97d97227893a04f6122"
+      },
+      {
+        "path": "server/credential-sharing.ts",
+        "sha256": "706f420b307b97c5a5fe935d3b7048f275b383c9259f1a6f49da7ca2669554e7"
+      },
+      {
+        "path": "server/credential-store.ts",
+        "sha256": "06f4dae3696a98400dffbfdf960380f9902d76688fae5c3eb1105c66e4a0e69c"
+      },
+      {
+        "path": "server/credential-types.ts",
+        "sha256": "bd8becb1dd88477a5d4f97c14b16c57e3281fe17d7ed91df083f25bbe74158de"
+      },
+      {
+        "path": "server/menu.ts",
+        "sha256": "651f9a8aace23e3af2184ea272603fa52a53efef4d2aae7dfcc2c2898ecf40d6"
+      },
+      {
+        "path": "server/paseo.ts",
+        "sha256": "d011ea638b8276ef3db07faa3db7e01a8539a5766c58b83f6ed59af86e8bc8ce"
+      },
+      {
+        "path": "server/profile-discovery.ts",
+        "sha256": "ec49d2e96816ad860b6016e6388d88bf98a6acb45b5712d46d3385543b3ba3b5"
+      },
+      {
+        "path": "server/profile-usage-runtime.d.ts",
+        "sha256": "02b2a05548a686f3a57eb86bac1cf05f5ca26a857d7c36ef70376ca81eb8c6f0"
+      },
+      {
+        "path": "server/profile-usage-runtime.js",
+        "sha256": "710b4119924de709d0156a905a0bf05362999c52f1c831255b323cd2a2c80a69"
+      },
+      {
+        "path": "server/routing-cache.ts",
+        "sha256": "94a018dc3b2fd70b3ec942704f772a1a28a6458eb816c5099422ab093fe2d83d"
+      },
+      {
+        "path": "server/scheduler.ts",
+        "sha256": "e69e5b1d0a9a9a63f189754b72921cc368c71b87170ec1f02b09628e3a32e09b"
+      },
+      {
+        "path": "server/subscription.ts",
+        "sha256": "3e67927d824b4edbf3d46b1ace3763db848b3d975fab43448ba9c3882fbd2aa7"
+      }
+    ]
+  },
+  {
+    "id": "claude-windows-usage",
+    "version": "0.12.0",
+    "files": [
+      {
+        "path": "paseo-plugin.json",
+        "sha256": "444c9ce3db9f18efcdf0d1bea372ca4ed0a78eb6c78c5ffab5746022f3c9becc"
+      },
+      {
+        "path": "index.server.ts",
+        "sha256": "0b48e3b460b72e9129f9e83f4bcbb953150aadb319e8e6e9ea91963f8d777a9c"
+      },
+      {
+        "path": "server/claude-provider-config.ts",
+        "sha256": "fe3cff0926b5306617beaf578fb077eb7593112e6a8daefb6ec16928465b9a4d"
+      },
+      {
+        "path": "server/stores.ts",
+        "sha256": "e9ba7262d1bfd76a74541731136779108004d59858c3b6931d5a8a947c7e0989"
+      },
+      {
+        "path": "server/usage.ts",
+        "sha256": "de3448f3e119ef136befe13d961c7bbc01ed244ee01e60c402dd9f6d58925110"
+      },
+      {
+        "path": "server/windows-accounts.ts",
+        "sha256": "f0969cd87b0db8fb6f6ee87fb85584b452b69782a2848924460f9feb5252e130"
+      },
+      {
+        "path": "server/windows-credentials.ts",
+        "sha256": "4a2ee8526fdb5e52444ffbf67e7f23e1cd1158d7522ca68b4b61283ccbdd04c1"
+      },
+      {
+        "path": "shared/input.ts",
+        "sha256": "8d73118c70ef46e5ed55d123ee71889bcf63ff3682452a298b99c650b4e21f09"
+      },
+      {
+        "path": "icon.svg",
+        "sha256": "ef6a580639ba22358967d7b1ea239b902f0fadf28a32fa60d71e42eeb188a3f2"
+      }
+    ]
+  }
+]

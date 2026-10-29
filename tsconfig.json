@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM"], "jsx": "react-jsx", "strict": true,
+    "skipLibCheck": true, "noEmit": true, "esModuleInterop": true, "allowImportingTsExtensions": true,
+    "allowSyntheticDefaultImports": true, "allowJs": true, "checkJs": false,
+    "types": ["node", "react"]
+  },
+  "include": ["plugins/**/*.ts", "plugins/**/*.tsx", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/tests/**", "**/*.test.ts", "**/*.test.tsx", "**/check-*.ts", "plugins/ui/modules/import/client/import-sheet-source.tsx", "plugins/ui/modules/import/client/import-sheet-view-model.tsx"]
+}

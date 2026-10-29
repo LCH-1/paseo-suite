@@ -1,0 +1,33 @@
+{
+  "name": "paseo-suite",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "package:win": "node tools/package.mjs",
+    "smoke": "node tools/smoke-packaged.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "tsx --test tests/*.test.ts",
+    "format": "prettier --write tools tests plugins/ui/index.client.tsx plugins/ui/index.server.ts plugins/ui/shared plugins/ui/client"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.12.0",
+    "@getpaseo/plugin": "0.12.0",
+    "@getpaseo/protocol": "0.12.0",
+    "@types/node": "26.6.5",
+    "@types/react": "19.2.0",
+    "@types/react-test-renderer": "19.1.0",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.1",
+    "prettier": "3.6.2",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-test-renderer": "19.1.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.2",
+    "zod": "4.4.3"
+  }
+}

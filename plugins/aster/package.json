@@ -1,0 +1,49 @@
+{
+  "name": "paseo-aster",
+  "version": "0.2.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LCH-1/paseo-suite.git"
+  },
+  "files": [
+    "paseo-plugin.json",
+    "index.server.ts",
+    "index.client.ts",
+    "client/",
+    "README.md",
+    "server/accounts.ts",
+    "server/auth-recovery.ts",
+    "server/subscription.ts",
+    "server/controller.ts",
+    "server/paseo.ts",
+    "server/scheduler.ts",
+    "server/routing-cache.ts",
+    "server/profile-discovery.ts",
+    "server/profile-usage-runtime.js",
+    "server/profile-usage-runtime.d.ts",
+    "server/usage-revision.ts",
+    "server/legacy-credential-rpc.ts"
+  ],
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test server/*.test.ts",
+    "verify:bundle": "tsx server/check-bundle.ts",
+    "status": "tsx server/status.ts",
+    "configure": "tsx server/setup.ts"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.12.0",
+    "@types/node": "^22.20.5",
+    "esbuild": "0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@12.4.1"
+}
