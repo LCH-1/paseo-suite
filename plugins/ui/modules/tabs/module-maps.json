@@ -481,5 +481,24 @@
     "registry": 3681,
     "newWorkspaceTabs": 5023,
     "tabPresence": 5352
+  },
+  "sidebarActivity@af03a24ed768": {
+    "react": 37,
+    "rows": 5810,
+    "presentation": 5072,
+    "navigation": 4243,
+    "sessions": 3910,
+    "layouts": 4140,
+    "snapshots": 4181,
+    "hostRoutes": 4247,
+    "tabGroups": 5817,
+    "keyboardActions": 4909,
+    "settings": 890,
+    "reopen": 5790,
+    "shortcuts": 4369,
+    "titles": 4813,
+    "registry": 3932,
+    "newWorkspaceTabs": 5359,
+    "tabPresence": 5816
   }
 }
