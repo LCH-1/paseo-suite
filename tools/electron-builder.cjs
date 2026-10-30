@@ -21,7 +21,7 @@ module.exports = {
   afterSign: requireCore(
     path.join(core, "packages/desktop/scripts/after-sign.js"),
   ).default,
-  extraMetadata: { version: "1.0.2" },
+  extraMetadata: { version: "1.0.3" },
   directories: {
     ...base.directories,
     output: path.join(root, "dist/installers"),
@@ -49,8 +49,8 @@ module.exports = {
   nsis: { ...base.nsis, include: path.join(root, "tools/installer.nsh") },
   win: {
     ...base.win,
-    artifactName: "Paseo-Suite-1.0.2-${arch}.${ext}",
+    artifactName: "Paseo-Suite-1.0.3-${arch}.${ext}",
     target: [{ target: "nsis", arch: ["x64"] }],
   },
-  mac: { ...base.mac, artifactName: "Paseo-Suite-1.0.2-${arch}.${ext}" },
+  mac: { ...base.mac, artifactName: "Paseo-Suite-1.0.3-${arch}.${ext}" },
 };
