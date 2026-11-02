@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountSecureDirectory, expiredAccounts, mapReports, reportsSchema, UsageReader, type Account } from "./accounts.ts";
+import { accountSecureDirectory, bootstrapAccounts, expiredAccounts, mapReports, reportsSchema, UsageReader, type Account } from "./accounts.ts";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -13,6 +13,48 @@ test("프로필 사용량 보완 보고서도 선택에 반영하고 기본 보�
   const fallback = { ...report(), id: "claude-profiles:account.org-a", sourceId: "claude-profiles" };
   assert.equal(mapReports(accounts, [fallback], {})[0].id, "a");
   assert.equal(mapReports(accounts, [fallback, report()], {}).length, 1);
+});
+
+test("5시간 창이 빠진 정상 보고서는 사용량을 만들지 않고 CLI 확인 후보로 선택한다", () => {
+  const partial = report();
+  partial.report.windows = partial.report.windows.filter(window => window.id === "weekly");
+  assert.deepEqual(mapReports(accounts, [partial], {}, now), []);
+  assert.deepEqual(bootstrapAccounts(accounts, [partial], now).map(account => account.id), ["a"]);
+  assert.equal(bootstrapAccounts([...accounts, { ...accounts[0], id: "alias" }], [partial], now).length, 1);
+  const shortOnly = report();
+  shortOnly.report.windows = shortOnly.report.windows.filter(window => window.id === "five_hour");
+  assert.equal(bootstrapAccounts(accounts, [shortOnly], now).length, 1);
+});
+
+test("불완전한 창이라도 확인된 한도가 소진되거나 오래되면 시작하지 않는다", () => {
+  const partial = report();
+  partial.report.windows = partial.report.windows.filter(window => window.id === "weekly");
+  for (const used of [99, 100]) {
+    partial.report.windows[0].usedPct = used;
+    assert.deepEqual(bootstrapAccounts(accounts, [partial], now), []);
+  }
+  partial.report.windows[0].usedPct = 20;
+  for (const fetchedAt of [new Date(now - 7 * 60_000).toISOString(), new Date(now + 1000).toISOString(), "invalid"]) {
+    assert.deepEqual(bootstrapAccounts(accounts, [{ ...partial, fetchedAt }], now), []);
+  }
+  partial.report.windows[0].resetsAt = new Date(now - 1).toISOString();
+  assert.deepEqual(bootstrapAccounts(accounts, [partial], now), []);
+});
+
+test("오류·인증거부·빈 창과 최신 소진은 오래된 일부 여유 보고서로 우회하지 않는다", () => {
+  const partial = report();
+  partial.report.windows = partial.report.windows.filter(window => window.id === "weekly");
+  const rejected = { ...partial, report: { status: "unavailable", problem: { kind: "rejected" } } };
+  for (const reports of [[partial, rejected], [rejected, partial], [{ ...partial, report: { status: "error" } }], [{ ...partial, report: { status: "available", windows: [] } }]]) {
+    assert.deepEqual(bootstrapAccounts(accounts, reports, now), []);
+  }
+  const newest = report();
+  newest.report.windows[0].usedPct = 100;
+  assert.deepEqual(bootstrapAccounts(accounts, [{ ...partial, fetchedAt: new Date(now - 1000).toISOString() }, newest], now), []);
+  assert.deepEqual(bootstrapAccounts(accounts, [partial, newest], now), []);
+  assert.deepEqual(bootstrapAccounts(accounts, [newest, partial], now), []);
+  const unknown = reportsSchema.parse([{ ...partial, report: { status: "available", windows: [{ id: "weekly", usedPct: null, resetsAt: null }] } }]);
+  assert.deepEqual(bootstrapAccounts(accounts, unknown, now), []);
 });
 
 test("기본 ID라도 이식된 프로필은 자체 저장소를 사용하고 기본 폴더 별칭은 기본 저장소를 사용한다", () => {

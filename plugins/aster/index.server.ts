@@ -1,5 +1,5 @@
 import type { PluginServerContext, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
-import { accountSecureDirectory, discoverAccounts, expiredAccounts, mapReports, paseoHome, readSettings, stateDirectory, UsageReader, type Account } from "./server/accounts";
+import { accountSecureDirectory, bootstrapAccounts, discoverAccounts, mapReports, paseoHome, readSettings, stateDirectory, UsageReader, type Account } from "./server/accounts";
 import { join } from "node:path";
 import { accountKey, RoutingCache } from "./server/routing-cache";
 import { needsAuthenticationRecovery } from "./server/auth-recovery";
@@ -87,8 +87,8 @@ export default function contribute(server: PluginServerContext) {
         const readings = mapReports(eligible, reports, settings.capacities);
         let selectedId = controller.choose(request.agentId, readings, Date.now())?.id ?? null;
         if (!selectedId && (request.reason === "create" || authenticationRecovery.has(request.agentId))) {
-          selectedId = controller.bootstrap(request.agentId, expiredAccounts(eligible, reports).map(account => account.id), Date.now());
-          if (selectedId) { bootstrapping.add(request.agentId); console.info(`[aster] session ${request.agentId}: 만료된 사용량을 CLI 정상 갱신 경로로 재개`); }
+          selectedId = controller.bootstrap(request.agentId, bootstrapAccounts(eligible, reports).map(account => account.id), Date.now());
+          if (selectedId) { bootstrapping.add(request.agentId); console.info(`[aster] session ${request.agentId}: 불완전하거나 만료된 사용량을 CLI 정상 확인 경로로 재개`); }
         }
         signal.throwIfAborted();
         if (!selectedId) {

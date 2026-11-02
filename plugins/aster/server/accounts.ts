@@ -297,6 +297,46 @@ export function expiredAccounts(
   });
 }
 
+/** Partial quota responses are not scores; the official CLI must check the missing limit. */
+export function bootstrapAccounts(
+  accounts: Account[],
+  reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
+) {
+  const expired = new Set(expiredAccounts(accounts, reports, now));
+  const seen = new Set<string>();
+  return accounts.filter((account) => {
+    const identity = account.identity ?? account.email?.toLowerCase() ?? account.home;
+    if (seen.has(identity)) return false;
+    const matching = matchingReports(account, reports);
+    const latest = matching
+      .filter((entry) => Number.isFinite(Date.parse(entry.fetchedAt)) && Date.parse(entry.fetchedAt) <= now)
+      .sort((a, b) => Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt) || Number(deniesUsage(b)) - Number(deniesUsage(a)))[0];
+    const windows = latest?.report.windows ?? [];
+    const limits = [
+      { id: "five_hour", reserve: policy.fiveHourReserve },
+      { id: "weekly", reserve: policy.weeklyReserve },
+    ];
+    const known = limits.flatMap((limit) => {
+      const window = windows.find((entry) => entry.id === limit.id);
+      return window ? [{ window, reserve: limit.reserve }] : [];
+    });
+    const partial = latest?.report.status === "available" && !deniesUsage(latest)
+      && now - Date.parse(latest.fetchedAt) <= policy.maxAge
+      && known.length > 0 && known.length < limits.length
+      && known.every(({ window, reserve }) => window.usedPct !== null
+        && window.usedPct >= 0 && window.usedPct < 100 - reserve
+        && (window.resetsAt === null ? window.usedPct === 0 : Date.parse(window.resetsAt) > now))
+      && !matching.some((entry) => Date.parse(entry.fetchedAt) >= Date.parse(latest.fetchedAt)
+        && Date.parse(entry.fetchedAt) <= now
+        && limits.some((limit) => (entry.report.windows ?? []).some((window) =>
+          window.id === limit.id && window.usedPct !== null && window.usedPct >= 100 - limit.reserve)));
+    if (!expired.has(account) && !partial) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 export class UsageReader {
   private cached: {
     at: number;
