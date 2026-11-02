@@ -1,10 +1,12 @@
 import path from "node:path";
+import { assertAppNavigationContext } from "./navigation-context.mjs";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 const root = path.resolve(import.meta.dirname, "..");
 const core = path.resolve(
   process.env.PASEO_CORE_ROOT ?? path.join(root, "../paseo-core"),
 );
+await assertAppNavigationContext(path.join(core, "packages/app/dist"));
 const require = createRequire(path.join(core, "package.json"));
 const result = spawnSync(
   process.execPath,
