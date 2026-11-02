@@ -77,7 +77,7 @@
       for (const entry of model.entries()) {
         const agent = cached(entry);
         if (agent) {
-          model.rememberTitle(entry.serverId, entry.agentId, agent.title);
+          if (entry.title !== agent.title) model.rememberTitle(entry.serverId, entry.agentId, agent.title);
           continue;
         }
         const session = sessionFor(entry);

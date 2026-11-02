@@ -35,6 +35,25 @@ function harness(refresh, entries = [{ serverId: "host", workspaceId: "workspace
 }
 const result = (title = "복원된 대화") => ({ agent: { id: "agent", workspaceId: "workspace", title }, project: { workspaceId: "workspace" } });
 
+test("unrelated session updates do not rewrite unchanged cached titles while renamed titles still update", async () => {
+  const app = harness(async () => result());
+  await setImmediate();
+  const rememberTitle = app.model.rememberTitle;
+  let updates = 0;
+  app.model.rememberTitle = (...args) => { updates++; rememberTitle(...args); };
+  for (let index = 0; index < 20; index++) {
+    app.emit();
+    await setImmediate();
+  }
+  assert.equal(updates, 0);
+  app.session.agentDetails.set("agent", { ...app.session.agentDetails.get("agent"), title: "바뀐 제목" });
+  app.emit();
+  await setImmediate();
+  assert.equal(updates, 1);
+  assert.equal(app.model.entries()[0].title, "바뀐 제목");
+  app.loader.dispose();
+});
+
 test("restored inactive tab fetches metadata without reading history or replacing the active directory", async () => {
   const app = harness(async () => result());
   await setImmediate();

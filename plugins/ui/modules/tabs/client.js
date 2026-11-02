@@ -42,6 +42,10 @@
   const draftSlots = new Map();
   const projectionListeners = new Set();
   const draftPresentations = new Map();
+  const agentPresentations = new Map();
+  const agentDescriptors = new Map();
+  let indexedRevision = -1;
+  let entriesByAgent = new Map();
   let draftOrder = [];
   let projectionRevision = 0;
   let bridgeState = draftBridge?.getSnapshot() || { entries: [], activeDraftId: null, completions: [] };
@@ -94,7 +98,30 @@
   const paneKey = (props) => JSON.stringify([liveKey(props), props.paneId]);
   function lookup(tabId) {
     const cached = bySyntheticId.get(tabId);
-    return cached && model.entries().find(entry => entry.serverId === cached.serverId && entry.agentId === cached.agentId);
+    if (!cached) return;
+    if (indexedRevision !== model.revision()) {
+      const entries = model.entries();
+      entriesByAgent = new Map(entries.map(entry => [JSON.stringify([entry.serverId, entry.agentId]), entry]));
+      const keys = new Set(entries.map(syntheticId));
+      for (const key of agentPresentations.keys()) if (!keys.has(key)) agentPresentations.delete(key);
+      for (const key of agentDescriptors.keys()) if (!keys.has(key)) agentDescriptors.delete(key);
+      indexedRevision = model.revision();
+    }
+    return entriesByAgent.get(JSON.stringify([cached.serverId, cached.agentId]));
+  }
+  function shallowEqual(left, right) {
+    if (left === right) return true;
+    if (!left || !right) return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && left[key] === right[key]);
+  }
+  function stableAgentPresentation(key, next) {
+    const previous = agentPresentations.get(key);
+    const keys = Object.keys(next);
+    if (previous && keys.length === Object.keys(previous).length && keys.every(name => Object.hasOwn(previous, name)
+      && (name === "titleLines" ? shallowEqual(previous[name], next[name]) : previous[name] === next[name]))) return previous;
+    agentPresentations.set(key, next);
+    return next;
   }
   function lookupVirtual(tabId) { return virtualTabs.get(tabId); }
   function notifyProjection() {
@@ -603,7 +630,9 @@
     React.useSyncExternalStore(metadata.subscribe, metadata.revision, metadata.revision);
     React.useSyncExternalStore(model.subscribe, model.revision, model.revision);
     React.useSyncExternalStore(subscribeProjection, () => projectionRevision, () => projectionRevision);
-    const sessionState = sessions((state) => state.sessions);
+    // The collection owns the session subscription. Individual presentations
+    // read its latest snapshot without adding a hot-store listener per tab.
+    const sessionState = sessions.getState().sessions;
     const settings = useSettings ? useSettings().settings : null;
     const draft = lookupVirtual(props.tab.tabId);
     if (draft) {
@@ -636,12 +665,13 @@
                 ...(presentation.completedAt != null ? { completedAt: presentation.completedAt } : {}) } : undefined };
           }
         }
-        if (titlePresentation.titleState === "ready") return props.children(titlePresentation);
+        if (titlePresentation.titleState === "ready") return props.children(stableAgentPresentation(props.tab.tabId, titlePresentation));
         const status = metadata.state(entry);
         const title = (typeof entry.title === "string" && entry.title) || (status.tag === "ready" ? "대화" : status.tag === "missing" ? "대화를 찾을 수 없음"
           : status.tag === "mismatch" ? "대화 소속 확인 필요" : status.tag === "error" ? "대화 정보 확인 실패" : null);
-        if (!title) return props.children(titlePresentation);
-        return props.children({ ...titlePresentation, label: title, tooltip: title, titleState: "ready" });
+        if (!title) return props.children(stableAgentPresentation(props.tab.tabId, titlePresentation));
+        return props.children(stableAgentPresentation(props.tab.tabId,
+          { ...titlePresentation, label: title, tooltip: title, titleState: "ready" }));
       } });
   };
   rowsModule.WorkspaceDesktopTabsRow = function GlobalWorkspaceTabs(props) {
@@ -690,6 +720,7 @@
       };
     }, [props, relevant, activeWorkspace, sessionState]);
     if (!relevant) return React.createElement(originalRow, props);
+    const localAgents = new Map(props.tabs.filter(row => row.tab.target.kind === "agent").map(row => [row.tab.target.agentId, row]));
     const globalRows = globalItems(sessionState).map((item) => {
       if (item.draft) {
         const draft = item.draft;
@@ -704,8 +735,10 @@
       const id = syntheticId(entry);
       bySyntheticId.set(id, entry);
       const local = entry.serverId === props.normalizedServerId && entry.workspaceId === props.normalizedWorkspaceId
-        ? props.tabs.find((row) => row.tab.target.kind === "agent" && row.tab.target.agentId === entry.agentId) : null;
-      return { tab: { key: id, tabId: id, groupSource: {serverId:entry.serverId,workspaceId:entry.workspaceId,tabId:entry.tabId}, kind: "agent", target: { kind: "agent", agentId: entry.agentId } },
+        ? localAgents.get(entry.agentId) : null;
+      if (agentDescriptors.get(id)?.target.agentId !== entry.agentId) agentDescriptors.set(id,
+        { key: id, tabId: id, groupSource: {serverId:entry.serverId,workspaceId:entry.workspaceId,tabId:entry.tabId}, kind: "agent", target: { kind: "agent", agentId: entry.agentId } });
+      return { tab: agentDescriptors.get(id),
         isActive: Boolean(local?.isActive), isCloseHovered: hovered === id, isClosingTab: false };
     });
     const otherRows = props.tabs.filter((row) => row.tab.target.kind !== "agent")
@@ -801,7 +834,7 @@
       const index = entries.findIndex(entry => entry.serverId === serverId && entry.agentId === agentId);
       model.retainAt(serverId, workspaceId, {tabId, target: {kind: "agent", agentId}}, index < 0 ? entries.length : index);
     }}) : () => {};
-  globalThis.__PASEO_GLOBAL_TABS__ = { version: 2, model, pinnedDrafts, dispose() {
+  globalThis.__PASEO_GLOBAL_TABS__ = { version: 2, performanceVersion: 1, model, pinnedDrafts, dispose() {
     if (disposed) return;
     disposed = true;
     resetCycle();
@@ -819,6 +852,9 @@
     knownDrafts.clear();
     draftSlots.clear();
     draftPresentations.clear();
+    agentPresentations.clear();
+    agentDescriptors.clear();
+    entriesByAgent.clear();
     pinIntent = null;
     releaseLayout();
     history.dispose();
