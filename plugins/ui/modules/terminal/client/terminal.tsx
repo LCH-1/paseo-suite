@@ -67,8 +67,8 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
   }, []);
 
   const add = useCallback(() => {
-    setChooser(true); setNewForm(false); setCreateError(""); directory.refresh();
-  }, [directory.refresh]);
+    setChooser(true); setNewForm(false); setCreateError("");
+  }, []);
 
   const send = useCallback(async () => {
     const id = tabs.active;
@@ -88,13 +88,12 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
         throw new Error("세션이 메시지를 받을 준비가 되면 다시 전송하세요.");
       await handle.send(draft);
       setDrafts((current) => current[id] === draft ? { ...current, [id]: "" } : current);
-      directory.refresh();
     } catch (error) { setErrors((current) => ({ ...current, [id]: message(error) })); }
     finally {
       sendingNow.current.delete(id);
       setSending((current) => ({ ...current, [id]: false }));
     }
-  }, [tabs.active, draft, chooser, selected, paseo, directory.refresh]);
+  }, [tabs.active, draft, chooser, selected, paseo, directory.upsert]);
 
   useEffect(() => bindKeys({
     next(delta) {
@@ -118,7 +117,7 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
       const result = await handle.refresh();
       if (!result) throw new Error("생성한 세션을 찾지 못했습니다. 세션 목록을 새로고침하세요.");
       directory.upsert(result.agent);
-      open(handle.id); directory.refresh();
+      open(handle.id);
     } catch (error) { setCreateError(message(error)); }
     finally { setCreating(false); }
   }
@@ -183,7 +182,10 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
       </ScrollView> : <>
         <TextInput accessibilityLabel="세션 검색" value={query} onChangeText={setQuery} autoFocus placeholder="제목, 폴더, 프로바이더로 검색" placeholderTextColor={color.foregroundMuted}
           style={{ ...text, padding: 12, backgroundColor: color.surface2 }} />
-        {!!directory.error && <Text selectable style={{ ...text, color: color.statusDanger }}>{directory.error}</Text>}
+        {!!directory.error && <View style={{ gap: 4 }}>
+          <Text selectable style={{ ...text, color: color.statusDanger }}>{directory.error}</Text>
+          <Button label="목록 다시 불러오기" color={color.accent} onPress={directory.refresh} disabled={directory.loading} />
+        </View>}
         {directory.loading && <ActivityIndicator color={color.accent} />}
         <FlatList data={matches} keyExtractor={(agent) => agent.id} keyboardShouldPersistTaps="handled"
           ListEmptyComponent={<Text style={muted}>{directory.loading ? "세션을 불러오는 중…" : "일치하는 세션이 없습니다."}</Text>}

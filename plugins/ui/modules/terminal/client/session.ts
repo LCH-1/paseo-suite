@@ -119,49 +119,111 @@ export function useDirectory(paseo: PaseoApi) {
 
 export type TimelinePage = Awaited<ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["timeline"]["refetch"]>>;
 
+const timelinePages = new WeakMap<PaseoApi, Map<string, TimelinePage>>();
+const TIMELINE_CACHE_LIMIT = 8;
+
+function cachedTimeline(paseo: PaseoApi, agentId: string | null) {
+  if (!agentId) return null;
+  const pages = timelinePages.get(paseo);
+  if (!pages) return null;
+  const page = pages.get(agentId);
+  if (!page) return null;
+  pages.delete(agentId);
+  pages.set(agentId, page);
+  return page;
+}
+
+function retainTimeline(paseo: PaseoApi, agentId: string, page: TimelinePage) {
+  let pages = timelinePages.get(paseo);
+  if (!pages) { pages = new Map(); timelinePages.set(paseo, pages); }
+  pages.delete(agentId);
+  // Cached history must not overwrite a fresher directory status on re-entry.
+  pages.set(agentId, { ...page, agent: null });
+  if (pages.size > TIMELINE_CACHE_LIMIT) {
+    const oldest = pages.keys().next();
+    if (!oldest.done) pages.delete(oldest.value);
+  }
+}
+
+interface TimelineState {
+  paseo: PaseoApi;
+  agentId: string | null;
+  page: TimelinePage | null;
+  error: string;
+  loading: boolean;
+}
+
+function initialTimeline(paseo: PaseoApi, agentId: string | null): TimelineState {
+  const page = cachedTimeline(paseo, agentId);
+  return { paseo, agentId, page, error: "", loading: Boolean(agentId && !page) };
+}
+
 export function useTimeline(paseo: PaseoApi, agentId: string | null) {
-  const [page, setPage] = useState<TimelinePage | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [state, setState] = useState(() => initialTimeline(paseo, agentId));
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    setPage(null); setError("");
-    if (!agentId) { setLoading(false); return; }
-    const agent = paseo.agents.ref(agentId);
+    setState(initialTimeline(paseo, agentId));
+    if (!agentId) return;
+    const selectedAgentId = agentId;
+    const agent = paseo.agents.ref(selectedAgentId);
     let disposed = false;
+    let generation = 0;
+    let subscriptionFailed = false;
     let fetching = false;
     let pending = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function refresh() {
-      if (disposed) return;
+      if (disposed || subscriptionFailed) return;
       if (fetching) { pending = true; return; }
       fetching = true;
+      const started = generation;
       try {
         const next = await agent.timeline.refetch({ direction: "tail", limit: 160 });
-        if (!disposed) {
+        if (!disposed && !subscriptionFailed) {
+          if (started !== generation) { pending = true; return; }
           if (next.error) throw new Error(next.error);
-          setPage(next); setError("");
+          retainTimeline(paseo, selectedAgentId, next);
+          setState({ paseo, agentId: selectedAgentId, page: next, error: "", loading: false });
         }
-      } catch (error) { if (!disposed) setError(message(error)); }
+      } catch (error) {
+        if (!disposed && !subscriptionFailed && started === generation)
+          setState(current => ({ ...current, error: message(error), loading: false }));
+      }
       finally {
         fetching = false;
-        if (!disposed) {
-          setLoading(false);
+        if (!disposed && !subscriptionFailed) {
           if (pending) { pending = false; schedule(); }
         }
       }
     }
     function schedule() {
-      if (disposed || timer) return;
+      if (disposed || subscriptionFailed || timer) return;
       timer = setTimeout(() => { timer = undefined; void refresh(); }, 350);
     }
-    setLoading(true);
     const subscription = agent.timeline.subscribe(({ event }) => {
-      if (event.type === "error") { if (!disposed) setError(event.error); }
-      else schedule();
+      if (disposed) return;
+      if (event.type === "error") {
+        subscriptionFailed = true;
+        if (timer) { clearTimeout(timer); timer = undefined; }
+        setState(current => ({ ...current, error: event.error, loading: false }));
+        return;
+      }
+      if (event.type === "replacement") {
+        subscriptionFailed = false;
+        generation++;
+        timelinePages.get(paseo)?.delete(selectedAgentId);
+        setState({ paseo, agentId: selectedAgentId, page: null, error: "", loading: true });
+      } else if (event.type === "subscription_restored") {
+        subscriptionFailed = false;
+        generation++;
+      }
+      schedule();
     });
-    void subscription.ready.then(() => refresh()).catch((error) => {
-      if (!disposed) { setError(message(error)); setLoading(false); }
+    void subscription.ready.then(() => { if (!subscriptionFailed) return refresh(); }).catch((error) => {
+      if (!disposed) {
+        subscriptionFailed = true;
+        setState(current => ({ ...current, error: message(error), loading: false }));
+      }
     });
     return () => {
       disposed = true;
@@ -169,5 +231,6 @@ export function useTimeline(paseo: PaseoApi, agentId: string | null) {
       subscription();
     };
   }, [paseo, agentId, revision]);
-  return { page, error, loading, retry: () => setRevision((value) => value + 1) };
+  const current = state.paseo === paseo && state.agentId === agentId ? state : initialTimeline(paseo, agentId);
+  return { page: current.page, error: current.error, loading: current.loading, retry: () => setRevision((value) => value + 1) };
 }

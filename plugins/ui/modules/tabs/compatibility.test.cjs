@@ -84,6 +84,19 @@ test("localStorage getter denial keeps a usable in-memory controller with a stor
   assert.equal(app.exports.rows.WorkspaceDesktopTabsRow, app.originalRow);
 });
 
+test("a known renderer bundle selects its module map before evaluating unrelated modules", () => {
+  const key = Object.keys(moduleMaps).find(key => key.includes("@"));
+  const ids = moduleMaps[key];
+  const hash = key.split("@")[1].padEnd(32, "0");
+  const app = harness(ids);
+  app.context.document.scripts = [{ src: "paseo://app/_expo/static/js/web/index-" + hash + ".js" }];
+  const cleanup = app.context.contribute({ addAgentTabTitleResolver() {} });
+  const supported = new Set(Object.values(ids));
+  assert.equal(app.calls.requiredModules.every(id => supported.has(id)), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.context.__PASEO_GLOBAL_TABS_MODULES__)), ids);
+  cleanup();
+});
+
 for (const [name, ids, client] of [
   ["original Paseo 0.12.0", originalIds, {}],
   ["Sidebar Title Sync source client", titleSyncIds, { addAgentTabTitleResolver() {} }],

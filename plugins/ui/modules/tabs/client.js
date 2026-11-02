@@ -46,6 +46,32 @@
   const agentDescriptors = new Map();
   let indexedRevision = -1;
   let entriesByAgent = new Map();
+  let sessionSource;
+  let sessionModelRevision = -1;
+  let sessionServerIds = [];
+  let tabSessions = {};
+  function getTabSessions() {
+    const current = sessions.getState().sessions;
+    const revision = model.revision();
+    if (current === sessionSource && revision === sessionModelRevision) return tabSessions;
+    if (revision !== sessionModelRevision) sessionServerIds = [...new Set(model.entries().map(entry => entry.serverId))];
+    const selected = {};
+    let changed = false;
+    for (const serverId of sessionServerIds) {
+      const next = current[serverId];
+      const previous = tabSessions[serverId];
+      if (next?.agents === previous?.agents && next?.agentDetails === previous?.agentDetails && next?.workspaces === previous?.workspaces) {
+        if (previous) selected[serverId] = previous;
+      } else {
+        changed = true;
+        if (next) selected[serverId] = next;
+      }
+    }
+    if (changed || Object.keys(selected).length !== Object.keys(tabSessions).length) tabSessions = selected;
+    sessionSource = current;
+    sessionModelRevision = revision;
+    return tabSessions;
+  }
   let draftOrder = [];
   let projectionRevision = 0;
   let bridgeState = draftBridge?.getSnapshot() || { entries: [], activeDraftId: null, completions: [] };
@@ -680,7 +706,7 @@
     React.useSyncExternalStore(model.subscribe, model.revision, model.revision);
     React.useSyncExternalStore(subscribeProjection, () => projectionRevision, () => projectionRevision);
     if(groupModule) groupModule.useTabGroups(state=>state.state);
-    const sessionState = sessions((state) => state.sessions);
+    const sessionState = React.useSyncExternalStore(sessions.subscribe, getTabSessions, getTabSessions);
     const lastSelection = navigation.useLastWorkspaceSelection();
     const relevant = props.host !== "explorer";
     useKeyboardActionHandler({
@@ -834,7 +860,7 @@
       const index = entries.findIndex(entry => entry.serverId === serverId && entry.agentId === agentId);
       model.retainAt(serverId, workspaceId, {tabId, target: {kind: "agent", agentId}}, index < 0 ? entries.length : index);
     }}) : () => {};
-  globalThis.__PASEO_GLOBAL_TABS__ = { version: 2, performanceVersion: 1, model, pinnedDrafts, dispose() {
+  globalThis.__PASEO_GLOBAL_TABS__ = { version: 2, performanceVersion: 2, model, pinnedDrafts, dispose() {
     if (disposed) return;
     disposed = true;
     resetCycle();

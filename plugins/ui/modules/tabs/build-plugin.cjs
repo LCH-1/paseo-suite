@@ -76,12 +76,14 @@ const metadata = fs.readFileSync(path.join(__dirname, "metadata.js"), "utf8");
 const metadataFactory = metadata.slice(metadata.indexOf('})(globalThis, function () {') + '})(globalThis, function () {'.length, metadata.lastIndexOf('});'));
 const history = fs.readFileSync(path.join(__dirname, "history.js"), "utf8");
 const historyFactory = history.slice(history.indexOf('})(globalThis, function () {') + '})(globalThis, function () {'.length, history.lastIndexOf('});'));
-const revision = createHash("sha256").update("shared-hosts-v1" + JSON.stringify(maps) + model + metadata + history + client).digest("hex");
+const revision = createHash("sha256").update("shared-hosts-v1:bundle-map-preference-v1" + JSON.stringify(maps) + model + metadata + history + client).digest("hex");
 const plugin = `import { getPaseoClient } from "@getpaseo/plugin/client";
 export default function contribute(client) {
   if (typeof document === "undefined" || typeof globalThis.__r !== "function") return () => {};
+  const bundleHash = [...(document.scripts || [])].map(script => script.src.match(/index-([a-f0-9]+)[.]js(?:[?#]|$)/)?.[1]).find(Boolean);
+  const preferredMap = ${JSON.stringify(Object.entries(maps).filter(([key]) => key.includes("@")).map(([key, value]) => [key.split("@")[1], value]))}.find(([hash]) => bundleHash?.startsWith(hash))?.[1];
   const candidates = typeof client?.addAgentTabTitleResolver === "function"
-    ? ${JSON.stringify([...Object.keys(maps).filter((key) => key.includes("@")).reverse().map((key) => maps[key]), maps.sidebarActivity, maps.terminalDirectoryMenu, maps.noDesktopHeader, maps.trailingOverflow, maps.tabGroups, maps.tabTrailingMenu, maps.historyInteractions, maps.historyTab, maps.sessionHistory, maps.hostSortable, maps.completionAge, maps.sessionIdentity, maps.sidebarScroll, maps.sidebarReveal, maps.sidebarBulkCollapse, maps.hostProjectGroups, maps.workspaceCreateTabs, maps.titleSyncTwoLine, maps.titleSync].filter(Boolean))}
+    ? [preferredMap, ...${JSON.stringify([...Object.keys(maps).filter((key) => key.includes("@")).reverse().map((key) => maps[key]), maps.sidebarActivity, maps.terminalDirectoryMenu, maps.noDesktopHeader, maps.trailingOverflow, maps.tabGroups, maps.tabTrailingMenu, maps.historyInteractions, maps.historyTab, maps.sessionHistory, maps.hostSortable, maps.completionAge, maps.sessionIdentity, maps.sidebarScroll, maps.sidebarReveal, maps.sidebarBulkCollapse, maps.hostProjectGroups, maps.workspaceCreateTabs, maps.titleSyncTwoLine, maps.titleSync].filter(Boolean))}].filter(Boolean)
     : [${JSON.stringify(maps.original)}];
   let ids, modules;
   for (const candidate of candidates) {

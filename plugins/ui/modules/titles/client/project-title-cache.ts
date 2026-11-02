@@ -24,6 +24,7 @@ export class ProjectTitleCache {
   private enabled = false;
   private includeBackground = true;
   private needsSnapshot = false;
+  private hasSnapshot = false;
   private epoch = 0;
   private snapshotVersion = 0;
   private pending: PendingSnapshot | null = null;
@@ -46,6 +47,7 @@ export class ProjectTitleCache {
     this.epoch++;
     this.snapshotVersion++;
     this.pending = null;
+    this.hasSnapshot = false;
     this.resetRetries();
     this.releaseSubscription();
     this.names.clear();
@@ -139,6 +141,7 @@ export class ProjectTitleCache {
           const id = update.kind === "upsert" ? update.workspace.id : update.id;
           const name = update.kind === "upsert" ? this.name(update.workspace) : null;
           this.pending?.updates.set(id, name);
+          if ((this.names.get(id) ?? null) === name) return;
           if (name === null) this.names.delete(id);
           else this.names.set(id, name);
           this.invalidate();
@@ -205,11 +208,16 @@ export class ProjectTitleCache {
         if (name === null) names.delete(id);
         else names.set(id, name);
       }
-      this.names.clear();
-      for (const [id, name] of names) this.names.set(id, name);
+      const changed = names.size !== this.names.size || [...names].some(([id, name]) => this.names.get(id) !== name);
+      if (changed) {
+        this.names.clear();
+        for (const [id, name] of names) this.names.set(id, name);
+      }
       this.pending = null;
       this.resetRetries();
-      this.invalidate();
+      const invalidate = changed || !this.hasSnapshot;
+      this.hasSnapshot = true;
+      if (invalidate) this.invalidate();
     } catch { this.failedSnapshot(epoch, pending); }
   }
 }

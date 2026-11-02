@@ -26,8 +26,8 @@ export const TimelineRow = memo(function TimelineRow({ entry, theme }: {
   if (item.type === "compaction") return <Text style={muted}>· {item.status === "loading" ? "대화 압축 중…" : "대화 압축 완료"}</Text>;
   const label = item.type === "tool_call" ? `${item.name}  ${item.status === "running" ? "실행 중" : item.status === "failed" ? "실패" : item.status === "canceled" ? "취소됨" : "완료"}`
     : item.type === "reasoning" ? "생각 과정" : `${item.pluginId} / ${item.kind}`;
-  const content = item.type === "tool_call" ? JSON.stringify(item.detail, null, 2)
-    : item.type === "reasoning" ? item.text : JSON.stringify(item.data, null, 2);
+  const content = expanded ? item.type === "tool_call" ? JSON.stringify(item.detail, null, 2)
+    : item.type === "reasoning" ? item.text : JSON.stringify(item.data, null, 2) : "";
   return <View style={{ paddingVertical: 5 }}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${label} 상세 ${expanded ? "접기" : "펼치기"}`}
       onPress={() => setExpanded((value) => !value)} style={{ paddingVertical: 5 }}>

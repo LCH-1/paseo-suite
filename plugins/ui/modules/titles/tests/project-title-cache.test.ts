@@ -66,6 +66,28 @@ test("applies live project renames carried by workspace upserts without reading 
   cache.stop();
 });
 
+test("unchanged project names and unknown removals do not invalidate visible tab titles", async () => {
+  const host = new FakeWorkspaceApi();
+  let invalidations = 0;
+  const cache = new ProjectTitleCache(host.api, () => { invalidations++; });
+  cache.start();
+  await setImmediate();
+  assert.equal(invalidations, 1);
+  for (let index = 0; index < 100; index++) host.subscriptions[0].upsert(workspace());
+  host.subscriptions[0].remove("unknown");
+  assert.equal(invalidations, 1);
+  assert.equal(cache.get("workspace-1"), "cursor-setting-sync");
+  host.subscriptions[0].upsert(workspace("workspace-1", "renamed"));
+  assert.equal(invalidations, 2);
+  assert.equal(cache.get("workspace-1"), "renamed");
+  host.subscriptions[0].upsert(workspace("workspace-1", "renamed"));
+  host.subscriptions[0].remove("workspace-1");
+  host.subscriptions[0].remove("workspace-1");
+  assert.equal(invalidations, 3);
+  assert.equal(cache.get("workspace-1"), null);
+  cache.stop();
+});
+
 test("reconnect snapshots replace cached metadata using the same single subscription", async () => {
   const host = new FakeWorkspaceApi();
   let invalidations = 0;
@@ -78,6 +100,32 @@ test("reconnect snapshots replace cached metadata using the same single subscrip
   assert.equal(cache.get("new"), "renamed-while-offline");
   assert.equal(host.calls.length, 1);
   assert.equal(invalidations, 2);
+  cache.stop();
+});
+
+test("unchanged reconnect snapshots preserve visible titles while renames and removals still invalidate", async () => {
+  const host = new FakeWorkspaceApi();
+  host.first = page([workspace("a", "Project A"), workspace("b", "Project B")]);
+  let invalidations = 0;
+  const cache = new ProjectTitleCache(host.api, () => { invalidations++; });
+  cache.start();
+  await setImmediate();
+  assert.equal(invalidations, 1);
+  host.subscriptions[0].snapshot(page([workspace("b", "Project B"), workspace("a", "Project A")]));
+  await setImmediate();
+  assert.equal(invalidations, 1);
+  assert.equal(cache.get("a"), "Project A");
+  host.subscriptions[0].snapshot(page([workspace("b", "Project B"), workspace("a", "Renamed A")]));
+  await setImmediate();
+  assert.equal(invalidations, 2);
+  assert.equal(cache.get("a"), "Renamed A");
+  host.subscriptions[0].snapshot(page([workspace("b", "Project B")]));
+  await setImmediate();
+  assert.equal(invalidations, 3);
+  assert.equal(cache.get("a"), null);
+  host.subscriptions[0].snapshot(page([workspace("b", "Project B")]));
+  await setImmediate();
+  assert.equal(invalidations, 3);
   cache.stop();
 });
 

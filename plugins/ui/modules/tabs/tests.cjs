@@ -274,6 +274,7 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
   const overlays = [];
   const popovers = [];
   const bridgeListeners = new Set();
+  const externalStores = [];
   const dispatcher = createKeyboardActionDispatcher();
   const keyboardRegistrations = [];
   dispatcher.registerHandler({ handlerId: "native-workspace-close", actions: ["workspace.tab.close-current"],
@@ -315,7 +316,7 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
   let selection = { serverId: "host", workspaceId: "a" };
   const React = {
     createElement: (component, props) => ({ component, props }),
-    useSyncExternalStore() {},
+    useSyncExternalStore(subscribe, read) { externalStores.push({ subscribe, read }); return read(); },
     useState: (initial) => [initial, () => {}],
     useEffect: (callback) => effects.push(callback),
   };
@@ -324,7 +325,7 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
   const rows = { WorkspaceDesktopTabsRow: originalRow };
   const presentation = { WorkspaceTabPresentationResolver: originalPresentation };
   const session = { agents: new Map([ ["agent-a", {}], ["agent-b", {}] ]), agentDetails: new Map(), workspaces: new Map([["a", {}], ["b", {}]]) };
-  const sessionMap = { host: session };
+  let sessionMap = { host: session };
   const settings = { workspaceTitleSource: "title" };
   const modules = { 1: React, 2: rows, 3: presentation,
     4: { useLastWorkspaceSelection: () => selection, getLastWorkspaceSelection: () => selection,
@@ -399,7 +400,8 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
     effectCleanups.set(key, effects.splice(0).map((effect) => effect()).filter((cleanup) => typeof cleanup === "function"));
     return result.props;
   }
-  return { render, props, calls, rows, presentation, context, originalRow, session, sessionMap, settings,
+  return { render, props, calls, rows, presentation, context, originalRow, session, get sessionMap() { return sessionMap; }, settings, externalStores,
+    replaceSessionMap(next) { sessionMap = next; },
     model: context.__PASEO_GLOBAL_TABS__.model, documentListeners, layoutListeners,
     windowListeners, overlays, popovers,
     bridge, bridgeListeners, bridgeSnapshot: () => bridgeSnapshot, setBridgeSnapshot,
@@ -644,6 +646,55 @@ test("탭 표시를 부모 상태에 반영해도 React 갱신이 반복되지 �
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
     app.context.__PASEO_GLOBAL_TABS__.dispose();
   }
+});
+
+test("대화 스트림만 바뀌면 탭 목록 snapshot을 유지하고 이름·보관 변경은 반영한다", () => {
+  const app = harness();
+  const props = app.props("a", [row("a")]);
+  app.render(props);
+  app.render(props);
+  const store = app.externalStores.at(-1);
+  const before = store.read();
+  for (let index = 0; index < 100; index++) {
+    app.replaceSessionMap({ ...app.sessionMap, host: { ...app.sessionMap.host, timelineRevision: index } });
+    assert.equal(store.read(), before);
+  }
+  app.replaceSessionMap({ ...app.sessionMap, unrelated: { agents: new Map(), agentDetails: new Map(), workspaces: new Map() } });
+  assert.equal(store.read(), before);
+  const renamed = new Map(app.sessionMap.host.workspaces);
+  renamed.set("a", { name: "Renamed" });
+  app.replaceSessionMap({ ...app.sessionMap, host: { ...app.sessionMap.host, workspaces: renamed } });
+  const next = store.read();
+  assert.notEqual(next, before);
+  assert.equal(next.host.workspaces.get("a").name, "Renamed");
+  const archived = new Map(app.sessionMap.host.agents);
+  archived.set("agent-a", { archivedAt: "now" });
+  app.replaceSessionMap({ ...app.sessionMap, host: { ...app.sessionMap.host, agents: archived } });
+  assert.equal(app.render(props).tabs.length, 0);
+});
+
+test("모델의 host 추가·제거와 agentDetails hydration은 탭 snapshot에 반영한다", () => {
+  const app = harness();
+  const props = app.props("a", [row("a")]);
+  app.render(props); app.render(props);
+  const store = app.externalStores.at(-1);
+  const before = store.read();
+  app.sessionMap.remote = { agents: new Map(), agentDetails: new Map(), workspaces: new Map() };
+  const remote = app.model.retainAt("remote", "r", row("r").tab);
+  const added = store.read();
+  assert.notEqual(added, before);
+  assert.equal(added.remote, app.sessionMap.remote);
+  app.model.close(remote.key);
+  const removed = store.read();
+  assert.notEqual(removed, added);
+  assert.equal(removed.remote, undefined);
+  app.replaceSessionMap({ ...app.sessionMap, host: { ...app.sessionMap.host,
+    agentDetails: new Map([["agent-a", { id: "agent-a", workspaceId: "hydrated" }]]) } });
+  const hydrated = store.read();
+  assert.notEqual(hydrated, removed);
+  assert.equal(hydrated.host.agentDetails.get("agent-a").workspaceId, "hydrated");
+  app.render(props);
+  assert.equal(app.model.entries()[0].workspaceId, "hydrated");
 });
 
 test("미리보기는 전역 하나이며 그 자리를 교체하고 고정 탭만 복원한다", () => {
