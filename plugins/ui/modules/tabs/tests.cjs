@@ -591,6 +591,61 @@ test("존재하지 않는 대화가 확인되면 스켈레톤 대신 상태를 �
   assert.deepEqual({ ...element.props.children(ready) }, { ...ready, isPreview: true });
 });
 
+test("동일한 탭 표시 정보는 부모 재렌더링에도 같은 참조로 전달해 반복 갱신을 막는다", () => {
+  const app = harness(undefined, false, true);
+  app.session.workspaces.set("a", { name: "Workspace", projectName: "Project" });
+  app.render(app.props("a", [row("a")]));
+  const rendered = app.render(app.props("a", [row("a")]));
+  const tab = rendered.tabs[0].tab;
+  const icon = () => {};
+  const base = { label: "Conversation", titleState: "ready", icon, statusBucket: "running", completedAt: 123 };
+  const resolve = input => app.presentation.WorkspaceTabPresentationResolver({ tab, children: value => value }).props.children(input);
+  const first = resolve(base);
+  for (let index = 0; index < 20; index++) assert.equal(resolve({ ...base }), first);
+  const idle = resolve({ ...base, statusBucket: null });
+  assert.notEqual(idle, first);
+  assert.equal(idle.statusBucket, null);
+  app.model.pin(app.model.preview().key);
+  assert.equal(resolve(base).isPreview, false);
+  app.session.workspaces.set("a", { name: "Renamed", projectName: "Project" });
+  assert.equal(resolve(base).label, "Project-Renamed");
+  app.session.workspaces.clear();
+  const plain = resolve(base);
+  assert.equal(resolve({ ...base }), plain);
+});
+
+test("탭 표시를 부모 상태에 반영해도 React 갱신이 반복되지 않고 실제 상태 변경만 반영한다", async () => {
+  const React = require("react");
+  const { create, act } = require("react-test-renderer");
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const app = harness();
+  app.render(app.props("a", [row("a")]));
+  const tab = app.render(app.props("a", [row("a")])).tabs[0].tab;
+  let commits = 0;
+  function Host({ status }) {
+    const [, setPresentation] = React.useState(null);
+    const resolved = app.presentation.WorkspaceTabPresentationResolver({ tab, children: value => value });
+    const presentation = resolved.props.children({ label: "Conversation", titleState: "ready", statusBucket: status });
+    React.useLayoutEffect(() => {
+      commits++;
+      if (commits < 10) setPresentation(presentation);
+    }, [presentation]);
+    return null;
+  }
+  let root;
+  try {
+    await act(async () => { root = create(React.createElement(Host, { status: "running" })); });
+    assert.equal(commits, 1);
+    await act(async () => { root.update(React.createElement(Host, { status: null })); });
+    assert.equal(commits, 2);
+  } finally {
+    await act(async () => root?.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    app.context.__PASEO_GLOBAL_TABS__.dispose();
+  }
+});
+
 test("미리보기는 전역 하나이며 그 자리를 교체하고 고정 탭만 복원한다", () => {
   const saved = storage();
   const model = createModel(saved);
