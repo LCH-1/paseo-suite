@@ -2,7 +2,7 @@ import { getPaseoClient } from "@getpaseo/plugin/client";
 export default function contribute(client) {
   if (typeof document === "undefined" || typeof globalThis.__r !== "function") return () => {};
   const candidates = typeof client?.addAgentTabTitleResolver === "function"
-    ? [{"react":37,"rows":5347,"presentation":4737,"navigation":3912,"sessions":3661,"layouts":3811,"snapshots":3852,"hostRoutes":3916,"tabGroups":5354,"keyboardActions":4574,"settings":887,"reopen":5327,"shortcuts":4036,"titles":4478,"registry":3682,"newWorkspaceTabs":5024,"tabPresence":5353},{"react":37,"rows":5810,"presentation":5072,"navigation":4243,"sessions":3910,"layouts":4140,"snapshots":4181,"hostRoutes":4247,"tabGroups":5817,"keyboardActions":4909,"settings":890,"reopen":5790,"shortcuts":4369,"titles":4813,"registry":3932,"newWorkspaceTabs":5359,"tabPresence":5816},{"react":37,"rows":5346,"presentation":4736,"navigation":3911,"sessions":3660,"layouts":3810,"snapshots":3851,"hostRoutes":3915,"tabGroups":5353,"keyboardActions":4573,"settings":887,"reopen":5326,"shortcuts":4035,"titles":4477,"registry":3681,"newWorkspaceTabs":5023,"tabPresence":5352},{"react":37,"rows":5346,"presentation":4893,"navigation":3911,"sessions":3660,"layouts":3810,"snapshots":3851,"hostRoutes":3915,"tabGroups":5353,"keyboardActions":4723,"settings":887,"reopen":5326,"shortcuts":4035,"titles":4861,"registry":3681,"newWorkspaceTabs":4473,"tabPresence":5352},{"react":37,"rows":5346,"presentation":4893,"navigation":3911,"sessions":3660,"layouts":3810,"snapshots":3851,"hostRoutes":3915,"tabGroups":5353,"keyboardActions":4723,"settings":887,"titles":4861,"registry":3681,"newWorkspaceTabs":4473,"tabPresence":5352},{"react":37,"rows":5325,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5332,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5331},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5321,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5328,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5327},{"react":37,"rows":5319,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5326,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5325},{"react":37,"rows":5318,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5325,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5324},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5323,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5322},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5323,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5322},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5453},{"react":37,"rows":5317,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5454},{"react":37,"rows":5315,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5452},{"react":37,"rows":5315,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5452},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5315,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5314,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5313,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5312,"presentation":4872,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4702,"settings":887,"titles":4840,"registry":3681,"newWorkspaceTabs":4452},{"react":37,"rows":5311,"presentation":4871,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"titles":4839,"registry":3681,"newWorkspaceTabs":4449,"keyboardActions":4701,"settings":887},{"react":37,"rows":5309,"presentation":4869,"navigation":3890,"sessions":3659,"layouts":3790,"snapshots":3831,"hostRoutes":3894,"titles":4837,"registry":3680,"newWorkspaceTabs":4447,"keyboardActions":4699,"settings":887},{"react":37,"rows":5307,"presentation":4696,"navigation":3890,"sessions":3659,"layouts":3790,"snapshots":3831,"hostRoutes":3894,"titles":4978,"registry":3680,"keyboardActions":4541,"settings":887},{"react":37,"rows":5307,"presentation":4696,"navigation":3890,"sessions":3659,"layouts":3790,"snapshots":3831,"hostRoutes":3894,"titles":4978,"registry":3680,"keyboardActions":4541,"settings":887}]
+    ? [{"react":37,"rows":5347,"presentation":4737,"navigation":3912,"sessions":3661,"layouts":3811,"snapshots":3852,"hostRoutes":3916,"tabGroups":5354,"keyboardActions":4574,"settings":887,"reopen":5327,"shortcuts":4036,"titles":4478,"registry":3682,"newWorkspaceTabs":5024,"tabPresence":5353},{"react":37,"rows":5347,"presentation":4737,"navigation":3912,"sessions":3661,"layouts":3811,"snapshots":3852,"hostRoutes":3916,"tabGroups":5354,"keyboardActions":4574,"settings":887,"reopen":5327,"shortcuts":4036,"titles":4478,"registry":3682,"newWorkspaceTabs":5024,"tabPresence":5353},{"react":37,"rows":5810,"presentation":5072,"navigation":4243,"sessions":3910,"layouts":4140,"snapshots":4181,"hostRoutes":4247,"tabGroups":5817,"keyboardActions":4909,"settings":890,"reopen":5790,"shortcuts":4369,"titles":4813,"registry":3932,"newWorkspaceTabs":5359,"tabPresence":5816},{"react":37,"rows":5346,"presentation":4736,"navigation":3911,"sessions":3660,"layouts":3810,"snapshots":3851,"hostRoutes":3915,"tabGroups":5353,"keyboardActions":4573,"settings":887,"reopen":5326,"shortcuts":4035,"titles":4477,"registry":3681,"newWorkspaceTabs":5023,"tabPresence":5352},{"react":37,"rows":5346,"presentation":4893,"navigation":3911,"sessions":3660,"layouts":3810,"snapshots":3851,"hostRoutes":3915,"tabGroups":5353,"keyboardActions":4723,"settings":887,"reopen":5326,"shortcuts":4035,"titles":4861,"registry":3681,"newWorkspaceTabs":4473,"tabPresence":5352},{"react":37,"rows":5346,"presentation":4893,"navigation":3911,"sessions":3660,"layouts":3810,"snapshots":3851,"hostRoutes":3915,"tabGroups":5353,"keyboardActions":4723,"settings":887,"titles":4861,"registry":3681,"newWorkspaceTabs":4473,"tabPresence":5352},{"react":37,"rows":5325,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5332,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5331},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5324,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5331,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5330},{"react":37,"rows":5321,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5328,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5327},{"react":37,"rows":5319,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5326,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5325},{"react":37,"rows":5318,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5325,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5324},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5323,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5322},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"tabGroups":5323,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5322},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5453},{"react":37,"rows":5317,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5454},{"react":37,"rows":5315,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5452},{"react":37,"rows":5315,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453,"tabPresence":5452},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5315,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5316,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5314,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5313,"presentation":4873,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4703,"settings":887,"titles":4841,"registry":3681,"newWorkspaceTabs":4453},{"react":37,"rows":5312,"presentation":4872,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"keyboardActions":4702,"settings":887,"titles":4840,"registry":3681,"newWorkspaceTabs":4452},{"react":37,"rows":5311,"presentation":4871,"navigation":3891,"sessions":3660,"layouts":3791,"snapshots":3832,"hostRoutes":3895,"titles":4839,"registry":3681,"newWorkspaceTabs":4449,"keyboardActions":4701,"settings":887},{"react":37,"rows":5309,"presentation":4869,"navigation":3890,"sessions":3659,"layouts":3790,"snapshots":3831,"hostRoutes":3894,"titles":4837,"registry":3680,"newWorkspaceTabs":4447,"keyboardActions":4699,"settings":887},{"react":37,"rows":5307,"presentation":4696,"navigation":3890,"sessions":3659,"layouts":3790,"snapshots":3831,"hostRoutes":3894,"titles":4978,"registry":3680,"keyboardActions":4541,"settings":887},{"react":37,"rows":5307,"presentation":4696,"navigation":3890,"sessions":3659,"layouts":3790,"snapshots":3831,"hostRoutes":3894,"titles":4978,"registry":3680,"keyboardActions":4541,"settings":887}]
     : [{"react":37,"rows":5324,"presentation":4715,"navigation":3909,"sessions":3659,"layouts":3809,"snapshots":3850,"hostRoutes":3913,"keyboardActions":4559,"settings":887}];
   let ids, modules;
   for (const candidate of candidates) {
@@ -46,7 +46,7 @@ export default function contribute(client) {
   }
   if (!modules) throw new Error("Global Workspace Tabs: unsupported Paseo module exports");
   const leaseKey = "__PASEO_GLOBAL_TABS_LEASE__";
-  const revision = "4fe563673c7f8bc65a1eba26d5c3044cb50811592f2616cb57a0074dc1026eb8";
+  const revision = "d9bef10bdee7f6c9ff1300e614d742a33391931e7729d235b90586140377058d";
   let lease = globalThis[leaseKey];
   function retain(current) {
     const owner = Symbol();
@@ -62,6 +62,7 @@ export default function contribute(client) {
     };
   }
   if (lease?.revision === revision && lease.controller === globalThis.__PASEO_GLOBAL_TABS__) return retain(lease);
+  const previousDraftPins = [...(globalThis.__PASEO_GLOBAL_TABS__?.pinnedDrafts || [])];
   globalThis.__PASEO_GLOBAL_TABS__?.dispose();
   globalThis.__PASEO_GLOBAL_TABS_MODULES__ = ids;
   globalThis.PaseoGlobalTabsModel = (function () {
@@ -600,7 +601,10 @@ export default function contribute(client) {
   let draftOrder = [];
   let projectionRevision = 0;
   let bridgeState = draftBridge?.getSnapshot() || { entries: [], activeDraftId: null, completions: [] };
-  const pinnedDrafts = new Set(bridgeState.entries.map((entry) => entry.draftId));
+  const pinnedDrafts = new Set([...(typeof previousDraftPins === "undefined" ? [] : previousDraftPins),
+    ...bridgeState.entries.filter((entry) => draftBridge?.hasInput?.(entry.draftId)).map((entry) => entry.draftId)]);
+  let reconcilingPreview = false;
+  let observedPreview = model.preview()?.key;
   let lastCompletion = Math.max(0, ...(bridgeState.completions || []).map((item) => item.sequence));
   bridgeState.entries.forEach((entry) => knownDrafts.set(entry.draftId, entry));
   let rendered = false;
@@ -608,6 +612,7 @@ export default function contribute(client) {
   let pinIntent = null;
   let cycleCursor = null;
   const pendingNativeCloses = new Set();
+  const dismissPreview = model.close;
   const history = globalThis.PaseoGlobalTabsHistory.install({
     model, layouts, functions: requireModule(ids.layouts),
     reopen: ids.reopen == null ? null : requireModule(ids.reopen).reopenLastClosedWorkspaceTab,
@@ -660,6 +665,26 @@ export default function contribute(client) {
     notifyProjection();
     return true;
   }
+  // Agent previews and empty workspace drafts share one temporary tab slot.
+  // Replacing a draft only removes its tab; its saved input remains recoverable.
+  function replacePreview(draftId) {
+    if (reconcilingPreview) return;
+    reconcilingPreview = true;
+    try {
+      if (draftId && model.preview()) dismissPreview(model.preview().key);
+      for (const entry of [...bridgeState.entries]) {
+        if (entry.kind === "history" || entry.draftId === draftId || pinnedDrafts.has(entry.draftId)) continue;
+        if (draftBridge.hasInput?.(entry.draftId)) { pinDraft(entry.draftId); continue; }
+        draftBridge.close(entry.draftId, { preserveDraft: true });
+      }
+      observedPreview = model.preview()?.key;
+    } finally { reconcilingPreview = false; }
+  }
+  const releasePreview = model.subscribe(() => {
+    const key = model.preview()?.key;
+    if (!reconcilingPreview && key && key !== observedPreview) replacePreview(null);
+    observedPreview = model.preview()?.key;
+  });
   function setDraftOrder(keys) {
     let count = 0;
     draftOrder = [];
@@ -701,7 +726,11 @@ export default function contribute(client) {
     if (disposed) return;
     let before = globalItems(sessions.getState().sessions);
     bridgeState = draftBridge.getSnapshot();
-    bridgeState.entries.forEach((entry) => knownDrafts.set(entry.draftId, entry));
+    const added = bridgeState.entries.filter(entry => !knownDrafts.has(entry.draftId) && entry.kind !== "history");
+    bridgeState.entries.forEach((entry) => {
+      knownDrafts.set(entry.draftId, entry);
+      if (draftBridge.hasInput?.(entry.draftId)) pinDraft(entry.draftId);
+    });
     for (const completion of [...(bridgeState.completions || [])].sort((left, right) => left.sequence - right.sequence)) {
       if (completion.sequence <= lastCompletion) continue;
       lastCompletion = completion.sequence;
@@ -735,6 +764,8 @@ export default function contribute(client) {
       if (!bridgeState.entries.some((entry) => entry.draftId === id) && !handoffs.has(id)) knownDrafts.delete(id);
     }
     for (const id of pinnedDrafts) if (!knownDrafts.has(id)) pinnedDrafts.delete(id);
+    const previewDraft = added.filter(entry => !pinnedDrafts.has(entry.draftId)).at(-1);
+    if (previewDraft) replacePreview(previewDraft.draftId);
     notifyProjection();
   }
   function currentSelection() {
@@ -763,7 +794,10 @@ export default function contribute(client) {
     if (!selection) return null;
     const layout = layouts.getState().layoutByWorkspace[selection.serverId + ":" + selection.workspaceId];
     const pane = findPane(layout?.root, paneId || layout?.focusedPaneId);
-    const tab = pane?.tabs.find((item) => item.tabId === pane.focusedTabId);
+    const source = [...(sources.get(JSON.stringify([selection.serverId, selection.workspaceId]))?.values() || [])]
+      .find(item => paneId ? item.paneId === paneId : item.isFocused !== false);
+    const tab = pane ? pane.tabs.find((item) => item.tabId === pane.focusedTabId)
+      : source?.tabs.find(item => item.isActive)?.tab;
     return tab?.target?.kind === "agent" ? tab : null;
   }
   function pinSelected(selection, paneId, agentId) {
@@ -841,6 +875,19 @@ export default function contribute(client) {
       }
     }
   }
+  let lastClick = null;
+  function onClick(event) {
+    if (event.isTrusted === false || event.button > 0) return;
+    const element = eventElement(event);
+    const row = ancestors(element).find(node => /^(sidebar-activity-session-|sidebar-workspace-row-|agent-row-)/.test(node.getAttribute("data-testid") || ""));
+    if (!row || actionInside(element, row)) { lastClick = null; return; }
+    const id = row.getAttribute("data-testid");
+    const now = Date.now();
+    if (lastClick?.id === id && now - lastClick.time <= 500) {
+      lastClick = null;
+      onDoubleClick(event);
+    } else lastClick = { id, time: now };
+  }
   function onDraftInput(event) {
     if (event.isTrusted === false) return;
     const element = eventElement(event);
@@ -857,9 +904,8 @@ export default function contribute(client) {
     }
     if (nodes.some((node) => node.getAttribute("data-testid") === "workspace-setup-dialog")) return;
     const paneNode = nodes.find((node) => (node.getAttribute("data-testid") || "").startsWith("workspace-pane-"));
-    if (!paneNode) return;
     const selection = currentSelection();
-    if (selection) pinSelected(selection, paneNode.getAttribute("data-testid").slice("workspace-pane-".length));
+    if (selection) pinSelected(selection, paneNode?.getAttribute("data-testid").slice("workspace-pane-".length));
   }
   function visibleOverlay(node) {
     if (ancestors(node).some((item) => item.hidden || item.getAttribute("aria-hidden") === "true")) return false;
@@ -885,7 +931,7 @@ export default function contribute(client) {
     if (layout?.focusedPaneId) return candidates.find((source) => source.paneId === layout.focusedPaneId) || null;
     return candidates.length === 1 ? candidates[0] : null;
   }
-  function cycleRows(source) {
+  function cycleRows(source, visibleOnly = false, includeKey) {
     const rows = [...globalItems(sessions.getState().sessions),
       ...source.tabs.filter((row) => row.tab.target.kind !== "agent")
         .filter((row) => ![...handoffs.values()].some((entry) => entry.serverId === source.normalizedServerId
@@ -909,7 +955,7 @@ export default function contribute(client) {
       seen.add(group.id);
       for (const member of group.tabs) {
         const row = byKey.get(member.key);
-        if (row) result.push(row);
+        if (row && (!visibleOnly || !group.collapsed || row.key === includeKey)) result.push(row);
       }
     }
     return result;
@@ -980,7 +1026,7 @@ export default function contribute(client) {
     else if (target.draft) activateVirtual(target.draft);
     else source.onNavigateTab(target.tab.tabId);
   }
-  const documentEvents = [["dblclick", onDoubleClick], ["input", onDraftInput],
+  const documentEvents = [["click", onClick], ["dblclick", onDoubleClick], ["input", onDraftInput],
     ["compositionupdate", onDraftInput], ["compositionend", onDraftInput]];
   if (globalThis.document?.addEventListener) documentEvents.forEach(([name, listener]) => document.addEventListener(name, listener, true));
   function onStorage(event) {
@@ -1009,56 +1055,91 @@ export default function contribute(client) {
     else if (item.tab) props.onNavigateTab(item.tab.tabId);
   }
   function closeVirtual(draft, props, preserveGroup=false, preserveDraft=false) {
-    if(!preserveGroup)groupModule?.forgetTabGroupKey(virtualId(draft.draftId));
-    const items = cycleRows(props);
+    if (draft.target) return sourceAction(draft, "onCloseTab", draft.tabId,
+      source => closeNative(draft.tabId, source, { draft, preserveGroup }));
+    const items = cycleRows(props, true, virtualId(draft.draftId));
     const index = items.findIndex((item) => item.key === virtualId(draft.draftId));
     const replacement = items[index + 1] || items[index - 1];
-    const active = props.globalDraftContext ? bridgeState.activeDraftId === draft.draftId
-      : draft.target && draft.serverId === props.normalizedServerId && draft.workspaceId === props.normalizedWorkspaceId
-        && props.tabs.some((row) => row.isActive && row.tab.tabId === draft.tabId);
+    if(!preserveGroup)groupModule?.forgetTabGroupKey(virtualId(draft.draftId));
+    const active = props.globalDraftContext && bridgeState.activeDraftId === draft.draftId;
     knownDrafts.delete(draft.draftId);
     draftSlots.delete(draft.draftId);
-    if (draft.target) {
-      handoffs.delete(draft.draftId);
-      notifyProjection();
-      sourceAction(draft, "onCloseTab", draft.tabId);
-    }
-    else draftBridge.close(draft.draftId, {preserveDraft});
+    draftBridge.close(draft.draftId, {preserveDraft});
     if (!active) return;
     if (replacement) activateItem(replacement, props);
     else {
       const selected = navigation.getLastWorkspaceSelection();
       if (selected) navigation.navigateToWorkspace({ ...selected, target: { kind: "new_tab" }, placement: { mode: "focused" } });
+      else draftBridge.dismiss?.();
     }
   }
-  function sourceAction(entry, name, value) {
+  function sourceAction(entry, name, value, action) {
     const sourceForEntry = () => {
       const registered = [...(sources.get(JSON.stringify([entry.serverId, entry.workspaceId]))?.values() || [])];
       return registered.find(source => source.isFocused !== false) || registered[0];
     };
     const source = sourceForEntry();
-    if (source) return source[name](value);
+    if (source) return action ? action(source) : source[name](value);
     if (entry.target) activateVirtual(entry);
     else activate(entry);
     let attempts = 0;
     const timer = setInterval(() => {
       const source = sourceForEntry();
       if (source || ++attempts >= 30) { clearInterval(timer); timers.delete(timer); }
-      if (source) source[name](value);
+      if (source) { if (action) action(source); else source[name](value); }
     }, 50);
     timers.add(timer);
   }
   function closeGlobal(entry, props, preserveGroup = false) {
-    if(!preserveGroup)groupModule?.forgetTabGroupKey(syntheticId(entry));
-    const ordered = cycleRows(props);
+    const ordered = cycleRows(props, true, syntheticId(entry));
     const index = ordered.findIndex((item) => item.key === syntheticId(entry));
     const replacement = ordered[index + 1] || ordered[index - 1];
+    if(!preserveGroup)groupModule?.forgetTabGroupKey(syntheticId(entry));
     const current = props.tabs.find((row) => row.isActive && row.tab.target.kind === "agent");
     const isActive = entry.serverId === props.normalizedServerId && entry.workspaceId === props.normalizedWorkspaceId
       && current?.tab.target.agentId === entry.agentId;
     model.close(entry.key);
     if (isActive && replacement) activateItem(replacement, props);
     if (isActive && !replacement) props.onCreateNewTab({ paneId: props.paneId });
+  }
+  function closeNative(tabId, source, virtual) {
+    const key = JSON.stringify([paneKey(source), tabId]);
+    if (pendingNativeCloses.has(key)) return;
+    const includeKey = virtual ? virtualId(virtual.draft.draftId) : JSON.stringify([paneKey(source), tabId]);
+    const items = cycleRows(source, true, includeKey);
+    const index = items.findIndex(item => item.tab?.tabId === tabId || item.draft?.tabId === tabId);
+    const replacement = items[index + 1] || items[index - 1];
+    const active = index >= 0 && activeCycleKey(source, items) === items[index].key;
+    pendingNativeCloses.add(key);
+    let result;
+    try { result = source.onCloseTab(tabId); }
+    catch (error) { pendingNativeCloses.delete(key); throw error; }
+    const release = () => pendingNativeCloses.delete(key);
+    return Promise.resolve(result).then(() => {
+      release();
+      if (disposed) return;
+      const layout = layouts.getState().layoutByWorkspace[source.normalizedServerId + ":" + source.normalizedWorkspaceId];
+      const pane = findPane(layout?.root, source.paneId);
+      // A canceled confirmation leaves the native tab in place.
+      const remaining = pane?.tabs.find(tab => tab.tabId === tabId);
+      // The host keeps the last root launcher alive; global tabs can still
+      // leave it by selecting their visible neighbor.
+      const rootLauncher = remaining?.target.kind === "new_tab" && pane.tabs.length === 1;
+      if (!layout || remaining && !rootLauncher) return;
+      if (virtual) {
+        const id = virtual.draft.draftId;
+        if (!virtual.preserveGroup) groupModule?.forgetTabGroupKey(virtualId(id));
+        handoffs.delete(id);
+        knownDrafts.delete(id);
+        draftSlots.delete(id);
+        pinnedDrafts.delete(id);
+        notifyProjection();
+      }
+      const selected = currentSelection();
+      if (!active || selected?.serverId !== source.normalizedServerId || selected.workspaceId !== source.normalizedWorkspaceId) return;
+      if (replacement) activateItem(replacement, source);
+      else if (rootLauncher) draftBridge?.dismiss?.();
+    }, release);
   }
   function closeCurrentShownTab() {
     const selection = cycleSelection();
@@ -1071,16 +1152,7 @@ export default function contribute(client) {
     if (!item) return true;
     if (item.entry) closeGlobal(item.entry, source);
     else if (item.draft) closeVirtual(item.draft, source);
-    else {
-      const key = JSON.stringify([paneKey(source), item.tab.tabId]);
-      if (pendingNativeCloses.has(key)) return true;
-      pendingNativeCloses.add(key);
-      let result;
-      try { result = source.onCloseTab(item.tab.tabId); }
-      catch (error) { pendingNativeCloses.delete(key); throw error; }
-      const release = () => pendingNativeCloses.delete(key);
-      Promise.resolve(result).then(release, release);
-    }
+    else closeNative(item.tab.tabId, source);
     return true;
   }
   presentationModule.WorkspaceTabPresentationResolver = function GlobalTabPresentation(props) {
@@ -1200,7 +1272,7 @@ export default function contribute(client) {
     const close = (tabId) => {
       const entry = lookup(tabId);
       const draft = lookupVirtual(tabId);
-      return entry ? closeGlobal(entry, props) : draft ? closeVirtual(draft, props) : props.onCloseTab(tabId);
+      return entry ? closeGlobal(entry, props) : draft ? closeVirtual(draft, props) : closeNative(tabId, props);
     };
     const actOnAgent = (name, agentId, tab) => {
       const matching = model.entries().filter(item => item.agentId === agentId);
@@ -1210,8 +1282,10 @@ export default function contribute(client) {
       return entry ? sourceAction(entry, name, agentId) : props[name](agentId);
     };
     const closeRange = (tabId, predicate) => {
-      const index = tabs.findIndex((row) => row.tab.tabId === tabId);
-      const selected = tabs.filter((row, i) => predicate(i, index));
+      const ordered = cycleRows(props, true).map(item => tabs.find(row => row.tab.tabId === (item.tab?.tabId || item.key))).filter(Boolean);
+      const index = ordered.findIndex((row) => row.tab.tabId === tabId);
+      if (index < 0) return;
+      const selected = ordered.filter((row, i) => predicate(i, index));
       selected.filter((row) => !row.isActive).forEach((row) => close(row.tab.tabId));
       selected.filter((row) => row.isActive).forEach((row) => close(row.tab.tabId));
     };
@@ -1274,6 +1348,8 @@ export default function contribute(client) {
     });
   }
   const releaseBridge = draftBridge ? draftBridge.subscribe(syncBridge) : () => {};
+  const initialPreviewDraft = bridgeState.entries.filter(entry => entry.kind !== "history" && !pinnedDrafts.has(entry.draftId)).at(-1);
+  if (initialPreviewDraft) replacePreview(initialPreviewDraft.draftId);
   const releaseBar = draftBridge ? draftBridge.registerTabBar(NewWorkspaceTabsBar) : () => {};
   const releasePresence = presenceBridge ? presenceBridge.register({read: model.tabPresence, subscribe: model.subscribe,
     retain: ({serverId, workspaceId, agentId, tabId}) => {
@@ -1281,13 +1357,14 @@ export default function contribute(client) {
       const index = entries.findIndex(entry => entry.serverId === serverId && entry.agentId === agentId);
       model.retainAt(serverId, workspaceId, {tabId, target: {kind: "agent", agentId}}, index < 0 ? entries.length : index);
     }}) : () => {};
-  globalThis.__PASEO_GLOBAL_TABS__ = { version: 2, model, dispose() {
+  globalThis.__PASEO_GLOBAL_TABS__ = { version: 2, model, pinnedDrafts, dispose() {
     if (disposed) return;
     disposed = true;
     resetCycle();
     pendingNativeCloses.clear();
     releaseBar();
     releaseBridge();
+    releasePreview();
     releasePresence();
     releaseStorageStatus();
     releaseGroupModel();

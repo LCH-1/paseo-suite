@@ -315,11 +315,13 @@ test("a new plugin revision transfers existing owners to the replacement control
   const app = harness(titleSyncIds);
   const firstCleanup = app.context.contribute({ addAgentTabTitleResolver() {} });
   const first = app.context.__PASEO_GLOBAL_TABS__;
+  first.pinnedDrafts.add("explicitly-kept-empty-draft");
   const lease = app.context.__PASEO_GLOBAL_TABS_LEASE__;
   lease.revision = "old-revision";
   const secondCleanup = app.context.contribute({ addAgentTabTitleResolver() {} });
   const second = app.context.__PASEO_GLOBAL_TABS__;
   assert.notEqual(first, second);
+  assert.equal(second.pinnedDrafts.has("explicitly-kept-empty-draft"), true);
   assert.equal(app.context.__PASEO_GLOBAL_TABS_LEASE__, lease);
   assert.equal(lease.owners.size, 2);
   secondCleanup();

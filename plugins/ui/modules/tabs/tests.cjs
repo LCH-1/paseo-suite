@@ -330,7 +330,7 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
     4: { useLastWorkspaceSelection: () => selection, getLastWorkspaceSelection: () => selection,
       navigateToWorkspace: (input) => calls.push(["navigate", input]) },
     5: { useSessionStore: Object.assign((selector) => selector({ sessions: sessionMap }), {
-      getState: () => ({ sessions: sessionMap }), subscribe: () => () => {},
+    getState: () => ({ sessions: sessionMap }), subscribe: () => () => {},
     }) },
     6: { useWorkspaceLayoutStore: { getState: () => layoutState,
       subscribe(listener) { layoutListeners.add(listener); return () => layoutListeners.delete(listener); },
@@ -349,7 +349,9 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
       return session?.workspaces.get(context.workspaceId)?.projectName || null;
     } },
     12: { useSettings: () => ({ settings }) },
-    13: { isTabGroupKeyVisible: () => true, forgetTabGroupKey() {},
+    13: { isTabGroupKeyVisible: () => true, forgetTabGroupKey(key) {
+      setGroups({ ...groups, groups: groups.groups.map(group => ({ ...group, tabs: group.tabs.filter(tab => tab.key !== key) })).filter(group => group.tabs.length) });
+    },
       useTabGroups: Object.assign(selector => selector({ state: groups }), {
         getState: () => ({ state: groups, update: reduce => setGroups(reduce(groups)) }),
         subscribe(listener) { groupListeners.add(listener); return () => groupListeners.delete(listener); },
@@ -724,7 +726,7 @@ test("다른 호스트의 같은 workspace ID와 metadata 미확정 제목을 �
   assert.equal(element.props.children({ label: "Saved", titleState: "ready" }).label, "Saved");
 });
 function composer(paneId = "main", dialog = false) {
-  const pane = element({ "data-testid": "workspace-pane-" + paneId });
+  const pane = paneId ? element({ "data-testid": "workspace-pane-" + paneId }) : null;
   const setup = dialog ? element({ "data-testid": "workspace-setup-dialog" }, pane) : pane;
   const root = element({ "data-testid": "message-input-root" }, setup);
   return Object.assign(element({ "data-composer-input": "true" }, root, "TEXTAREA"), { value: "", disabled: false, readOnly: false });
@@ -776,7 +778,7 @@ test("사이드바 워크스페이스 더블클릭을 늦은 라우팅과 레이
   app.emit("dblclick", { target: element({}, workspace) });
   assert.equal(app.model.preview().agentId, "agent-a");
   app.render(app.props("b", [row("b")]));
-  assert.equal(app.model.preview().agentId, "agent-b");
+  assert.equal(app.model.preview(), null);
   app.setLayout("b", row("b").tab);
   assert.equal(app.model.preview(), null);
   assert.equal(app.model.entries().length, 1);
@@ -819,6 +821,37 @@ test("첫 실제 composer 입력과 IME 조합에서만 해당 pane 대화를 �
   assert.deepEqual(app.model.entries().map((entry) => entry.agentId), ["agent-a", "agent-b"]);
 });
 
+test("활동 행이 다시 마운트되어도 같은 대화의 빠른 두 클릭은 고정한다", () => {
+  const app = harness();
+  app.render(app.props("a", [row("a")]));
+  const click = id => app.emit("click", { target: element({}, element({ "data-testid": "sidebar-activity-session-host-" + id })) });
+  click("agent-a");
+  app.advanceTime(150);
+  click("agent-b");
+  assert.equal(app.model.preview().agentId, "agent-a");
+  app.advanceTime(600);
+  click("agent-a");
+  assert.equal(app.model.preview().agentId, "agent-a");
+  app.advanceTime(150);
+  click("agent-a");
+  assert.equal(app.model.preview(), null);
+});
+
+test("pane 래퍼 없는 집중 화면에서도 첫 채팅 입력은 현재 대화를 고정한다", () => {
+  const app = harness();
+  app.render(app.props("a", [row("a")]));
+  app.emit("input", { target: composer(null), data: "첫 글자", isTrusted: true });
+  assert.equal(app.model.preview(), null);
+});
+
+test("레이아웃 초기화 전 입력도 현재 pane의 실제 대화 source로 고정한다", () => {
+  const app = harness();
+  app.setLayoutState({ layoutByWorkspace: {} });
+  app.render(app.props("a", [row("a")]));
+  app.emit("compositionupdate", { target: composer(), data: "ㅎ", isTrusted: true });
+  assert.equal(app.model.preview(), null);
+});
+
 test("새 대화 작성 pane·읽기전용 입력은 고정하지 않으며 dispose는 모든 listener를 해제한다", () => {
   const app = harness();
   app.render(app.props("a", [row("a")]));
@@ -828,7 +861,7 @@ test("새 대화 작성 pane·읽기전용 입력은 고정하지 않으며 disp
   const readonly = composer(); readonly.readOnly = true;
   app.emit("input", { target: readonly, data: "readonly" });
   assert.equal(app.model.preview().agentId, "agent-a");
-  assert.equal([...app.documentListeners.values()].reduce((total, set) => total + set.size, 0), 4);
+  assert.equal([...app.documentListeners.values()].reduce((total, set) => total + set.size, 0), 5);
   assert.equal(app.layoutListeners.size, 1);
   const plugin = app.context.__PASEO_GLOBAL_TABS__;
   plugin.dispose(); plugin.dispose();
@@ -929,7 +962,7 @@ test("Ctrl+W native 비동기 확인 중에는 중복을 소비하고 취소·�
   app.context.__PASEO_GLOBAL_TABS__.dispose();
 });
 
-test("Ctrl+W dispatcher는 작성 탭의 X 경로만 사용하고 보존 대화와 미리보기는 유지한다", () => {
+test("Ctrl+W dispatcher는 작성 탭의 X 경로만 사용하고 고정 대화를 유지한다", () => {
   const app = harness(null, true); pinned(app, ["a"]);
   app.model.ingest("host", "p", [row("p")]);
   const id = app.bridge.open();
@@ -939,7 +972,7 @@ test("Ctrl+W dispatcher는 작성 탭의 X 경로만 사용하고 보존 대화�
   assert.equal(app.closeAction(), true);
   assert.deepEqual(app.calls.filter(([name]) => name === "draft-close"), [["draft-close", id]]);
   assert.deepEqual(app.model.entries().map((entry) => ({ ...entry })), entries);
-  assert.equal(app.model.preview().agentId, "agent-p");
+  assert.equal(app.model.preview(), null);
   assert.equal(app.stored(), saved);
   assert.equal(app.calls.filter(([name]) => name === "close-native" || name === "native-keyboard-close").length, 0);
 });
@@ -1208,6 +1241,110 @@ test("대기 중인 route와 무관한 workspace에서는 오래된 source를 �
 });
 
 const draftIdOf = (id) => "global-new-workspace:" + JSON.stringify(id);
+function keepDraft(app, id) {
+  const bar = app.renderDraft();
+  bar.onKeepTab(bar.tabs.find(row => row.tab.tabId === draftIdOf(id)).tab);
+}
+
+test("빈 새 워크스페이스는 다른 빈 작성 탭과 대화 미리보기로 대체된다", () => {
+  const app = harness(null, true); pinned(app, ["a"]);
+  app.model.ingest("host", "p", [row("p")]);
+  const one = app.bridge.open();
+  assert.equal(app.model.preview(), null);
+  const two = app.bridge.open();
+  assert.deepEqual(app.bridgeSnapshot().entries.map(entry => entry.draftId), [two]);
+  assert.deepEqual(app.calls.filter(([kind]) => kind === "draft-close"), [["draft-close", one]]);
+  app.render(app.props("b", [row("b")]));
+  assert.equal(app.bridgeSnapshot().entries.length, 0);
+  assert.equal(app.model.preview().agentId, "agent-b");
+});
+
+test("새 워크스페이스는 타이핑 전 미리보기이고 실제 입력 뒤에는 유지된다", () => {
+  const app = harness(null, true);
+  const one = app.bridge.open();
+  const preview = () => {
+    const tab = app.renderDraft().tabs.find(item => item.tab.tabId === draftIdOf(one)).tab;
+    return app.presentation.WorkspaceTabPresentationResolver({ tab, children: value => value }).isPreview;
+  };
+  assert.equal(preview(), true);
+  app.emit("compositionupdate", { target: composer(null), data: "ㅎ", isTrusted: true });
+  assert.equal(preview(), false);
+  const two = app.bridge.open();
+  assert.deepEqual(app.bridgeSnapshot().entries.map(entry => entry.draftId), [one, two]);
+});
+
+test("그룹 중간 탭을 닫으면 삭제 전 화면 순서의 바로 오른쪽 탭으로 이동한다", () => {
+  const app = harness(null, false, false, true); pinned(app, ["a", "b", "c", "d"]);
+  const props = app.props("b", [row("b")]);
+  let rendered = app.render(props);
+  const byAgent = id => rendered.tabs.find(row => row.tab.target.agentId === "agent-" + id).tab;
+  app.setGroups({ order: ["a", "b", "c", "d"].map(id => byAgent(id).key),
+    groups: [{ id: "g", tabs: [byAgent("b"), byAgent("d")] }] });
+  rendered = app.render(props);
+  app.calls.length = 0;
+  rendered.onCloseTab(byAgent("b").tabId);
+  assert.deepEqual(destinations(app), ["agent-d"]);
+});
+
+test("좌우 탭 닫기도 그룹이 투영된 실제 화면 순서를 따른다", () => {
+  const app = harness(null, false, false, true); pinned(app, ["a", "b", "c", "d"]);
+  let rendered = app.render(app.props("a", [row("a")]));
+  const byAgent = id => rendered.tabs.find(row => row.tab.target.agentId === "agent-" + id).tab;
+  app.setGroups({ order: ["a", "b", "c", "d"].map(id => byAgent(id).key),
+    groups: [{ id: "g", tabs: [byAgent("b"), byAgent("d")] }] });
+  rendered = app.render(app.props("a", [row("a")]));
+  rendered.onCloseTabsToRight(byAgent("d").tabId);
+  assert.deepEqual(app.model.entries().map(entry => entry.agentId), ["agent-a", "agent-b", "agent-d"]);
+});
+
+test("native 탭의 실제 닫기 완료 후에는 전역 화면 순서의 이웃으로 이동한다", async () => {
+  const app = harness(); pinned(app, ["a", "b"]);
+  const file = nativeRow("file", "file");
+  const props = app.props("a", [row("a", false), { ...file, isActive: true }]);
+  app.setLayout("a", file.tab);
+  props.onCloseTab = () => app.setLayout("a", row("a").tab);
+  const rendered = app.render(props);
+  app.calls.length = 0;
+  await rendered.onCloseTab(file.tab.tabId);
+  assert.deepEqual(destinations(app), ["agent-b"]);
+});
+
+test("접힌 그룹 앞 탭을 닫으면 숨겨진 멤버 대신 다음 보이는 탭으로 이동한다", () => {
+  const app = harness(null, false, false, true); pinned(app, ["a", "b", "c", "d"]);
+  let rendered = app.render(app.props("a", [row("a")]));
+  const byAgent = id => rendered.tabs.find(row => row.tab.target.agentId === "agent-" + id).tab;
+  app.setGroups({ order: ["a", "b", "c", "d"].map(id => byAgent(id).key),
+    groups: [{ id: "g", collapsed: true, tabs: [byAgent("b"), byAgent("d")] }] });
+  rendered = app.render(app.props("a", [row("a")]));
+  rendered.onCloseTab(byAgent("a").tabId);
+  assert.deepEqual(destinations(app), ["agent-c"]);
+});
+
+test("마지막 native 새 탭이 호스트 레이아웃에 남아도 전역 이웃으로 나갈 수 있다", async () => {
+  const app = harness(); pinned(app, ["a", "b"]);
+  const launcher = nativeRow("launcher", "new_tab");
+  app.setLayout("a", launcher.tab);
+  const rendered = app.render(app.props("a", [{ ...launcher, isActive: true }]));
+  await rendered.onCloseTab(launcher.tab.tabId);
+  assert.deepEqual(destinations(app), ["agent-b"]);
+});
+
+test("native 작성 handoff의 닫기 취소는 가상 탭을 유지하고 닫기 완료 때만 제거한다", async () => {
+  const app = harness(null, true); pinned(app, ["a"]);
+  const id = app.bridge.open(); app.renderDraft();
+  completeDraft(app, id, { kind: "draft", draftId: "native" }, "native-tab");
+  const native = { tab: { tabId: "native-tab", target: { kind: "draft", draftId: "native" } }, isActive: true };
+  app.setLayout("created", native.tab);
+  const props = app.props("created", [native]);
+  let rendered = app.render(props);
+  await rendered.onCloseTab(draftIdOf(id));
+  assert.ok(app.render(props).tabs.some(row => row.tab.tabId === draftIdOf(id)));
+  props.onCloseTab = () => app.setLayout("created", row("a").tab);
+  rendered = app.render(props);
+  await rendered.onCloseTab(draftIdOf(id));
+  assert.ok(app.render(props).tabs.every(row => row.tab.tabId !== draftIdOf(id)));
+  assert.deepEqual(destinations(app), ["agent-a"]);
+});
 function completeDraft(app, draftId, target, tabId, workspaceId = "created", sequence) {
   const snapshot = app.bridgeSnapshot();
   app.setBridgeSnapshot({ ...snapshot, entries: snapshot.entries.filter((entry) => entry.draftId !== draftId), activeDraftId: null,
@@ -1240,7 +1377,7 @@ test("bridge가 없으면 작성 탭 등록 없이 기존 기능만 유지한다
 
 test("여러 작성 탭은 고유 ID로 같은 행에 표시되고 생성 전 기본 제목이 즉시 준비된다", () => {
   const app = harness(null, true); pinned(app, ["a"]);
-  const one = app.bridge.open(); const two = app.bridge.open({ serverId: "other-host" });
+  const one = app.bridge.open(); keepDraft(app, one); const two = app.bridge.open({ serverId: "other-host" });
   const rendered = app.renderDraft();
   assert.equal(rendered.globalDraftContext, true);
   assert.equal(rendered.normalizedWorkspaceId, "");
@@ -1249,12 +1386,12 @@ test("여러 작성 탭은 고유 ID로 같은 행에 표시되고 생성 전 �
   const virtual = rendered.tabs.filter((item) => item.tab.target.kind === "new_tab");
   assert.deepEqual(Array.from(virtual, (item) => item.tab.tabId), [draftIdOf(one), draftIdOf(two)]);
   assert.equal(virtual[1].isActive, true);
-  const output = app.presentation.WorkspaceTabPresentationResolver({ tab: virtual[0].tab,
+  const output = app.presentation.WorkspaceTabPresentationResolver({ tab: virtual[1].tab,
     serverId: "wrong", workspaceId: "wrong", children: (value) => value });
   assert.equal(output.label, "새 워크스페이스");
   assert.equal(output.titleState, "ready");
   assert.equal(output.isPreview, true);
-  assert.equal(app.presentation.WorkspaceTabPresentationResolver({ tab: virtual[0].tab, children: (value) => value }), output);
+  assert.equal(app.presentation.WorkspaceTabPresentationResolver({ tab: virtual[1].tab, children: (value) => value }), output);
   assert.equal(app.model.entries().length, 1);
   assert.ok(!app.stored().includes(one));
   for (const name of ["onCopyTerminalId", "onCopyFilePath", "onRenameTab", "onCreateNewTab", "onExitFocusMode"]) {
@@ -1262,7 +1399,7 @@ test("여러 작성 탭은 고유 ID로 같은 행에 표시되고 생성 전 �
   }
 });
 
-test("작성 화면과 기존 대화를 왕복해도 작성 identity와 기존 미리보기가 보존된다", () => {
+test("작성 화면은 이전 미리보기를 대체하고 고정 대화와 왕복해도 작성 identity를 보존한다", () => {
   const app = harness(null, true); pinned(app, ["a"]);
   app.model.ingest("host", "p", [row("p")]);
   const id = app.bridge.open();
@@ -1275,12 +1412,12 @@ test("작성 화면과 기존 대화를 왕복해도 작성 identity와 기존 �
   workspace.onNavigateTab(draftIdOf(id));
   assert.deepEqual(app.calls.filter(([kind]) => kind === "draft-navigate"), [["draft-navigate", id]]);
   assert.equal(app.bridgeSnapshot().entries[0], snapshot);
-  assert.equal(app.model.preview().agentId, "agent-p");
+  assert.equal(app.model.preview(), null);
 });
 
 test("작성 탭 재정렬은 가상 target을 native 레이아웃에 쓰지 않는다", () => {
   const app = harness(null, true); pinned(app, ["a", "b"]);
-  const one = app.bridge.open(); const two = app.bridge.open();
+  const one = app.bridge.open(); keepDraft(app, one); const two = app.bridge.open(); keepDraft(app, two);
   const workspace = app.render(app.props("a", [row("a"), nativeRow("file", "file")]));
   const next = [workspace.tabs[2].tab, workspace.tabs[0].tab, workspace.tabs[3].tab, workspace.tabs[1].tab, workspace.tabs[4].tab];
   workspace.onReorderTabs(next);
@@ -1309,7 +1446,7 @@ test("작성 탭을 닫으면 이웃으로 이동하고 기존 대화·원본 dr
 
 test("작성 화면 Ctrl+Tab·역방향은 대화와 여러 작성 탭 사이를 순환한다", () => {
   const app = harness(null, true); pinned(app, ["a"]);
-  const one = app.bridge.open(); const two = app.bridge.open();
+  const one = app.bridge.open(); keepDraft(app, one); const two = app.bridge.open(); keepDraft(app, two);
   app.bridge.activate(one); app.renderDraft();
   app.calls.length = 0;
   app.key(); app.renderDraft();
@@ -1327,8 +1464,11 @@ test("정확한 생성 완료는 작성 위치를 실제 고정 대화로 바꾸
   const app = harness(null, true); pinned(app, ["a"]);
   app.model.ingest("host", "p", [row("p")]);
   const id = app.bridge.open();
+  keepDraft(app, id);
+  app.model.ingest("host", "a", [row("a")]);
+  app.model.ingest("host", "p", [row("p")]);
   const bar = app.renderDraft();
-  bar.onReorderTabs([bar.tabs[0].tab, bar.tabs[2].tab, bar.tabs[1].tab]);
+  bar.onReorderTabs([bar.tabs[0].tab, bar.tabs[1].tab, bar.tabs[2].tab]);
   completeDraft(app, id, { kind: "agent", agentId: "created-agent" }, "official-agent-tab");
   assert.deepEqual(app.model.entries().map((entry) => [entry.agentId, entry.pinned]),
     [["agent-a", true], ["created-agent", true], ["agent-p", false]]);
@@ -1387,7 +1527,7 @@ test("완료된 native terminal 탭 닫기는 실제 source에 원래 tabId로 �
 
 test("한 snapshot의 여러 완료는 작성 슬롯 순서를 보존하고 다른 draft를 밀어내지 않는다", () => {
   const app = harness(null, true); pinned(app, ["a", "b"]);
-  const one = app.bridge.open(); const two = app.bridge.open(); const three = app.bridge.open();
+  const one = app.bridge.open(); keepDraft(app, one); const two = app.bridge.open(); keepDraft(app, two); const three = app.bridge.open();
   const bar = app.renderDraft();
   bar.onReorderTabs([bar.tabs[0].tab, bar.tabs[2].tab, bar.tabs[3].tab, bar.tabs[4].tab, bar.tabs[1].tab]);
   app.setBridgeSnapshot({ entries: [app.bridgeSnapshot().entries[2]], activeDraftId: three,
