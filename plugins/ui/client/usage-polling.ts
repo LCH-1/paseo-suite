@@ -51,6 +51,8 @@ export function startUsagePolling(
 }
 
 export function installUsagePolling() {
+  if (typeof document === "undefined" || typeof window === "undefined")
+    return () => {};
   const runtime = globalThis as typeof globalThis & {
     __r?: (id: number) => {
       queryClient?: UsageQueryClient;

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { startUsagePolling } from "../plugins/ui/client/usage-polling";
+import { installUsagePolling, startUsagePolling } from "../plugins/ui/client/usage-polling";
+
+test("usage compatibility is inert on clients without browser globals", () => {
+  assert.doesNotThrow(() => installUsagePolling()());
+});
 
 test("old Core usage refreshes on its timer, skips inactive/native/offline queries and disposes", async (t) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
