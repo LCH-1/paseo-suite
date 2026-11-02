@@ -8,14 +8,74 @@ type KeyEvent = {
   preventDefault(): void;
 };
 type WebHost = {
-  localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void };
+  localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void; removeItem(key: string): void };
+  addEventListener?(type: string, callback: () => void): void;
+  removeEventListener?(type: string, callback: () => void): void;
   document?: {
     addEventListener(type: string, callback: (event: KeyEvent) => void, capture: boolean): void;
     removeEventListener(type: string, callback: (event: KeyEvent) => void, capture: boolean): void;
   };
 };
 const memory = new Map<string, SavedTabs>();
+const draftMemory = new Map<string, string>();
+const pendingDrafts = new Map<string, { host: string; timer: ReturnType<typeof setTimeout> }>();
 const web = globalThis as unknown as WebHost;
+
+function draftKey(host: string, agent: string) {
+  return `terminal-draft:${encodeURIComponent(host)}:${encodeURIComponent(agent)}`;
+}
+
+export function readDraft(host: string, agent: string): string {
+  const key = draftKey(host, agent);
+  if (draftMemory.has(key)) return draftMemory.get(key)!;
+  let value = "";
+  if (Platform.OS === "web") {
+    try { value = web.localStorage?.getItem(key) ?? ""; }
+    catch { /* 저장소가 차단되어도 현재 창의 초안은 메모리에 보관한다. */ }
+  }
+  draftMemory.set(key, value);
+  return value;
+}
+
+function flushDraft(key: string) {
+  const pending = pendingDrafts.get(key);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingDrafts.delete(key);
+  if (Platform.OS !== "web") return;
+  try {
+    const value = draftMemory.get(key) ?? "";
+    if (value) web.localStorage?.setItem(key, value);
+    else web.localStorage?.removeItem(key);
+  } catch { /* 저장 실패 시에도 현재 창의 최신 초안을 유지한다. */ }
+}
+
+export function writeDraft(host: string, agent: string, value: string) {
+  const key = draftKey(host, agent);
+  if (draftMemory.get(key) === value) return;
+  draftMemory.set(key, value);
+  if (Platform.OS !== "web") return;
+  const previous = pendingDrafts.get(key);
+  if (previous) clearTimeout(previous.timer);
+  pendingDrafts.set(key, { host, timer: setTimeout(() => flushDraft(key), 250) });
+}
+
+export function flushDrafts(host: string) {
+  for (const [key, pending] of pendingDrafts) if (pending.host === host) flushDraft(key);
+}
+
+export function bindDraftFlush(host: string) {
+  const flush = () => flushDrafts(host);
+  if (Platform.OS === "web") {
+    web.addEventListener?.("pagehide", flush);
+    web.addEventListener?.("beforeunload", flush);
+  }
+  return () => {
+    web.removeEventListener?.("pagehide", flush);
+    web.removeEventListener?.("beforeunload", flush);
+    flush();
+  };
+}
 
 export function readTabs(host: string): SavedTabs {
   if (Platform.OS === "web") {

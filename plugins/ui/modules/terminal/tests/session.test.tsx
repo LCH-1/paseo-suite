@@ -80,6 +80,59 @@ test("다시 연 대화는 캐시된 내용을 즉시 표시하고 활성 구독
   assert.equal(mock.active.size, 0);
 });
 
+test("비활성 대화는 내용을 보존하며 구독을 해제하고 복귀 시 최신 이력만 받는다", async () => {
+  const mock = mockApi();
+  let state!: ReturnType<typeof useTimeline>;
+  function Probe({ enabled }: { enabled: boolean }) { state = useTimeline(mock.api, "a", enabled); return null; }
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<Probe enabled />); await settle(); });
+  const entries = state.page!.entries;
+  mock.defer();
+  await act(async () => { renderer.update(<Probe enabled={false} />); await settle(); });
+  assert.equal(mock.active.size, 0);
+  assert.equal(state.page!.entries, entries);
+  assert.equal(state.page!.agent, null);
+  assert.equal(state.loading, false);
+  assert.deepEqual(mock.calls, ["a"]);
+  await act(async () => { renderer.update(<Probe enabled />); await settle(); });
+  assert.equal(state.page!.entries, entries);
+  assert.equal(state.loading, false);
+  assert.deepEqual([...mock.active], ["a"]);
+  mock.epoch("a", "fresh");
+  await act(async () => { mock.resolve(); await settle(); });
+  assert.equal(state.page?.epoch, "fresh");
+  await act(async () => renderer.unmount());
+  assert.equal(mock.active.size, 0);
+});
+
+test("비활성화 전에 시작한 늦은 조회와 다른 API의 내용은 보존한 화면을 덮어쓰지 않는다", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const mock = mockApi();
+  const other = mockApi();
+  let state!: ReturnType<typeof useTimeline>;
+  function Probe({ enabled, api = mock.api }: { enabled: boolean; api?: PaseoApi }) { state = useTimeline(api, "a", enabled); return null; }
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<Probe enabled />); await settle(); });
+  const previous = state.page;
+  mock.defer();
+  await act(async () => {
+    mock.callbacks.get("a")!({ agentId: "a", event: { type: "subscription_restored" }, subscriptionId: "resumed" });
+    t.mock.timers.tick(351);
+    await settle();
+  });
+  await act(async () => { renderer.update(<Probe enabled={false} />); await settle(); });
+  mock.epoch("a", "late");
+  await act(async () => { mock.resolve(); await settle(); });
+  assert.equal(state.page?.epoch, previous?.epoch);
+  assert.equal(mock.active.size, 0);
+  await act(async () => { renderer.update(<Probe api={other.api} enabled={false} />); await settle(); });
+  assert.equal(state.page, null);
+  assert.equal(state.loading, false);
+  assert.equal(other.active.size, 0);
+  assert.equal(other.calls.length, 0);
+  await act(async () => renderer.unmount());
+});
+
 test("구독 중복 생성 없이 몰린 스트림 이벤트를 병합하고 재연결 때 새 이력을 읽는다", async () => {
   const mock = mockApi();
   function Probe() { useTimeline(mock.api, "active"); return null; }
