@@ -141,6 +141,7 @@ export default function contribute(client) {
     };
   }
   if (lease?.revision === revision && lease.controller === globalThis.__PASEO_GLOBAL_TABS__) return retain(lease);
+  const previousDraftPins = [...(globalThis.__PASEO_GLOBAL_TABS__?.pinnedDrafts || [])];
   globalThis.__PASEO_GLOBAL_TABS__?.dispose();
   globalThis.__PASEO_GLOBAL_TABS_MODULES__ = ids;
   globalThis.PaseoGlobalTabsModel = (function () {${factory}})();
