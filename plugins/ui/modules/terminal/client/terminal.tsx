@@ -1,8 +1,8 @@
 import { usePaseo, type PluginScreenProps } from "@getpaseo/plugin/client";
 import type { PaseoAgent } from "./paseo";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { bindKeys, readTabs, writeTabs } from "./web";
+import { bindDraftFlush, bindKeys, readDraft, readTabs, writeDraft, writeTabs } from "./web";
 import { message, useDirectory, useTimeline } from "./session";
 import { mono, TimelineRow } from "./timeline";
 
@@ -17,6 +17,18 @@ function Button({ label, onPress, color, disabled }: ButtonProps) {
 
 const statusText = { idle: "준비", running: "작업 중", initializing: "시작 중", error: "오류", closed: "종료됨" };
 
+type RetainedConversations = { ids: string[]; recent: string[] };
+function retainConversations(current: RetainedConversations, opened: string[], active: string | null): RetainedConversations {
+  const recent = current.recent.filter(id => opened.includes(id) && id !== active);
+  if (active) recent.push(active);
+  const retained = recent.slice(-3);
+  const ids = current.ids.filter(id => retained.includes(id));
+  if (active && !ids.includes(active)) ids.push(active);
+  return ids.length === current.ids.length && ids.every((id, index) => current.ids[index] === id)
+    && recent.length === current.recent.length && recent.every((id, index) => current.recent[index] === id)
+    ? current : { ids, recent: retained };
+}
+
 export function TerminalScreen(props: PluginScreenProps) {
   return <HostTerminal key={props.host.id} {...props} />;
 }
@@ -26,13 +38,17 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
   const color = theme.colors;
   const directory = useDirectory(paseo);
   const [tabs, setTabs] = useState(() => readTabs(host.id));
+  const [retention, setRetention] = useState<RetainedConversations>(() => ({ ids: [], recent: [] }));
+  const retained = retainConversations(retention, tabs.ids, tabs.active);
   const [chooser, setChooser] = useState(false);
   const [query, setQuery] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(tabs.ids.map((id) => [id, readDraft(host.id, id)])));
   const [sending, setSending] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const sendingNow = useRef(new Set<string>());
   const [creating, setCreating] = useState(false);
+  const creatingNow = useRef(false);
   const [createError, setCreateError] = useState("");
   const [newForm, setNewForm] = useState(false);
   const [cwd, setCwd] = useState("");
@@ -48,15 +64,18 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
   const muted = { ...text, color: color.foregroundMuted };
 
   useEffect(() => writeTabs(host.id, tabs), [host.id, tabs]);
+  useEffect(() => { if (retention !== retained) setRetention(retained); }, [retention, retained]);
+  useEffect(() => bindDraftFlush(host.id), [host.id]);
   useEffect(() => {
     const x = tabs.active ? tabPositions.current.get(tabs.active) : undefined;
     if (x !== undefined) tabStrip.current?.scrollTo({ x: Math.max(0, x - 16), animated: false });
   }, [tabs.active, layout.compact]);
 
   const open = useCallback((id: string) => {
+    setDrafts((current) => current[id] !== undefined ? current : { ...current, [id]: readDraft(host.id, id) });
     setTabs((current) => ({ ids: current.ids.includes(id) ? current.ids : [...current.ids, id], active: id }));
     setChooser(false); setQuery(""); setNewForm(false);
-  }, []);
+  }, [host.id]);
 
   const close = useCallback((id: string | null) => {
     if (!id) return;
@@ -87,13 +106,16 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
       if (fresh.agent.status === "running" || fresh.agent.status === "initializing" || fresh.agent.status === "closed")
         throw new Error("세션이 메시지를 받을 준비가 되면 다시 전송하세요.");
       await handle.send(draft);
-      setDrafts((current) => current[id] === draft ? { ...current, [id]: "" } : current);
+      if (readDraft(host.id, id) === draft) {
+        writeDraft(host.id, id, "");
+        setDrafts((current) => current[id] === draft ? { ...current, [id]: "" } : current);
+      }
     } catch (error) { setErrors((current) => ({ ...current, [id]: message(error) })); }
     finally {
       sendingNow.current.delete(id);
       setSending((current) => ({ ...current, [id]: false }));
     }
-  }, [tabs.active, draft, chooser, selected, paseo, directory.upsert]);
+  }, [host.id, tabs.active, draft, chooser, selected, paseo, directory.upsert]);
 
   useEffect(() => bindKeys({
     next(delta) {
@@ -110,7 +132,8 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
   useEffect(() => { if (!chooser) input.current?.focus(); }, [tabs.active, chooser]);
 
   async function create() {
-    if (creating || !cwd.trim() || !model.includes("/")) return;
+    if (creatingNow.current || !cwd.trim() || !model.includes("/")) return;
+    creatingNow.current = true;
     setCreating(true); setCreateError("");
     try {
       const handle = await paseo.agents.create({ cwd: cwd.trim(), config: { provider: model.trim() }, title: title.trim() || undefined });
@@ -119,7 +142,7 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
       directory.upsert(result.agent);
       open(handle.id);
     } catch (error) { setCreateError(message(error)); }
-    finally { setCreating(false); }
+    finally { creatingNow.current = false; setCreating(false); }
   }
 
   function showForm() {
@@ -195,22 +218,31 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
             <Text numberOfLines={1} style={{ ...muted, fontSize: 11 }}>{item.provider} · {statusText[item.status]} · {item.cwd}</Text>
           </Pressable>} />
       </>}
-    </View> : tabs.active ? <Conversation key={tabs.active} id={tabs.active} theme={theme} agent={selected} navigation={navigation} onSnapshot={directory.upsert} />
-      : <View style={{ flex: 1, padding: layout.compact ? 24 : 40, justifyContent: "center", gap: 12 }}>
+    </View> : !tabs.active ? <View style={{ flex: 1, padding: layout.compact ? 24 : 40, justifyContent: "center", gap: 12 }}>
         <Text style={{ ...text, fontSize: 24 }}>❯ Terminal Tabs</Text>
         <Text style={muted}>대화에 집중하세요. 여러 작업은 위쪽 탭으로 전환합니다.</Text>
         <View style={{ alignSelf: "flex-start", backgroundColor: color.surface2 }}>
           <Button label="+ 세션 열기" color={color.accent} onPress={add} />
         </View>
         <Text style={{ ...muted, fontSize: 11 }}>탭을 닫아도 에이전트 작업은 계속됩니다.</Text>
-      </View>}
+      </View> : null}
+
+    <View style={{ flex: 1, minHeight: 0, display: chooser || !tabs.active ? "none" : "flex" }}>
+      {retained.ids.map(id => <View key={id} nativeID={`terminal-conversation-${id}`}
+        accessibilityElementsHidden={chooser || id !== tabs.active} importantForAccessibility={chooser || id !== tabs.active ? "no-hide-descendants" : "auto"}
+        pointerEvents={chooser || id !== tabs.active ? "none" : "auto"}
+        style={{ flex: 1, minHeight: 0, display: id === tabs.active ? "flex" : "none" }}>
+        <Conversation id={id} active={!chooser && id === tabs.active} theme={theme} agent={agents.find(agent => agent.id === id)}
+          navigation={navigation} onSnapshot={directory.upsert} />
+      </View>)}
+    </View>
 
     {!chooser && tabs.active && <View style={{ paddingHorizontal: 12, paddingTop: 8, gap: 6, borderTopWidth: 1, borderTopColor: color.border }}>
       {!!errors[tabs.active] && <Text selectable style={{ ...text, color: color.statusDanger }}>{errors[tabs.active]}</Text>}
       <View style={{ flexDirection: "row", alignItems: "flex-end", backgroundColor: color.surface2, paddingLeft: 10 }}>
         <Text style={{ ...text, paddingBottom: 13, color: color.accent }}>❯</Text>
         <TextInput ref={input} nativeID="terminal-tabs-composer" accessibilityLabel="에이전트에게 메시지 보내기" multiline
-          value={draft} onChangeText={(value) => { const id = tabs.active!; setDrafts((current) => ({ ...current, [id]: value })); }}
+          value={draft} onChangeText={(value) => { const id = tabs.active!; writeDraft(host.id, id, value); setDrafts((current) => ({ ...current, [id]: value })); }}
           placeholder={selected?.pendingPermissions.length ? "기본 세션에서 승인 요청을 처리하세요" : selected?.status === "running" ? "작업 중 · 다음 메시지를 미리 작성하세요" : "메시지를 입력하세요…"}
           placeholderTextColor={color.foregroundMuted} style={{ ...text, flex: 1, minHeight: 48, maxHeight: 160, padding: 12 }} />
         <Button label={sending[tabs.active] ? "전송 중…" : "전송 ↵"} color={color.accent} disabled={blocked || !draft.trim()} onPress={() => void send()} />
@@ -223,18 +255,18 @@ function HostTerminal({ theme, host, layout, navigation }: PluginScreenProps) {
   </View>;
 }
 
-function Conversation({ id, theme, agent, navigation, onSnapshot }: {
-  id: string; theme: PluginScreenProps["theme"]; agent?: PaseoAgent; navigation: PluginScreenProps["navigation"];
+const Conversation = memo(function Conversation({ id, active, theme, agent, navigation, onSnapshot }: {
+  id: string; active: boolean; theme: PluginScreenProps["theme"]; agent?: PaseoAgent; navigation: PluginScreenProps["navigation"];
   onSnapshot(agent: PaseoAgent): void;
 }) {
   const paseo = usePaseo();
-  const timeline = useTimeline(paseo, id);
+  const timeline = useTimeline(paseo, id, active);
   const color = theme.colors;
   const list = useRef<FlatList>(null);
   const following = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
   const snapshot = timeline.page?.agent ?? agent;
-  useEffect(() => { if (timeline.page?.agent) onSnapshot(timeline.page.agent); }, [timeline.page, onSnapshot]);
+  useEffect(() => { if (active && timeline.page?.agent) onSnapshot(timeline.page.agent); }, [active, timeline.page, onSnapshot]);
   const text = { color: color.foregroundMuted, fontFamily: mono, fontSize: 12 };
   return <View style={{ flex: 1, minHeight: 0 }}>
     <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 14, borderBottomWidth: 1, borderBottomColor: color.border }}>
@@ -252,10 +284,11 @@ function Conversation({ id, theme, agent, navigation, onSnapshot }: {
       style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
       initialNumToRender={20} windowSize={5} maxToRenderPerBatch={15}
       onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
+        if (!active) return;
         following.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 80;
         setShowLatest(!following.current);
       }} scrollEventThrottle={100}
-      onContentSizeChange={() => { if (following.current) list.current?.scrollToEnd({ animated: false }); }}
+      onContentSizeChange={() => { if (active && following.current) list.current?.scrollToEnd({ animated: false }); }}
       ListHeaderComponent={timeline.page?.hasOlder ? <Text style={{ ...text, paddingVertical: 12 }}>최근 160개 항목 · 이전 기록은 기본 세션에서 확인하세요.</Text> : null}
       ListEmptyComponent={!timeline.loading && !timeline.error ? <Text style={{ ...text, paddingVertical: 24 }}>❯ 메시지를 보내 작업을 시작하세요.</Text> : null}
       renderItem={({ item }) => <TimelineRow entry={item} theme={theme} />} />
@@ -263,4 +296,4 @@ function Conversation({ id, theme, agent, navigation, onSnapshot }: {
       <Button label="↓ 최신 메시지" color={color.accent} onPress={() => { following.current = true; setShowLatest(false); list.current?.scrollToEnd({ animated: false }); }} />
     </View>}
   </View>;
-}
+});

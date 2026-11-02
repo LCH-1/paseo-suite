@@ -153,17 +153,21 @@ interface TimelineState {
   loading: boolean;
 }
 
-function initialTimeline(paseo: PaseoApi, agentId: string | null): TimelineState {
+function initialTimeline(paseo: PaseoApi, agentId: string | null, enabled = true): TimelineState {
   const page = cachedTimeline(paseo, agentId);
-  return { paseo, agentId, page, error: "", loading: Boolean(agentId && !page) };
+  return { paseo, agentId, page, error: "", loading: Boolean(enabled && agentId && !page) };
 }
 
-export function useTimeline(paseo: PaseoApi, agentId: string | null) {
-  const [state, setState] = useState(() => initialTimeline(paseo, agentId));
+export function useTimeline(paseo: PaseoApi, agentId: string | null, enabled = true) {
+  const [state, setState] = useState(() => initialTimeline(paseo, agentId, enabled));
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    setState(initialTimeline(paseo, agentId));
-    if (!agentId) return;
+    setState(current => {
+      if (current.paseo !== paseo || current.agentId !== agentId || !current.page)
+        return initialTimeline(paseo, agentId, enabled);
+      return { ...current, page: { ...current.page, agent: null }, error: enabled ? "" : current.error, loading: false };
+    });
+    if (!agentId || !enabled) return;
     const selectedAgentId = agentId;
     const agent = paseo.agents.ref(selectedAgentId);
     let disposed = false;
@@ -230,7 +234,7 @@ export function useTimeline(paseo: PaseoApi, agentId: string | null) {
       if (timer) clearTimeout(timer);
       subscription();
     };
-  }, [paseo, agentId, revision]);
-  const current = state.paseo === paseo && state.agentId === agentId ? state : initialTimeline(paseo, agentId);
+  }, [paseo, agentId, enabled, revision]);
+  const current = state.paseo === paseo && state.agentId === agentId ? state : initialTimeline(paseo, agentId, enabled);
   return { page: current.page, error: current.error, loading: current.loading, retry: () => setRevision((value) => value + 1) };
 }
