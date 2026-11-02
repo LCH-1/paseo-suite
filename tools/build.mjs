@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
 import { isBuiltin } from "node:module";
+import { buildUsageModules } from "./build-usage-modules.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const output = path.join(root, "dist");
@@ -16,6 +17,7 @@ const appDist = path.join(core, "packages/app/dist");
 const hasApp = await fs
   .stat(path.join(appDist, "index.html"))
   .catch(() => null);
+if (hasApp) await buildUsageModules(appDist);
 execFileSync(
   process.execPath,
   [

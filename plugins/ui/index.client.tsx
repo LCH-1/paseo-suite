@@ -7,6 +7,7 @@ import hosts from "./modules/hosts/index.client";
 import importSessions from "./modules/import/index.client";
 import terminal from "./modules/terminal/index.client";
 import { UiModules } from "./client/modules";
+import { installUsagePolling } from "./client/usage-polling";
 import { methods, moduleIds, settings } from "./shared/settings";
 
 const labels = {
@@ -53,6 +54,7 @@ export default function contribute(client: PluginClientContext) {
     terminal: () => terminal(client),
   });
   const cleanups = [
+    installUsagePolling(),
     ...[
       "global-workspace-tabs",
       "host-order",
