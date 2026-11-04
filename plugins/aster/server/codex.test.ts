@@ -37,6 +37,14 @@ function reading(id: string, used = 20): CodexReading {
   };
 }
 
+test("Codex는 한도를 다 쓰지 않았으면 잔여가 적어도 선택하고 더 여유로운 계정을 우선한다", () => {
+  const choose = (...readings: CodexReading[]) =>
+    chooseCodexAccount({ readings, now, loads: new Map() })?.id ?? null;
+  assert.equal(choose(reading("a", 99)), "a");
+  assert.equal(choose(reading("a", 99), reading("b", 98)), "b");
+  assert.equal(choose(reading("a", 100)), null);
+});
+
 test("Codex는 해지 예약이 있어도 현재 유료 플랜이면 사용하고 실제 Free·알수없는 플랜은 제외", () => {
   for (const plan of [
     "go",

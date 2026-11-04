@@ -24,9 +24,16 @@ test("5시간 한도가 병목이면 5시간 초기화도 점수에 반영한다
   assert.equal(selectAccount([a, b], now)?.id, "b");
 });
 
-test("5시간 소진 직전 계정을 제외한다", () => {
+test("5시간 잔여가 적은 계정보다 여유가 있는 계정을 선택한다", () => {
   const a = { ...account("a"), fiveHour: { used: 96, resetsAt: now + hour } };
   assert.equal(selectAccount([a, account("b")], now)?.id, "b");
+});
+
+test("한도를 다 쓰지 않았으면 잔여가 적어도 선택하고 더 여유로운 계정을 우선한다", () => {
+  const nearly = (id: string, used: number) => ({ ...account(id), fiveHour: { used: 0, resetsAt: now + hour }, weekly: { used, resetsAt: now + 100 * hour } });
+  assert.equal(selectAccount([nearly("a", 99)], now)?.id, "a");
+  assert.equal(selectAccount([nearly("a", 99), nearly("b", 98)], now)?.id, "b");
+  assert.equal(selectAccount([nearly("a", 100)], now), null);
 });
 
 test("초기화 시각이 지나도 잔여량을 임의 복구하지 않는다", () => {

@@ -331,13 +331,10 @@ export function bootstrapAccounts(
           Number(deniesUsage(b)) - Number(deniesUsage(a)),
       )[0];
     const windows = latest?.report.windows ?? [];
-    const limits = [
-      { id: "five_hour", reserve: policy.fiveHourReserve },
-      { id: "weekly", reserve: policy.weeklyReserve },
-    ];
+    const limits = ["five_hour", "weekly"];
     const known = limits.flatMap((limit) => {
-      const window = windows.find((entry) => entry.id === limit.id);
-      return window ? [{ window, reserve: limit.reserve }] : [];
+      const window = windows.find((entry) => entry.id === limit);
+      return window ? [window] : [];
     });
     const partial =
       latest?.report.status === "available" &&
@@ -346,10 +343,10 @@ export function bootstrapAccounts(
       known.length > 0 &&
       known.length < limits.length &&
       known.every(
-        ({ window, reserve }) =>
+        (window) =>
           window.usedPct !== null &&
           window.usedPct >= 0 &&
-          window.usedPct < 100 - reserve &&
+          window.usedPct < 100 &&
           (window.resetsAt === null
             ? window.usedPct === 0
             : Date.parse(window.resetsAt) > now),
@@ -361,9 +358,9 @@ export function bootstrapAccounts(
           limits.some((limit) =>
             (entry.report.windows ?? []).some(
               (window) =>
-                window.id === limit.id &&
+                window.id === limit &&
                 window.usedPct !== null &&
-                window.usedPct >= 100 - limit.reserve,
+                window.usedPct >= 100,
             ),
           ),
       );
