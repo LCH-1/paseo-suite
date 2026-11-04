@@ -9,6 +9,8 @@
     "smoke": "node tools/smoke-packaged.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
+    "lint:files": "eslint --no-ignore",
+    "format:files": "prettier --write",
     "test": "tsx --test tests/*.test.ts",
     "format": "prettier --write tools tests plugins/ui/index.client.tsx plugins/ui/index.server.ts plugins/ui/shared plugins/ui/client"
   },

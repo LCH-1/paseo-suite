@@ -1,6 +1,11 @@
 {
   "name": "paseo-aster",
-  "version": "0.2.2",
+  "version": "0.3.0",
+  "paseoRuntimeAssets": [
+    "server/codex-proxy.mjs",
+    "server/codex-runtime.mjs",
+    "server/account-login.mjs"
+  ],
   "private": true,
   "license": "UNLICENSED",
   "repository": {
@@ -26,7 +31,16 @@
     "server/usage-revision.ts",
     "server/legacy-credential-rpc.ts",
     "server/core-profiles.ts",
-    "server/host-usage.ts"
+    "server/host-usage.ts",
+    "server/codex.ts",
+    "server/codex-policy.ts",
+    "server/codex-runtime.mjs",
+    "server/codex-runtime.d.mts",
+    "server/codex-proxy.mjs",
+    "server/account-login.mjs",
+    "server/account-management.ts",
+    "server/provider-policy.ts",
+    "shared/"
   ],
   "type": "module",
   "scripts": {

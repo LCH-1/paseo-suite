@@ -75,6 +75,15 @@ export function subscriptionAccess(
     return true;
   if (Date.parse(organization.claude_code_trial_ends_at ?? "") > now)
     return true;
+  if (
+    ["canceled", "cancelled"].includes(organization.subscription_status ?? "")
+  )
+    return false;
+  if (
+    ["active", "trialing"].includes(organization.subscription_status ?? "") &&
+    /team|business|enterprise/.test(organization.organization_type ?? "")
+  )
+    return true;
   // Team/Enterprise seats and unknown future profile shapes are not personal Free plans.
   if (
     account.has_claude_max === false &&
