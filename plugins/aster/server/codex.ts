@@ -105,6 +105,7 @@ export async function discoverCodexAccounts(
     )
       candidates.push({ id, home: provider.env.CODEX_HOME });
   const unique = new Map<string, CodexAccount>();
+  const freshness = new Map<string, { expiry: number; modified: number }>();
   for (const candidate of candidates) {
     const directory =
       candidate.home === "~"
@@ -116,12 +117,21 @@ export async function discoverCodexAccounts(
       throw Error("Codex 계정 폴더는 절대 경로로 등록하세요.");
     try {
       const auth = await codexTokens(resolve(directory));
-      if (!unique.has(auth.chatgptAccountId))
+      const modified = (await lstat(join(directory, "auth.json"))).mtimeMs;
+      const expiry = auth.expiresAt ?? 0,
+        previous = freshness.get(auth.chatgptAccountId);
+      if (
+        !previous ||
+        modified > previous.modified ||
+        (modified === previous.modified && expiry > previous.expiry)
+      ) {
+        freshness.set(auth.chatgptAccountId, { expiry, modified });
         unique.set(auth.chatgptAccountId, {
           id: candidate.id,
           home: resolve(directory),
           identity: auth.chatgptAccountId,
         });
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT")
         console.warn(
@@ -184,6 +194,7 @@ export function registerCodexRouting(server: PluginServerContext) {
     turns = new Map<string, number>(),
     reloading = new Set<string>(),
     blocked = new Map<string, number>(),
+    blockedHomes = new Map<string, number>(),
     reservations = new Map<string, number>();
   const excluded = new Set<string>();
   let serial: Promise<unknown> = Promise.resolve(),
@@ -199,17 +210,19 @@ export function registerCodexRouting(server: PluginServerContext) {
     return result;
   };
   const invalidate = (identity: string) => {
-    readings.delete(identity);
+    for (const [key, reading] of readings)
+      if (reading.value.identity === identity) readings.delete(key);
     revisions.set(identity, (revisions.get(identity) ?? 0) + 1);
   };
   async function inspect(
     account: CodexAccount,
     providers: Providers,
   ): Promise<CodexReading | null> {
-    const cached = readings.get(account.identity);
+    const cacheKey = `${account.identity}:${account.home}`;
+    const cached = readings.get(cacheKey);
     if (cached && cached.expires > Date.now()) return cached.value;
     const version = revisions.get(account.identity) ?? 0,
-      key = `${account.identity}:${version}`;
+      key = `${account.identity}:${account.home}:${version}`;
     const running = pending.get(key);
     if (running) return running;
     const task = (async () => {
@@ -233,7 +246,7 @@ export function registerCodexRouting(server: PluginServerContext) {
           lifetime.signal.aborted
         )
           return null;
-        readings.set(account.identity, { value, expires: Date.now() + 60000 });
+        readings.set(cacheKey, { value, expires: Date.now() + 60000 });
         return value;
       } catch {
         console.warn(
@@ -251,7 +264,11 @@ export function registerCodexRouting(server: PluginServerContext) {
     const accounts = await discoverCodexAccounts(providers),
       now = Date.now();
     const available = (
-      await Promise.all(accounts.map((account) => inspect(account, providers)))
+      await Promise.all(
+        accounts
+          .filter((account) => (blockedHomes.get(account.home) ?? 0) <= now)
+          .map((account) => inspect(account, providers)),
+      )
     ).filter(
       (reading): reading is CodexReading =>
         reading !== null && (blocked.get(reading.identity) ?? 0) <= now,
@@ -381,12 +398,19 @@ export function registerCodexRouting(server: PluginServerContext) {
           );
         if (accessFailure && previous) {
           invalidate(previous.account.identity);
-          blocked.set(previous.account.identity, Date.now() + 60000);
+          if (
+            /401|authentication|unauthorized/i.test(
+              outcome.kind === "failed" ? outcome.error.message : "",
+            )
+          )
+            blockedHomes.set(previous.account.home, Date.now() + 60000);
+          else blocked.set(previous.account.identity, Date.now() + 60000);
         }
         const selected = await choose(agent.id, providers);
         if (
           !selected ||
-          selected.identity === previous?.account.identity ||
+          (selected.identity === previous?.account.identity &&
+            selected.home === previous.account.home) ||
           busy.has(agent.id) ||
           permissions.has(agent.id) ||
           version !== turns.get(agent.id)

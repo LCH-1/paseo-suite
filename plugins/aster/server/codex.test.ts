@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -201,6 +201,26 @@ test("다중 계정은 인증 폴더별로 발견하고 같은 실제 계정 별
       "account-b",
     ]);
     await assert.rejects(codexTokens(first, "account-b"), /다른 계정/);
+  }));
+
+test("같은 Codex 계정에 다시 로그인하면 오래된 기본 인증보다 최신 등록 인증을 사용", async () =>
+  fixture(async (home) => {
+    const oldHome = join(home, "old"),
+      freshHome = join(home, "fresh");
+    await tokenFile(oldHome, "same-account");
+    await tokenFile(freshHome, "same-account");
+    await utimes(join(oldHome, "auth.json"), 100, 100);
+    await utimes(join(freshHome, "auth.json"), 200, 200);
+    const accounts = await discoverCodexAccounts(
+      {
+        codex: { env: { CODEX_HOME: oldHome } },
+        "codex-renewed": { extends: "codex", env: { CODEX_HOME: freshHome } },
+      },
+      join(home, "paseo"),
+      home,
+    );
+    assert.equal(accounts.length, 1);
+    assert.equal(accounts[0].home, freshHome);
   }));
 
 const fakeServer = `
