@@ -17,8 +17,6 @@ export interface Binding {
 }
 
 export const policy = {
-  fiveHourReserve: 5,
-  weeklyReserve: 1,
   maxAge: 6 * 60_000,
   switchCooldown: 10 * 60_000,
   switchGain: 1.2,
@@ -26,19 +24,19 @@ export const policy = {
 
 const hour = 3_600_000;
 
-function budget(window: WindowUsage, duration: number, reserve: number, now: number) {
+function budget(window: WindowUsage, duration: number, now: number) {
   if (!Number.isFinite(window.used) || window.used < 0 || window.used > 100) return null;
   if (window.resetsAt !== null && (!Number.isFinite(window.resetsAt) || window.resetsAt <= now)) return null;
   if (window.resetsAt === null && window.used !== 0) return null;
   const hoursLeft = Math.max(((window.resetsAt ?? now + duration * hour) - now) / hour, 0.25);
-  return Math.max(0, 100 - window.used - reserve) / hoursLeft;
+  return Math.max(0, 100 - window.used) / hoursLeft;
 }
 
 export function rankAccounts(accounts: AccountUsage[], now: number, loads = new Map<string, number>()) {
   return accounts.flatMap((account) => {
     if (!isCurrentUsage(account, now)) return [];
-    const short = budget(account.fiveHour, 5, policy.fiveHourReserve, now);
-    const weekly = budget(account.weekly, 168, policy.weeklyReserve, now);
+    const short = budget(account.fiveHour, 5, now);
+    const weekly = budget(account.weekly, 168, now);
     if (short === null || weekly === null || short <= 0 || weekly <= 0) return [];
     const load = loads.get(account.id) ?? 0;
     const score = Math.min(short, weekly) * account.capacity / (load + 1);
@@ -49,8 +47,8 @@ export function rankAccounts(accounts: AccountUsage[], now: number, loads = new 
 export function isCurrentUsage(account: AccountUsage, now: number) {
   return Number.isFinite(account.fetchedAt) && now >= account.fetchedAt && now - account.fetchedAt <= policy.maxAge
     && Number.isFinite(account.capacity) && account.capacity > 0
-    && budget(account.fiveHour, 5, policy.fiveHourReserve, now) !== null
-    && budget(account.weekly, 168, policy.weeklyReserve, now) !== null;
+    && budget(account.fiveHour, 5, now) !== null
+    && budget(account.weekly, 168, now) !== null;
 }
 
 export function selectAccount(accounts: AccountUsage[], now: number, loads = new Map<string, number>(), current?: Binding) {

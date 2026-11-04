@@ -57,7 +57,7 @@ export function codexBudget(reading: CodexReading, now: number): number | null {
     )
       return null;
     if (window.resetsAt !== null && window.resetsAt <= now) return null;
-    const remaining = Math.max(0, 100 - window.usedPercent - 5);
+    const remaining = Math.max(0, 100 - window.usedPercent);
     if (!remaining) return null;
     const duration = window.windowDurationMins;
     const hours =

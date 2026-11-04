@@ -29,10 +29,10 @@ test("5시간 창이 빠진 정상 보고서는 사용량을 만들지 않고 CL
 test("불완전한 창이라도 확인된 한도가 소진되거나 오래되면 시작하지 않는다", () => {
   const partial = report();
   partial.report.windows = partial.report.windows.filter(window => window.id === "weekly");
-  for (const used of [99, 100]) {
-    partial.report.windows[0].usedPct = used;
-    assert.deepEqual(bootstrapAccounts(accounts, [partial], now), []);
-  }
+  partial.report.windows[0].usedPct = 100;
+  assert.deepEqual(bootstrapAccounts(accounts, [partial], now), []);
+  partial.report.windows[0].usedPct = 99;
+  assert.equal(bootstrapAccounts(accounts, [partial], now).length, 1);
   partial.report.windows[0].usedPct = 20;
   for (const fetchedAt of [new Date(now - 7 * 60_000).toISOString(), new Date(now + 1000).toISOString(), "invalid"]) {
     assert.deepEqual(bootstrapAccounts(accounts, [{ ...partial, fetchedAt }], now), []);
