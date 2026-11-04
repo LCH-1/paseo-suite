@@ -280,6 +280,7 @@ export function registerCodexRouting(server: PluginServerContext) {
       : null;
   }
   const cleanup = (id: string) => {
+    excluded.delete(id);
     bindings.delete(id);
     busy.delete(id);
     permissions.delete(id);
@@ -340,11 +341,10 @@ export function registerCodexRouting(server: PluginServerContext) {
       },
     ),
     server.on("agent.turn_started", ({ agent, turnId }) => {
-      if (bindings.has(agent.id) || agent.provider === "codex") {
-        busy.add(agent.id);
-        turns.set(agent.id, ++sequence);
-        turnIds.set(agent.id, turnId);
-      }
+      // Track turns before async family discovery, including aliases opened before plugin reload.
+      busy.add(agent.id);
+      turns.set(agent.id, ++sequence);
+      turnIds.set(agent.id, turnId);
     }),
     server.on("agent.permission_requested", ({ agent }) => {
       permissions.add(agent.id);
