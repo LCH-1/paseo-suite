@@ -128,7 +128,16 @@ function mergeCredentialFreshness(local, incoming) {
 var HOME_PATH_PREFIX = "@paseo-home:";
 var PROFILE_PATH_PREFIX = "@paseo-profile:";
 var MACHINE_ENV_PREFIX = "@paseo-env:";
-var machineEnvironmentKeys = ["PATH", "PATHEXT", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"];
+var machineEnvironmentKeys = [
+  "PATH",
+  "PATHEXT",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "TEMP",
+  "TMP"
+];
 var vendorCommands = {
   claude: "claude",
   codex: "codex",
@@ -153,7 +162,11 @@ function object(value) {
 }
 function asProviders(value) {
   if (!object(value)) return {};
-  return Object.fromEntries(Object.entries(value).flatMap(([id, entry]) => object(entry) ? [[id, entry]] : []));
+  return Object.fromEntries(
+    Object.entries(value).flatMap(
+      ([id, entry]) => object(entry) ? [[id, entry]] : []
+    )
+  );
 }
 function providerFamily(id, providers) {
   const visited = /* @__PURE__ */ new Set();
@@ -162,7 +175,9 @@ function providerFamily(id, providers) {
     visited.add(current);
     if (providers[current]?.extends === "acp") {
       const command = providers[current]?.command;
-      return Array.isArray(command) && typeof command[0] === "string" && /^cursor-agent(?:\.(?:exe|cmd|bat|ps1))?$/i.test(command[0].replaceAll("\\", "/").split("/").at(-1)) ? "cursor" : null;
+      return Array.isArray(command) && typeof command[0] === "string" && /^cursor-agent(?:\.(?:exe|cmd|bat|ps1))?$/i.test(
+        command[0].replaceAll("\\", "/").split("/").at(-1)
+      ) ? "cursor" : null;
     }
     if (current in vendorCommands) return current;
     const parent = providers[current]?.extends;
@@ -190,10 +205,13 @@ function isAbsolutePath(value) {
   return /^(?:[a-z]:[\\/]|[\\/]{2}|\/)/i.test(value);
 }
 function portableHomePath(value, options = {}) {
-  if (value.startsWith(HOME_PATH_PREFIX) || value.startsWith(PROFILE_PATH_PREFIX)) return value;
+  if (value.startsWith(HOME_PATH_PREFIX) || value.startsWith(PROFILE_PATH_PREFIX))
+    return value;
   if (!isAbsolutePath(value) || /[\r\n\u0000;]/.test(value)) return value;
   const normalized = slashes(value);
-  const inferred = normalized.match(/^([a-z]:\/Users\/[^/]+|\/Users\/[^/]+|\/home\/[^/]+)(?:\/|$)/i)?.[1];
+  const inferred = normalized.match(
+    /^([a-z]:\/Users\/[^/]+|\/Users\/[^/]+|\/home\/[^/]+)(?:\/|$)/i
+  )?.[1];
   const home = options.home ? slashes(options.home) : inferred;
   if (!home) return value;
   const insensitive = windows(home);
@@ -201,40 +219,78 @@ function portableHomePath(value, options = {}) {
   const prefix = insensitive ? home.toLowerCase() : home;
   if (candidate !== prefix && !candidate.startsWith(`${prefix}/`)) return value;
   const relative = normalized.slice(home.length).replace(/^\//, "");
-  if (relative.split("/").some((part) => part === ".." || part === ".")) return value;
+  if (relative.split("/").some((part) => part === ".." || part === "."))
+    return value;
   return `${HOME_PATH_PREFIX}${relative}`;
 }
+function managedCodexCommand(value) {
+  if (!Array.isArray(value) || value.length !== 3 || typeof value[1] !== "string" || !/\/server\/codex-proxy\.mjs$/.test(slashes(value[1])) || typeof value[2] !== "string")
+    return null;
+  try {
+    const original = JSON.parse(value[2]);
+    return Array.isArray(original) && original.length > 0 && original.every((entry) => typeof entry === "string" && entry.length > 0) ? original : null;
+  } catch {
+    return null;
+  }
+}
 function standardVendorCommand(value, family2) {
-  if (!family2 || !Array.isArray(value) || !value.length || value.some((entry) => typeof entry !== "string")) return null;
+  if (!family2 || !Array.isArray(value) || !value.length || value.some((entry) => typeof entry !== "string"))
+    return null;
+  if (family2 === "codex" && managedCodexCommand(value)) return ["codex"];
   const command = vendorCommands[family2];
   const first = slashes(value[0]);
   if (/^node(?:\.exe)?$/i.test(first.split("/").at(-1)) && typeof value[1] === "string") {
     const script3 = slashes(value[1]).toLowerCase();
-    const npmEntrypoints = { claude: /\/node_modules\/@anthropic-ai\/claude-code\/cli\.js$/, codex: /\/node_modules\/@openai\/codex\/bin\/codex\.js$/ };
-    if (npmEntrypoints[family2]?.test(script3)) return [command, ...value.slice(2)];
+    const npmEntrypoints = {
+      claude: /\/node_modules\/@anthropic-ai\/claude-code\/cli\.js$/,
+      codex: /\/node_modules\/@openai\/codex\/bin\/codex\.js$/
+    };
+    if (npmEntrypoints[family2]?.test(script3))
+      return [command, ...value.slice(2)];
   }
   const base = first.split("/").at(-1).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
   if (base.toLowerCase() !== command.toLowerCase()) return null;
   if (first.includes("/")) {
     if (!isAbsolutePath(first)) return null;
     const directory2 = first.slice(0, first.lastIndexOf("/")).toLowerCase();
-    const standard = /(?:\/\.local\/bin|\/\.npm-global\/bin|\/\.volta\/bin|\/\.asdf\/shims|\/scoop\/shims|\/appdata\/roaming\/npm|\/appdata\/local\/microsoft\/winget\/links|\/program files(?: \(x86\))?\/nodejs)$/.test(directory2) || /^(?:\/usr\/bin|\/usr\/local\/bin|\/opt\/homebrew\/bin)$/.test(directory2) || /\/\.nvm\/versions\/node\/v[^/]+\/bin$/.test(directory2) || family2 === "claude" && /\/node_modules\/@anthropic-ai\/claude-code\/bin$/.test(directory2) || family2 === "cursor" && /\/appdata\/local\/cursor-agent$/.test(directory2) || family2 === "codex" && /\/settings-sync\/tools\/codex-rust-v[0-9][a-z0-9._-]*-(?:win32|linux|darwin)-(?:x64|arm64)(?:\/[^/]+)*$/.test(directory2);
+    const standard = /(?:\/\.local\/bin|\/\.npm-global\/bin|\/\.volta\/bin|\/\.asdf\/shims|\/scoop\/shims|\/appdata\/roaming\/npm|\/appdata\/local\/microsoft\/winget\/links|\/program files(?: \(x86\))?\/nodejs)$/.test(
+      directory2
+    ) || /^(?:\/usr\/bin|\/usr\/local\/bin|\/opt\/homebrew\/bin)$/.test(
+      directory2
+    ) || /\/\.nvm\/versions\/node\/v[^/]+\/bin$/.test(directory2) || family2 === "claude" && /\/node_modules\/@anthropic-ai\/claude-code\/bin$/.test(directory2) || family2 === "cursor" && /\/appdata\/local\/cursor-agent$/.test(directory2) || family2 === "codex" && /\/settings-sync\/tools\/codex-rust-v[0-9][a-z0-9._-]*-(?:win32|linux|darwin)-(?:x64|arm64)(?:\/[^/]+)*$/.test(
+      directory2
+    );
     if (!standard) return null;
   }
   return [command, ...value.slice(1)];
 }
 function projectProviders(value, options = {}) {
   const providers = asProviders(value);
-  return Object.fromEntries(Object.entries(providers).map(([id, provider]) => {
-    const family2 = providerFamily(id, providers);
-    const command = standardVendorCommand(provider.command, family2);
-    const projected = { ...provider, ...command ? { command: [command[0], ...command.slice(1).map((entry) => portableHomePath(entry, options))] } : {} };
-    if (object(provider.env)) {
-      const keys = profileEnvironmentKeys(family2);
-      projected.env = Object.fromEntries(Object.entries(provider.env).map(([key, entry]) => [key, typeof entry !== "string" ? entry : keys.includes(key) ? entry.startsWith(PROFILE_PATH_PREFIX) ? entry : profilePathToken(id, key) : machineEnvironmentKeys.includes(key.toUpperCase()) ? `${MACHINE_ENV_PREFIX}${key.toUpperCase()}` : portableHomePath(entry, options)]));
-    }
-    return [id, projected];
-  }));
+  return Object.fromEntries(
+    Object.entries(providers).map(([id, provider]) => {
+      const family2 = providerFamily(id, providers);
+      const command = standardVendorCommand(provider.command, family2);
+      const projected = {
+        ...provider,
+        ...command ? {
+          command: [
+            command[0],
+            ...command.slice(1).map((entry) => portableHomePath(entry, options))
+          ]
+        } : {}
+      };
+      if (object(provider.env)) {
+        const keys = profileEnvironmentKeys(family2);
+        projected.env = Object.fromEntries(
+          Object.entries(provider.env).map(([key, entry]) => [
+            key,
+            typeof entry !== "string" ? entry : keys.includes(key) ? entry.startsWith(PROFILE_PATH_PREFIX) ? entry : profilePathToken(id, key) : machineEnvironmentKeys.includes(key.toUpperCase()) ? `${MACHINE_ENV_PREFIX}${key.toUpperCase()}` : portableHomePath(entry, options)
+          ])
+        );
+      }
+      return [id, projected];
+    })
+  );
 }
 
 // shared/host-settings.ts
@@ -10100,15 +10156,23 @@ import { homedir as homedir3, tmpdir } from "node:os";
 import path11 from "node:path";
 async function exists(file) {
   try {
-    await access(file, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+    await access(
+      file,
+      process.platform === "win32" ? constants.F_OK : constants.X_OK
+    );
     return (await stat(file)).isFile();
   } catch (error) {
-    if (["ENOENT", "EACCES", "ENOTDIR"].includes(error.code ?? "")) return false;
+    if (["ENOENT", "EACCES", "ENOTDIR"].includes(
+      error.code ?? ""
+    ))
+      return false;
     throw error;
   }
 }
 function environmentValue(environment, name) {
-  return environment[name] ?? Object.entries(environment).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  return environment[name] ?? Object.entries(environment).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase()
+  )?.[1];
 }
 async function resolveInstalledExecutable(name, options = {}) {
   const platform = options.platform ?? process.platform;
@@ -10119,7 +10183,26 @@ async function resolveInstalledExecutable(name, options = {}) {
   const join = platform === "win32" ? path11.win32.join : path11.posix.join;
   const extension = platform === "win32" ? /\.(?:exe|com|cmd|bat)$/i.test(name) ? [""] : [".exe", ".com", ".cmd", ".bat"] : [""];
   if (platform === "win32" && /\.ps1$/i.test(name)) return null;
-  const standardPaths = platform === "win32" ? [join(home, ".local", "bin"), join(environmentValue(environment, "APPDATA") ?? join(home, "AppData", "Roaming"), "npm"), join(home, "AppData", "Local", "Microsoft", "WinGet", "Links"), ...name === "cursor-agent" ? [join(environmentValue(environment, "LOCALAPPDATA") ?? join(home, "AppData", "Local"), "cursor-agent")] : []] : [join(home, ".local", "bin"), join(home, ".npm-global", "bin"), "/usr/local/bin", "/usr/bin", "/opt/homebrew/bin"];
+  const standardPaths = platform === "win32" ? [
+    join(home, ".local", "bin"),
+    join(
+      environmentValue(environment, "APPDATA") ?? join(home, "AppData", "Roaming"),
+      "npm"
+    ),
+    join(home, "AppData", "Local", "Microsoft", "WinGet", "Links"),
+    ...name === "cursor-agent" ? [
+      join(
+        environmentValue(environment, "LOCALAPPDATA") ?? join(home, "AppData", "Local"),
+        "cursor-agent"
+      )
+    ] : []
+  ] : [
+    join(home, ".local", "bin"),
+    join(home, ".npm-global", "bin"),
+    "/usr/local/bin",
+    "/usr/bin",
+    "/opt/homebrew/bin"
+  ];
   for (const directory2 of [.../* @__PURE__ */ new Set([...paths, ...standardPaths])]) {
     for (const suffix of extension) {
       const candidate = join(directory2, `${name}${suffix}`);
@@ -10131,8 +10214,12 @@ async function resolveInstalledExecutable(name, options = {}) {
 function materializeHome(value, home, platform) {
   if (!value.startsWith(HOME_PATH_PREFIX)) return value;
   const relative = value.slice(HOME_PATH_PREFIX.length);
-  if (isAbsolutePath(relative) || relative.includes("\\") || relative.split("/").some((entry) => entry === "." || entry === "..") || /[:\u0000\r\n]/.test(relative)) throw new Error("\uB3D9\uAE30\uD654\uB41C \uD648 \uACBD\uB85C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
-  return (platform === "win32" ? path11.win32.join : path11.posix.join)(home, ...relative.split("/").filter(Boolean));
+  if (isAbsolutePath(relative) || relative.includes("\\") || relative.split("/").some((entry) => entry === "." || entry === "..") || /[:\u0000\r\n]/.test(relative))
+    throw new Error("\uB3D9\uAE30\uD654\uB41C \uD648 \uACBD\uB85C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  return (platform === "win32" ? path11.win32.join : path11.posix.join)(
+    home,
+    ...relative.split("/").filter(Boolean)
+  );
 }
 async function materializeProviders(value, current, options = {}) {
   const home = options.home ?? homedir3();
@@ -10147,43 +10234,81 @@ async function materializeProviders(value, current, options = {}) {
     const command = standardVendorCommand(provider.command, family2);
     const localCommand = local[id]?.command;
     const customLocal = Array.isArray(localCommand) && localCommand.length && !standardVendorCommand(localCommand, providerFamily(id, local));
-    if (provider.enabled !== false && command && customLocal) throw new Error(`\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uD604\uC7AC \uAE30\uAE30 \uC804\uC6A9 \uC2E4\uD589 \uBA85\uB839\uC744 \uC790\uB3D9\uC73C\uB85C \uAD50\uCCB4\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
+    if (provider.enabled !== false && command && customLocal)
+      throw new Error(
+        `\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uD604\uC7AC \uAE30\uAE30 \uC804\uC6A9 \uC2E4\uD589 \uBA85\uB839\uC744 \uC790\uB3D9\uC73C\uB85C \uAD50\uCCB4\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`
+      );
     const next = { ...provider };
     if (provider.enabled !== false && command) {
       const binary = vendorCommands[family2];
       const installed = await resolve(binary);
-      if (!installed) throw new Error(`\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC5D0 \uD544\uC694\uD55C ${binary} CLI\uB97C \uC774 \uAE30\uAE30\uC5D0 \uC124\uCE58\uD558\uC138\uC694.`);
+      if (!installed)
+        throw new Error(
+          `\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC5D0 \uD544\uC694\uD55C ${binary} CLI\uB97C \uC774 \uAE30\uAE30\uC5D0 \uC124\uCE58\uD558\uC138\uC694.`
+        );
       const args = command.slice(1).map((entry) => materializeHome(entry, home, platform));
-      next.command = standardVendorCommand([installed, ...args], family2) ? [installed, ...args] : [command[0], ...args];
+      next.command = family2 === "codex" && managedCodexCommand(localCommand) ? localCommand : standardVendorCommand([installed, ...args], family2) ? [installed, ...args] : [command[0], ...args];
     } else if (provider.enabled !== false && Array.isArray(provider.command) && typeof provider.command[0] === "string") {
       const executable = provider.command[0];
       const found = isAbsolutePath(executable) ? await fileExists(executable) : await resolve(executable);
-      if (!found) throw new Error(`\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uC0AC\uC6A9\uC790 \uC9C0\uC815 \uC2E4\uD589 \uBA85\uB839\uC744 \uC774 \uAE30\uAE30\uC5D0\uC11C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
+      if (!found)
+        throw new Error(
+          `\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uC0AC\uC6A9\uC790 \uC9C0\uC815 \uC2E4\uD589 \uBA85\uB839\uC744 \uC774 \uAE30\uAE30\uC5D0\uC11C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`
+        );
     }
     if (provider.env && typeof provider.env === "object" && !Array.isArray(provider.env)) {
       const keys = profileEnvironmentKeys(family2);
-      next.env = Object.fromEntries(Object.entries(provider.env).map(([key, entry]) => {
-        if (typeof entry !== "string") return [key, entry];
-        if (entry.startsWith(MACHINE_ENV_PREFIX)) {
-          const name = key.toUpperCase();
-          if (!machineEnvironmentKeys.includes(name) || entry !== `${MACHINE_ENV_PREFIX}${name}`) throw new Error(`\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uAE30\uAE30\uBCC4 \uD658\uACBD\uBCC0\uC218 \uCC38\uC870\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
-          const localEnv = local[id]?.env;
-          const localValue = localEnv && typeof localEnv === "object" && !Array.isArray(localEnv) ? Object.entries(localEnv).find(([name2]) => name2.toUpperCase() === key.toUpperCase())?.[1] : void 0;
-          const environment = options.env ?? process.env;
-          const join = platform === "win32" ? path11.win32.join : path11.posix.join;
-          const fallback = { HOME: home, USERPROFILE: home, PATH: "", PATHEXT: platform === "win32" ? ".COM;.EXE;.BAT;.CMD" : "", APPDATA: platform === "win32" ? join(home, "AppData", "Roaming") : join(home, ".config"), LOCALAPPDATA: platform === "win32" ? join(home, "AppData", "Local") : join(home, ".local", "share"), TEMP: platform === process.platform ? tmpdir() : platform === "win32" ? join(home, "AppData", "Local", "Temp") : "/tmp", TMP: platform === process.platform ? tmpdir() : platform === "win32" ? join(home, "AppData", "Local", "Temp") : "/tmp" };
-          return [key, typeof localValue === "string" && !localValue.startsWith(MACHINE_ENV_PREFIX) ? localValue : environmentValue(environment, name) ?? fallback[name]];
-        }
-        if (entry.startsWith(PROFILE_PATH_PREFIX)) {
-          if (!/^[a-z][a-z0-9-]*$/.test(id) || !keys.includes(key) || entry !== profilePathToken(id, key)) throw new Error(`\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uB3D9\uAE30\uD654\uB41C \uD504\uB85C\uD544 \uACBD\uB85C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
-          const localEnv = local[id]?.env;
-          const localValue = localEnv && typeof localEnv === "object" && !Array.isArray(localEnv) ? localEnv[key] : void 0;
-          const existing = typeof localValue === "string" && !localValue.startsWith(PROFILE_PATH_PREFIX) ? localValue : void 0;
-          const directory2 = options.profileDirectories?.[id]?.[key] ?? existing ?? (platform === "win32" ? path11.win32.join : path11.posix.join)(home, ".paseo", "settings-sync", "provider-profiles", id, profileDirectorySuffix(family2, key));
-          return [key, directory2];
-        }
-        return [key, materializeHome(entry, home, platform)];
-      }));
+      next.env = Object.fromEntries(
+        Object.entries(provider.env).map(([key, entry]) => {
+          if (typeof entry !== "string") return [key, entry];
+          if (entry.startsWith(MACHINE_ENV_PREFIX)) {
+            const name = key.toUpperCase();
+            if (!machineEnvironmentKeys.includes(name) || entry !== `${MACHINE_ENV_PREFIX}${name}`)
+              throw new Error(
+                `\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uAE30\uAE30\uBCC4 \uD658\uACBD\uBCC0\uC218 \uCC38\uC870\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`
+              );
+            const localEnv = local[id]?.env;
+            const localValue = localEnv && typeof localEnv === "object" && !Array.isArray(localEnv) ? Object.entries(localEnv).find(
+              ([name2]) => name2.toUpperCase() === key.toUpperCase()
+            )?.[1] : void 0;
+            const environment = options.env ?? process.env;
+            const join = platform === "win32" ? path11.win32.join : path11.posix.join;
+            const fallback = {
+              HOME: home,
+              USERPROFILE: home,
+              PATH: "",
+              PATHEXT: platform === "win32" ? ".COM;.EXE;.BAT;.CMD" : "",
+              APPDATA: platform === "win32" ? join(home, "AppData", "Roaming") : join(home, ".config"),
+              LOCALAPPDATA: platform === "win32" ? join(home, "AppData", "Local") : join(home, ".local", "share"),
+              TEMP: platform === process.platform ? tmpdir() : platform === "win32" ? join(home, "AppData", "Local", "Temp") : "/tmp",
+              TMP: platform === process.platform ? tmpdir() : platform === "win32" ? join(home, "AppData", "Local", "Temp") : "/tmp"
+            };
+            return [
+              key,
+              typeof localValue === "string" && !localValue.startsWith(MACHINE_ENV_PREFIX) ? localValue : environmentValue(environment, name) ?? fallback[name]
+            ];
+          }
+          if (entry.startsWith(PROFILE_PATH_PREFIX)) {
+            if (!/^[a-z][a-z0-9-]*$/.test(id) || !keys.includes(key) || entry !== profilePathToken(id, key))
+              throw new Error(
+                `\uD504\uB85C\uBC14\uC774\uB354 ${id}\uC758 \uB3D9\uAE30\uD654\uB41C \uD504\uB85C\uD544 \uACBD\uB85C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`
+              );
+            const localEnv = local[id]?.env;
+            const localValue = localEnv && typeof localEnv === "object" && !Array.isArray(localEnv) ? localEnv[key] : void 0;
+            const existing = typeof localValue === "string" && !localValue.startsWith(PROFILE_PATH_PREFIX) ? localValue : void 0;
+            const directory2 = options.profileDirectories?.[id]?.[key] ?? existing ?? (platform === "win32" ? path11.win32.join : path11.posix.join)(
+              home,
+              ".paseo",
+              "settings-sync",
+              "provider-profiles",
+              id,
+              profileDirectorySuffix(family2, key)
+            );
+            return [key, directory2];
+          }
+          return [key, materializeHome(entry, home, platform)];
+        })
+      );
     }
     result[id] = next;
   }
