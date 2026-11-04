@@ -1,4 +1,4 @@
-import { readFile, lstat } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
@@ -142,6 +142,43 @@ export async function discoverCodexAccounts(
   return [...unique.values()];
 }
 
+/**
+ * The daemon strips ELECTRON_RUN_AS_NODE from every external process, including
+ * provider env, so an Electron host needs a launcher that sets it after the spawn.
+ */
+export function codexNodeLauncher(
+  execPath: string,
+  platform: NodeJS.Platform = process.platform,
+) {
+  if (platform === "win32") {
+    const codePage = /[^\x00-\x7f]/.test(execPath) ? "chcp 65001 >nul\r\n" : "";
+    return {
+      file: "codex-node.cmd",
+      content: `@echo off\r\n${codePage}set "ELECTRON_RUN_AS_NODE=1"\r\n"${execPath.replaceAll("%", "%%")}" %*\r\nexit /b %errorlevel%\r\n`,
+    };
+  }
+  return {
+    file: "codex-node.sh",
+    content: `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '${execPath.replaceAll("'", "'\\''")}' "$@"\n`,
+  };
+}
+
+async function codexNodeCommand(home: string) {
+  if (!process.versions.electron) return process.execPath;
+  const launcher = codexNodeLauncher(process.execPath),
+    directory = join(home, "aster"),
+    file = join(directory, launcher.file);
+  const current = await readFile(file, "utf8").catch(() => null);
+  if (current !== launcher.content) {
+    await mkdir(directory, { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    await writeFile(temporary, launcher.content);
+    await chmod(temporary, 0o755);
+    await rename(temporary, file);
+  }
+  return file;
+}
+
 export async function installCodexBridge(home = paseoHome) {
   const client = await createLocalPluginConnection(home);
   try {
@@ -155,10 +192,8 @@ export async function installCodexBridge(home = paseoHome) {
       throw Error("Aster Codex 실행 모듈이 설치되지 않았습니다.");
     const { config } = await client.getDaemonConfig();
     const providers = providersSchema.parse(config.providers ?? {});
-    const patch: Record<
-      string,
-      { command: string[]; env: Record<string, string> }
-    > = {};
+    const node = await codexNodeCommand(home);
+    const patch: Record<string, { command: string[] }> = {};
     for (const id of new Set([
       "codex",
       ...Object.keys(providers).filter((id) => codexProvider(id, providers)),
@@ -168,12 +203,9 @@ export async function installCodexBridge(home = paseoHome) {
       const original = codexOriginalCommand(
         provider?.command ?? providers.codex?.command,
       );
-      const command = [process.execPath, proxy, JSON.stringify(original)];
-      if (
-        JSON.stringify(command) !== JSON.stringify(provider?.command) ||
-        provider?.env?.ELECTRON_RUN_AS_NODE !== "1"
-      )
-        patch[id] = { command, env: { ELECTRON_RUN_AS_NODE: "1" } };
+      const command = [node, proxy, JSON.stringify(original)];
+      if (JSON.stringify(command) !== JSON.stringify(provider?.command))
+        patch[id] = { command };
     }
     if (Object.keys(patch).length)
       await client.patchDaemonConfig({ providers: patch });

@@ -4,13 +4,18 @@ import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { spawnProcess } from "@getpaseo/plugin/server";
 import {
   chooseCodexAccount,
   hasCodexSubscription,
   type CodexReading,
 } from "./codex-policy";
 import { codexTokens, inspectCodexAccount } from "./codex-runtime.mjs";
-import { codexOriginalCommand, discoverCodexAccounts } from "./codex";
+import {
+  codexNodeLauncher,
+  codexOriginalCommand,
+  discoverCodexAccounts,
+} from "./codex";
 
 const now = 1800000000000;
 function reading(id: string, used = 20): CodexReading {
@@ -233,6 +238,50 @@ if(m.method==='account/read')result={account:{type:'chatgpt',planType:'pro'}};
 if(m.method==='account/rateLimits/read')result={accountId:'account-a',rateLimits:{planType:'pro',primary:{usedPercent:23,windowDurationMins:300,resetsAt:Math.floor(Date.now()/1000)+3600}},ordinaryUsageAllowed:true};
 if(m.method==='thread/resume')result={thread:m.params.threadId,home:process.env.CODEX_HOME,loggedIn,ephemeral:process.argv.includes('cli_auth_credentials_store="ephemeral"')};
 process.stdout.write(JSON.stringify({id:m.id,result})+'\\n');});`;
+
+test("Electron 실행 launcher는 환경변수를 직접 설정하고 경로를 이스케이프한다", () => {
+  assert.equal(
+    codexNodeLauncher("C:\\앱 100%\\Paseo.exe", "win32").content,
+    '@echo off\r\nchcp 65001 >nul\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"C:\\앱 100%%\\Paseo.exe" %*\r\nexit /b %errorlevel%\r\n',
+  );
+  assert.equal(
+    codexNodeLauncher("/opt/it's/Paseo", "linux").content,
+    "#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '/opt/it'\\''s/Paseo' \"$@\"\n",
+  );
+});
+
+test(
+  "launcher는 제거된 환경변수를 복원하고 JSON 인자·stdin·종료 코드를 전달한다",
+  { skip: process.platform !== "win32" },
+  async () =>
+    fixture(async (home) => {
+      const launcher = codexNodeLauncher(process.execPath),
+        file = join(home, launcher.file),
+        script = join(home, "print.cjs");
+      await writeFile(file, launcher.content);
+      await writeFile(
+        script,
+        `process.stdin.once("data",(d)=>{console.log(JSON.stringify({args:process.argv.slice(2),env:process.env.ELECTRON_RUN_AS_NODE,input:String(d).trim()}));process.exit(7)});`,
+      );
+      const original = JSON.stringify(["C:\\Program Files\\npm\\codex.cmd"]);
+      const env = { ...process.env };
+      delete env.ELECTRON_RUN_AS_NODE;
+      const child = spawnProcess(file, [script, original, "app-server"], {
+        stdio: "pipe",
+        env,
+      });
+      let output = "";
+      child.stdout.on("data", (data) => (output += data));
+      child.stdin.write("ping\n");
+      const code = await new Promise((accept) => child.on("close", accept));
+      assert.equal(code, 7);
+      assert.deepEqual(JSON.parse(output), {
+        args: [original, "app-server"],
+        env: "1",
+        input: "ping",
+      });
+    }),
+);
 
 test("공식 app-server 계정 조회는 모델 요청 없이 현재 플랜·한도를 읽는다", async () =>
   fixture(async (home) => {
