@@ -7,30 +7,38 @@ import { isBuiltin } from "node:module";
 import { buildUsageModules } from "./build-usage-modules.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const output = path.join(root, "dist");
+const only = process.argv.find((arg) => arg.startsWith("--only="))?.slice(7);
+if (only && !["ui", "aster", "settings-sync"].includes(only))
+  throw Error("Unknown plugin build target");
+const output = path.resolve(
+  root,
+  process.argv.find((arg) => arg.startsWith("--out="))?.slice(6) ?? "dist",
+);
 const core = path.resolve(
   process.argv.find((arg) => arg.startsWith("--core="))?.slice(7) ??
     path.join(root, "../paseo-core"),
 );
-await import("../plugins/settings-sync/scripts/build.mjs");
+if (!only || only === "settings-sync")
+  await import("../plugins/settings-sync/scripts/build.mjs");
 const appDist = path.join(core, "packages/app/dist");
 const hasApp = await fs
   .stat(path.join(appDist, "index.html"))
   .catch(() => null);
-if (hasApp) await buildUsageModules(appDist);
-execFileSync(
-  process.execPath,
-  [
-    "plugins/ui/modules/tabs/build-plugin.cjs",
-    ...(hasApp ? [] : ["--existing-maps"]),
-  ],
-  {
-    cwd: root,
-    encoding: "utf8",
-    windowsHide: true,
-    env: { ...process.env, ...(hasApp ? { PASEO_APP_DIST: appDist } : {}) },
-  },
-);
+if ((!only || only === "ui") && hasApp) await buildUsageModules(appDist);
+if (!only || only === "ui")
+  execFileSync(
+    process.execPath,
+    [
+      "plugins/ui/modules/tabs/build-plugin.cjs",
+      ...(hasApp ? [] : ["--existing-maps"]),
+    ],
+    {
+      cwd: root,
+      encoding: "utf8",
+      windowsHide: true,
+      env: { ...process.env, ...(hasApp ? { PASEO_APP_DIST: appDist } : {}) },
+    },
+  );
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const plugins = [];
 const compatibility = [];
@@ -108,7 +116,9 @@ async function licenseBanner(inputs) {
   return `/*!\n${notices.join("\n\n").replaceAll("*/", "* /")}\n*/\n`;
 }
 await fs.mkdir(output, { recursive: true });
-for (const item of packageSources) {
+for (const item of packageSources.filter(
+  (item) => !only || (!item.legacy && item.name === only),
+)) {
   const { name } = item;
   const source = path.join(root, item.source);
   const destination = path.join(output, item.prefix, name);
@@ -200,6 +210,14 @@ for (const item of packageSources) {
     );
   }
   await put("paseo-plugin.json", JSON.stringify(manifest, null, 2) + "\n");
+  for (const asset of pkg.paseoRuntimeAssets ?? []) {
+    if (
+      path.isAbsolute(asset) ||
+      asset.split(/[\\/]/).some((part) => part === "..")
+    )
+      throw Error("Invalid runtime asset path");
+    await put(asset, await fs.readFile(path.join(source, asset)));
+  }
   await put(
     "package.json",
     JSON.stringify(

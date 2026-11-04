@@ -32,6 +32,9 @@ export interface Connection {
   connect(): Promise<void>;
   close(): void;
   invokePluginRpc(id: string, method: string, input: unknown): Promise<unknown>;
+  getDaemonConfig: DaemonClient["getDaemonConfig"];
+  patchDaemonConfig: DaemonClient["patchDaemonConfig"];
+  listPlugins: DaemonClient["listPlugins"];
   listUsageReports?(options: {
     forceRefresh?: boolean;
   }): Promise<{ reports: unknown[] }>;

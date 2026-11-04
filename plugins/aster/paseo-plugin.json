@@ -1,6 +1,6 @@
 {
   "id": "aster",
   "name": "Aster",
-  "description": "Claude 계정의 5시간·주간 잔여량과 초기화 시점에 따른 자동 분배",
+  "description": "Claude·Codex 계정의 구독·사용량·한도와 동시 부하에 따른 자동 분배",
   "requirements": { "paseo": ">=0.12.0 <0.14.0" }
 }
