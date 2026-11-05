@@ -41,6 +41,7 @@ export const reportsSchema = z.array(
     successfulAt: z.string().optional(),
     report: z.object({
       status: z.string(),
+      error: z.string().optional(),
       planLabel: z.string().optional(),
       windows: z.array(windowSchema).optional(),
       problem: z
@@ -185,6 +186,26 @@ function matchingReports(
         routes.includes(entry.id.slice(entry.id.indexOf(":") + 1)),
     ),
   ];
+}
+/** No usable login, as opposed to an ended subscription or a usage API failure. */
+export function needsLogin(
+  account: Account,
+  reports: z.infer<typeof reportsSchema>,
+) {
+  const matching = matchingReports(account, reports);
+  if (matching.some((entry) => entry.report.status === "available"))
+    return false;
+  return (
+    matching.length === 0 ||
+    matching.some(
+      ({ report }) =>
+        (report.status === "unavailable" &&
+          ["expired", "rejected", "missing"].includes(
+            report.problem?.kind ?? "",
+          )) ||
+        (report.status === "error" && /login store/i.test(report.error ?? "")),
+    )
+  );
 }
 function deniesUsage(report: z.infer<typeof reportsSchema>[number]) {
   return (
