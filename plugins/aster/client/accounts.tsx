@@ -8,7 +8,6 @@ import {
   SettingsAction,
   SettingsRow,
   SettingsSection,
-  SettingsSelect,
 } from "@getpaseo/plugin/client/ui";
 import { accountsRpc } from "../shared/accounts-rpc";
 import type { z } from "zod";
@@ -20,7 +19,6 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
   const [state, setState] = useState<z.output<
     typeof accountsRpc.status.output
   > | null>(null);
-  const [workspaceId, setWorkspace] = useState("");
   const [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -34,7 +32,6 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
         if (!stopped) {
           setState(value);
           setError(null);
-          setWorkspace((previous) => previous || value.workspaces[0]?.id || "");
         }
       } catch (error) {
         if (!stopped)
@@ -74,8 +71,7 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
       setBusy(false);
     }
   };
-  const login = (base: "claude" | "codex") =>
-    openLogin(() => add({ base, workspaceId }));
+  const login = (base: "claude" | "codex") => openLogin(() => add({ base }));
   return (
     <>
       <SettingsSection title="Claude · Codex 자동 계정 분배">
@@ -92,11 +88,9 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
               label={`Claude · ${account.label}`}
               hint={account.status}
               actionLabel="다시 로그인"
-              disabled={busy || !workspaceId}
+              disabled={busy}
               onPress={() => {
-                void openLogin(() =>
-                  relogin({ accountId: account.id, workspaceId }),
-                );
+                void openLogin(() => relogin({ accountId: account.id }));
               }}
             />
           ) : (
@@ -109,23 +103,11 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
         )}
       </SettingsSection>
       <SettingsSection title="계정 추가">
-        <SettingsSelect
-          label="로그인 터미널을 열 워크스페이스"
-          value={workspaceId}
-          options={
-            state?.workspaces.map((workspace) => ({
-              value: workspace.id,
-              label: workspace.label,
-            })) ?? []
-          }
-          onValueChange={setWorkspace}
-          disabled={busy}
-        />
         <SettingsAction
           label="Claude 계정"
           hint="별도 인증 폴더에서 공식 CLI로 로그인합니다. 기존 대화 기록은 공유됩니다."
           actionLabel="계정 추가"
-          disabled={busy || !workspaceId}
+          disabled={busy}
           onPress={() => {
             void login("claude");
           }}
@@ -134,7 +116,7 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
           label="Codex 계정"
           hint="공식 기기 코드로 로그인합니다. 기존 계정과 대화 저장 위치를 유지합니다."
           actionLabel="계정 추가"
-          disabled={busy || !workspaceId}
+          disabled={busy}
           onPress={() => {
             void login("codex");
           }}

@@ -87,7 +87,6 @@ test("두 공식 로그인 흐름은 기존 계정·대화 폴더를 유지하�
     for (const base of ["claude", "codex"] as const) {
       const flow = await call(accountsRpc.add, {
         base,
-        workspaceId: "workspace",
       });
       const launcher = JSON.parse(terminals.at(-1).args[1]);
       assert.equal(launcher.command[0], `official-${base}`);
@@ -218,6 +217,14 @@ async function reloginFixture() {
         base: "claude" as const,
         label: "second",
         status: "확인 필요",
+        loginLost: true,
+      },
+      {
+        id: "claude",
+        base: "claude" as const,
+        label: "main",
+        status: "구독 종료",
+        loginLost: false,
       },
       {
         id: "0-unavailable",
@@ -236,7 +243,16 @@ async function reloginFixture() {
   );
   const call = (contract: any, input = {}) =>
     handlers.get(contract.name)(input, { paseo });
-  return { root, profile, terminals, refreshed, registry, call, dispose };
+  return {
+    root,
+    paseo,
+    profile,
+    terminals,
+    refreshed,
+    registry,
+    call,
+    dispose,
+  };
 }
 
 test("다시 로그인은 기존 인증 폴더를 그대로 쓰고 계정을 새로 등록하지 않는다", async () => {
@@ -244,7 +260,6 @@ test("다시 로그인은 기존 인증 폴더를 그대로 쓰고 계정을 새
   try {
     await f.call(accountsRpc.relogin, {
       accountId: "profile",
-      workspaceId: "workspace",
     });
     const launcher = JSON.parse(f.terminals[0].args[1]);
     assert.equal(launcher.home, f.profile);
@@ -269,7 +284,7 @@ test("다시 로그인은 기존 인증 폴더를 그대로 쓰고 계정을 새
     );
     assert.deepEqual(
       state.accounts.map((account: any) => account.canRelogin),
-      [true, false, false],
+      [true, false, false, false],
     );
   } finally {
     f.dispose();
@@ -282,7 +297,6 @@ test("메인 계정 다시 로그인은 세션과 같은 기본 자격 증명 �
   try {
     await f.call(accountsRpc.relogin, {
       accountId: "claude",
-      workspaceId: "workspace",
     });
     assert.equal(JSON.parse(f.terminals[0].args[1]).secureDirectory, "");
   } finally {
@@ -296,7 +310,6 @@ test("다른 계정으로 로그인하면 완료로 처리하지 않고 알린�
   try {
     await f.call(accountsRpc.relogin, {
       accountId: "profile",
-      workspaceId: "workspace",
     });
     const launcher = JSON.parse(f.terminals[0].args[1]);
     await writeFile(
@@ -323,7 +336,7 @@ test("등록되지 않은 계정이나 Codex 계정은 다시 로그인을 거�
   try {
     for (const accountId of ["missing", "codex"])
       await assert.rejects(
-        f.call(accountsRpc.relogin, { accountId, workspaceId: "workspace" }),
+        f.call(accountsRpc.relogin, { accountId }),
         /찾지 못했습니다/,
       );
     assert.equal(f.terminals.length, 0);
@@ -377,5 +390,20 @@ writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ args: process.argv.s
     });
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("열린 워크스페이스가 없으면 로그인 터미널을 만들지 않고 알린다", async () => {
+  const f = await reloginFixture();
+  try {
+    f.paseo.workspaces.list = async () => ({ entries: [] });
+    await assert.rejects(
+      f.call(accountsRpc.relogin, { accountId: "profile" }),
+      /워크스페이스가 없습니다/,
+    );
+    assert.equal(f.terminals.length, 0);
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
   }
 });

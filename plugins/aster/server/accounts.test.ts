@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountSecureDirectory, bootstrapAccounts, expiredAccounts, mapReports, reportsSchema, UsageReader, type Account } from "./accounts.ts";
+import { accountSecureDirectory, bootstrapAccounts, expiredAccounts, mapReports, needsLogin, reportsSchema, UsageReader, type Account } from "./accounts.ts";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -227,4 +227,17 @@ test("인증 갱신 뒤 무효화는 호스트의 5분 사용량 캐시도 강�
   clock += 61_000;
   await reader.read(command, signal);
   assert.equal(args[2].includes("--refresh"), false);
+});
+
+test("다시 로그인은 로그인이 풀린 계정에만 필요하다", () => {
+  const route = createHash("sha256").update(JSON.stringify({ store: "claude", path: join("/fixture/a", ".credentials.json") })).digest("hex");
+  const routed = (body: object) => reportsSchema.parse([{ ...report(undefined, "claude:" + route), account: {}, report: body }]);
+  assert.equal(needsLogin(accounts[0], [report()]), false);
+  assert.equal(needsLogin(accounts[0], routed({ status: "error", error: "Claude login store no longer exists" })), true);
+  for (const kind of ["expired", "rejected", "missing"])
+    assert.equal(needsLogin(accounts[0], routed({ status: "unavailable", problem: { kind } })), true);
+  assert.equal(needsLogin(accounts[0], routed({ status: "unavailable", problem: { kind: "subscription_expired" } })), false);
+  assert.equal(needsLogin(accounts[0], routed({ status: "error", error: "Claude usage API returned 500" })), false);
+  assert.equal(needsLogin(accounts[0], []), true);
+  assert.equal(needsLogin(accounts[0], [...routed({ status: "error", error: "Claude login store no longer exists" }), report()]), false);
 });

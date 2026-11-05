@@ -5,6 +5,7 @@ import type {
 import {
   accountSecureDirectory,
   bootstrapAccounts,
+  needsLogin,
   discoverAccounts,
   mapReports,
   paseoHome,
@@ -147,16 +148,32 @@ export default function contribute(server: PluginServerContext) {
               Date.now(),
             ).map((entry) => entry.account.id),
           );
-          return accounts.map((account) => ({
-            id: account.id,
-            base: "claude" as const,
-            label: account.email ?? account.id,
-            status: !eligible.some((entry) => entry.id === account.id)
-              ? "구독 종료 · 자동 제외"
-              : ranked.has(account.id)
-                ? "자동 분배 중"
-                : "로그인·구독·잔여 한도 확인 필요 · 자동 선택 보류",
-          }));
+          const startable = new Set(
+            bootstrapAccounts(eligible, reports).map((entry) => entry.id),
+          );
+          return accounts.map((account) => {
+            const loginLost = needsLogin(account, reports);
+            const subscribed = eligible.some(
+              (entry) => entry.id === account.id,
+            );
+            return {
+              id: account.id,
+              base: "claude" as const,
+              label: account.email ?? account.id,
+              loginLost,
+              status: !subscribed
+                ? loginLost
+                  ? "구독 종료 · 로그인 풀림 · 자동 제외"
+                  : "구독 종료 · 자동 제외"
+                : ranked.has(account.id)
+                  ? "자동 분배 중"
+                  : loginLost
+                    ? "로그인 풀림 · 다시 로그인 필요"
+                    : startable.has(account.id)
+                      ? "사용 가능 · 첫 사용 후 사용량 표시"
+                      : "구독·잔여 한도 확인 필요 · 자동 선택 보류",
+            };
+          });
         };
         const results = await Promise.allSettled([
           claudeStatus(),

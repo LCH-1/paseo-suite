@@ -68,6 +68,7 @@ export interface AccountStatus {
   base: "claude" | "codex";
   label: string;
   status: string;
+  loginLost?: boolean;
 }
 
 async function json(file: string, fallback: unknown): Promise<unknown> {
@@ -154,6 +155,15 @@ export function registerAccountManagement(
         ? "재로그인 완료 · 구독과 한도를 다시 확인합니다"
         : `${email ?? "알 수 없는 계정"}(으)로 로그인됨 · ${flow.email} 계정으로 다시 로그인하세요`,
     });
+  } // A terminal must belong to a workspace; the choice does not affect the login.
+  async function loginWorkspace(paseo: PaseoApi) {
+    const { entries } = await paseo.workspaces.list();
+    const workspace = entries.find((entry) => entry.workspaceDirectory);
+    if (!workspace)
+      throw Error(
+        "로그인 터미널을 열 워크스페이스가 없습니다. 프로젝트를 먼저 여세요.",
+      );
+    return workspace;
   }
   async function loginCommand(paseo: PaseoApi) {
     const { config } = await paseo.config.get();
@@ -320,9 +330,7 @@ export function registerAccountManagement(
   server.handle(accountsRpc.add, async (input, { paseo }) =>
     serialize(async () => {
       api = paseo;
-      const workspace = await paseo.workspaces.ref(input.workspaceId).refresh();
-      if (!workspace?.workspaceDirectory)
-        throw Error("로그인 터미널을 열 워크스페이스를 선택하세요.");
+      const workspace = await loginWorkspace(paseo);
       const { config } = await paseo.config.get(),
         providers = providersSchema.parse(config.providers ?? {});
       const id = randomUUID(),
@@ -352,7 +360,7 @@ export function registerAccountManagement(
         id,
         base: input.base,
         home,
-        workspaceId: input.workspaceId,
+        workspaceId: workspace.id,
         status: "pending",
       };
       await writeJson(flowFile(id), flow);
@@ -375,9 +383,7 @@ export function registerAccountManagement(
   server.handle(accountsRpc.relogin, async (input, { paseo }) =>
     serialize(async () => {
       api = paseo;
-      const workspace = await paseo.workspaces.ref(input.workspaceId).refresh();
-      if (!workspace?.workspaceDirectory)
-        throw Error("로그인 터미널을 열 워크스페이스를 선택하세요.");
+      const workspace = await loginWorkspace(paseo);
       // The folder comes from the registry so the client can only name a known account.
       const account = (await registeredClaudeAccounts()).find(
         (entry) => entry.id === input.accountId,
@@ -392,7 +398,7 @@ export function registerAccountManagement(
         id,
         base: "claude",
         home,
-        workspaceId: input.workspaceId,
+        workspaceId: workspace.id,
         status: "pending",
         accountId: account.id,
         email: account.email ?? null,
@@ -425,22 +431,18 @@ export function registerAccountManagement(
     api = paseo;
     await serialize(() => finish(paseo));
     const { config } = await paseo.config.get();
-    const [accounts, workspaces, pending, registered] = await Promise.all([
+    const [accounts, pending, registered] = await Promise.all([
       status(config.providers ?? {}, lifetime.signal),
-      paseo.workspaces.list(),
       flows(),
       registeredClaudeAccounts(),
     ]);
     return {
-      accounts: accounts.map((account) => ({
+      accounts: accounts.map(({ loginLost, ...account }) => ({
         ...account,
         canRelogin:
+          loginLost === true &&
           account.base === "claude" &&
           registered.some((entry) => entry.id === account.id),
-      })),
-      workspaces: workspaces.entries.map((workspace) => ({
-        id: workspace.id,
-        label: workspace.name ?? workspace.workspaceDirectory,
       })),
       flows: pending.slice(-8).map((flow) => ({
         id: flow.id,
