@@ -24,9 +24,14 @@ if (options.base === "codex") {
   ]);
 } else {
   env.CLAUDE_CONFIG_DIR = options.home;
-  env.CLAUDE_SECURESTORAGE_CONFIG_DIR = options.home;
+  env.CLAUDE_SECURESTORAGE_CONFIG_DIR = options.secureDirectory ?? options.home;
   if (process.platform === "win32") env.CLAUDE_CODE_FORCE_WINDOWS_CREDMAN = "1";
-  [command, ...args] = [...options.command, "auth", "login"];
+  [command, ...args] = [
+    ...options.command,
+    "auth",
+    "login",
+    ...(options.email ? ["--email", options.email] : []),
+  ];
 }
 const child = spawn(command, args, {
   stdio: "inherit",
@@ -45,7 +50,7 @@ async function finish(code) {
   console.log(
     code === 0
       ? "로그인 완료. Aster가 계정 등록과 구독 확인을 자동으로 진행합니다."
-      : "로그인을 완료하지 못했습니다. Aster 설정에서 다시 추가하세요.",
+      : "로그인을 완료하지 못했습니다. Aster 설정에서 다시 시도하세요.",
   );
   process.exitCode = code ?? 1;
 }

@@ -15,7 +15,8 @@ import type { z } from "zod";
 
 function Accounts({ host, navigation }: PluginSurfaceProps) {
   const status = useRpc(accountsRpc.status),
-    add = useRpc(accountsRpc.add);
+    add = useRpc(accountsRpc.add),
+    relogin = useRpc(accountsRpc.relogin);
   const [state, setState] = useState<z.output<
     typeof accountsRpc.status.output
   > | null>(null);
@@ -55,10 +56,10 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
       clearInterval(timer);
     };
   }, [status, host.id]);
-  const login = async (base: "claude" | "codex") => {
+  const openLogin = async (start: () => Promise<{ workspaceId: string }>) => {
     setBusy(true);
     try {
-      const flow = await add({ base, workspaceId });
+      const flow = await start();
       navigation?.openWorkspace({
         workspaceId: flow.workspaceId,
         serverId: host.id,
@@ -73,6 +74,8 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
       setBusy(false);
     }
   };
+  const login = (base: "claude" | "codex") =>
+    openLogin(() => add({ base, workspaceId }));
   return (
     <>
       <SettingsSection title="Claude · Codex 자동 계정 분배">
@@ -82,13 +85,28 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
           error={error}
         />
         {!state && !error && <SettingsRow label="계정과 구독 상태 확인 중…" />}
-        {state?.accounts.map((account) => (
-          <SettingsRow
-            key={`${account.base}:${account.id}`}
-            label={`${account.base === "claude" ? "Claude" : "Codex"} · ${account.label}`}
-            hint={account.status}
-          />
-        ))}
+        {state?.accounts.map((account) =>
+          account.canRelogin ? (
+            <SettingsAction
+              key={`${account.base}:${account.id}`}
+              label={`Claude · ${account.label}`}
+              hint={account.status}
+              actionLabel="다시 로그인"
+              disabled={busy || !workspaceId}
+              onPress={() => {
+                void openLogin(() =>
+                  relogin({ accountId: account.id, workspaceId }),
+                );
+              }}
+            />
+          ) : (
+            <SettingsRow
+              key={`${account.base}:${account.id}`}
+              label={`${account.base === "claude" ? "Claude" : "Codex"} · ${account.label}`}
+              hint={account.status}
+            />
+          ),
+        )}
       </SettingsSection>
       <SettingsSection title="계정 추가">
         <SettingsSelect
@@ -122,11 +140,7 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
           }}
         />
         {state?.flows.map((flow) => (
-          <SettingsRow
-            key={flow.id}
-            label={`${flow.base} 계정 추가`}
-            hint={flow.status}
-          />
+          <SettingsRow key={flow.id} label={flow.label} hint={flow.status} />
         ))}
       </SettingsSection>
     </>

@@ -10,6 +10,8 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { registerAccountManagement } from "./account-management";
 import { accountsRpc } from "../shared/accounts-rpc";
 
@@ -143,6 +145,237 @@ test("두 공식 로그인 흐름은 기존 계정·대화 폴더를 유지하�
     assert.deepEqual(config.providers.codex.command, ["official-codex"]);
   } finally {
     dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function reloginFixture() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "aster-relogin-")));
+  const handlers = new Map<string, any>(),
+    terminals: any[] = [],
+    refreshed: string[] = [];
+  const profile = join(root, "profile");
+  await mkdir(profile);
+  await mkdir(join(root, "plugin", "server"), { recursive: true });
+  await writeFile(
+    join(root, "plugin", "server", "account-login.mjs"),
+    "// fixture",
+  );
+  await mkdir(join(root, "paseo-accounts"));
+  const registry = {
+    version: 2,
+    accounts: [
+      {
+        id: "claude",
+        base: "claude",
+        home: join(root, ".claude"),
+        email: "main@example.invalid",
+      },
+      {
+        id: "profile",
+        base: "claude",
+        home: profile,
+        email: "Second@example.invalid",
+      },
+      { id: "codex", base: "codex", home: join(root, ".codex"), email: null },
+    ],
+  };
+  await writeFile(
+    join(root, "paseo-accounts", "accounts.json"),
+    JSON.stringify(registry),
+  );
+  const paseo: any = {
+    config: {
+      get: async () => ({
+        config: { providers: { claude: { command: ["official-claude"] } } },
+      }),
+    },
+    workspaces: {
+      ref: () => ({
+        refresh: async () => ({ id: "workspace", workspaceDirectory: root }),
+      }),
+      list: async () => ({
+        entries: [
+          { id: "workspace", name: "Fixture", workspaceDirectory: root },
+        ],
+      }),
+    },
+    terminals: {
+      create: async (input: any) => {
+        terminals.push(input);
+        return { id: "terminal" };
+      },
+    },
+  };
+  const dispose = registerAccountManagement(
+    {
+      handle: (contract: any, handler: any) =>
+        handlers.set(contract.name, handler),
+    } as any,
+    async () => [
+      {
+        id: "profile",
+        base: "claude" as const,
+        label: "second",
+        status: "확인 필요",
+      },
+      {
+        id: "0-unavailable",
+        base: "claude" as const,
+        label: "보류",
+        status: "보류",
+      },
+      { id: "codex", base: "codex" as const, label: "codex", status: "제외" },
+    ],
+    {
+      home: root,
+      userHome: root,
+      pluginPath: async () => join(root, "plugin"),
+      onRelogin: () => refreshed.push("usage"),
+    },
+  );
+  const call = (contract: any, input = {}) =>
+    handlers.get(contract.name)(input, { paseo });
+  return { root, profile, terminals, refreshed, registry, call, dispose };
+}
+
+test("다시 로그인은 기존 인증 폴더를 그대로 쓰고 계정을 새로 등록하지 않는다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, {
+      accountId: "profile",
+      workspaceId: "workspace",
+    });
+    const launcher = JSON.parse(f.terminals[0].args[1]);
+    assert.equal(launcher.home, f.profile);
+    assert.equal(launcher.secureDirectory, f.profile);
+    assert.equal(launcher.email, "Second@example.invalid");
+    await writeFile(
+      join(f.profile, ".claude.json"),
+      JSON.stringify({
+        oauthAccount: { emailAddress: "second@example.invalid" },
+      }),
+    );
+    await writeFile(launcher.done, '{"success":true}');
+    const state = await f.call(accountsRpc.status);
+    assert.match(state.flows[0].status, /재로그인 완료/);
+    assert.match(state.flows[0].label, /재로그인/);
+    assert.deepEqual(f.refreshed, ["usage"]);
+    assert.deepEqual(
+      JSON.parse(
+        await readFile(join(f.root, "paseo-accounts", "accounts.json"), "utf8"),
+      ),
+      f.registry,
+    );
+    assert.deepEqual(
+      state.accounts.map((account: any) => account.canRelogin),
+      [true, false, false],
+    );
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("메인 계정 다시 로그인은 세션과 같은 기본 자격 증명 위치를 쓴다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, {
+      accountId: "claude",
+      workspaceId: "workspace",
+    });
+    assert.equal(JSON.parse(f.terminals[0].args[1]).secureDirectory, "");
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("다른 계정으로 로그인하면 완료로 처리하지 않고 알린다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, {
+      accountId: "profile",
+      workspaceId: "workspace",
+    });
+    const launcher = JSON.parse(f.terminals[0].args[1]);
+    await writeFile(
+      join(f.profile, ".claude.json"),
+      JSON.stringify({
+        oauthAccount: { emailAddress: "other@example.invalid" },
+      }),
+    );
+    await writeFile(launcher.done, '{"success":true}');
+    const state = await f.call(accountsRpc.status);
+    assert.match(
+      state.flows[0].status,
+      /other@example\.invalid.*다시 로그인하세요/,
+    );
+    assert.deepEqual(f.refreshed, []);
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("등록되지 않은 계정이나 Codex 계정은 다시 로그인을 거부한다", async () => {
+  const f = await reloginFixture();
+  try {
+    for (const accountId of ["missing", "codex"])
+      await assert.rejects(
+        f.call(accountsRpc.relogin, { accountId, workspaceId: "workspace" }),
+        /찾지 못했습니다/,
+      );
+    assert.equal(f.terminals.length, 0);
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("로그인 실행기는 지정된 자격 증명 위치와 이메일로 공식 CLI를 호출한다", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "aster-login-run-")),
+  );
+  try {
+    const fake = join(root, "fake-cli.mjs"),
+      captured = join(root, "captured.json");
+    await writeFile(
+      fake,
+      `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ args: process.argv.slice(2), config: process.env.CLAUDE_CONFIG_DIR, secure: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, force: process.env.CLAUDE_CODE_FORCE_WINDOWS_CREDMAN, token: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null }));`,
+    );
+    const done = join(root, "done.json");
+    await promisify(execFile)(
+      process.execPath,
+      [
+        join(import.meta.dirname, "account-login.mjs"),
+        JSON.stringify({
+          base: "claude",
+          home: "profile-home",
+          secureDirectory: "",
+          email: "second@example.invalid",
+          command: [process.execPath, fake],
+          done,
+        }),
+      ],
+      { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: "synthetic" } },
+    );
+    const seen = JSON.parse(await readFile(captured, "utf8"));
+    assert.deepEqual(seen.args, [
+      "auth",
+      "login",
+      "--email",
+      "second@example.invalid",
+    ]);
+    assert.equal(seen.config, "profile-home");
+    assert.equal(seen.secure ?? "", "");
+    assert.equal(seen.token, null);
+    if (process.platform === "win32") assert.equal(seen.force, "1");
+    assert.deepEqual(JSON.parse(await readFile(done, "utf8")), {
+      success: true,
+    });
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

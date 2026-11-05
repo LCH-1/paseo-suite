@@ -129,52 +129,56 @@ export default function contribute(server: PluginServerContext) {
   const codex = registerCodexRouting(server);
   const unregister = [
     codex.dispose,
-    registerAccountManagement(server, async (providers, signal) => {
-      const claudeStatus = async () => {
-        const accounts = await discoverAccounts();
-        const eligible = await subscriptions.filter(
-          accounts,
-          async () => providers,
-          signal,
+    registerAccountManagement(
+      server,
+      async (providers, signal) => {
+        const claudeStatus = async () => {
+          const accounts = await discoverAccounts();
+          const eligible = await subscriptions.filter(
+            accounts,
+            async () => providers,
+            signal,
+          );
+          const settings = await readSettings();
+          const reports = await readUsage(settings.command, signal);
+          const ranked = new Set(
+            rankAccounts(
+              mapReports(eligible, reports, settings.capacities),
+              Date.now(),
+            ).map((entry) => entry.account.id),
+          );
+          return accounts.map((account) => ({
+            id: account.id,
+            base: "claude" as const,
+            label: account.email ?? account.id,
+            status: !eligible.some((entry) => entry.id === account.id)
+              ? "구독 종료 · 자동 제외"
+              : ranked.has(account.id)
+                ? "자동 분배 중"
+                : "로그인·구독·잔여 한도 확인 필요 · 자동 선택 보류",
+          }));
+        };
+        const results = await Promise.allSettled([
+          claudeStatus(),
+          codex.status(providers),
+        ]);
+        signal.throwIfAborted();
+        return results.flatMap((result, index) =>
+          result.status === "fulfilled"
+            ? result.value
+            : [
+                {
+                  id: `${index}-unavailable`,
+                  base: index === 0 ? ("claude" as const) : ("codex" as const),
+                  label: "상태 확인 보류",
+                  status:
+                    "호스트 연결·공식 로그인 상태를 확인하세요. 다른 프로바이더의 계정 분배는 유지됩니다.",
+                },
+              ],
         );
-        const settings = await readSettings();
-        const reports = await readUsage(settings.command, signal);
-        const ranked = new Set(
-          rankAccounts(
-            mapReports(eligible, reports, settings.capacities),
-            Date.now(),
-          ).map((entry) => entry.account.id),
-        );
-        return accounts.map((account) => ({
-          id: account.id,
-          base: "claude" as const,
-          label: account.email ?? account.id,
-          status: !eligible.some((entry) => entry.id === account.id)
-            ? "구독 종료 · 자동 제외"
-            : ranked.has(account.id)
-              ? "자동 분배 중"
-              : "로그인·구독·잔여 한도 확인 필요 · 자동 선택 보류",
-        }));
-      };
-      const results = await Promise.allSettled([
-        claudeStatus(),
-        codex.status(providers),
-      ]);
-      signal.throwIfAborted();
-      return results.flatMap((result, index) =>
-        result.status === "fulfilled"
-          ? result.value
-          : [
-              {
-                id: `${index}-unavailable`,
-                base: index === 0 ? ("claude" as const) : ("codex" as const),
-                label: "상태 확인 보류",
-                status:
-                  "호스트 연결·공식 로그인 상태를 확인하세요. 다른 프로바이더의 계정 분배는 유지됩니다.",
-              },
-            ],
-      );
-    }),
+      },
+      { onRelogin: () => reader.invalidate() },
+    ),
     registerLegacyCredentialRpc(server, paseoHome),
     server.before(
       "agent.session_open",

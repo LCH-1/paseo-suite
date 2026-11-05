@@ -13,6 +13,7 @@ export const accountsRpc = {
           base: family,
           label: z.string(),
           status: z.string(),
+          canRelogin: z.boolean(),
         }),
       ),
       workspaces: z.array(z.object({ id: z.string(), label: z.string() })),
@@ -21,6 +22,7 @@ export const accountsRpc = {
           id: z.string(),
           base: family,
           workspaceId: z.string(),
+          label: z.string(),
           status: z.string(),
         }),
       ),
@@ -29,6 +31,14 @@ export const accountsRpc = {
   add: defineRpc({
     name: "aster.accounts.add.request",
     input: z.object({ base: family, workspaceId: z.string().min(1) }),
+    output: z.object({ id: z.string(), workspaceId: z.string() }),
+  }),
+  relogin: defineRpc({
+    name: "aster.accounts.relogin.request",
+    input: z.object({
+      accountId: z.string().min(1),
+      workspaceId: z.string().min(1),
+    }),
     output: z.object({ id: z.string(), workspaceId: z.string() }),
   }),
   policy: defineRpc({
