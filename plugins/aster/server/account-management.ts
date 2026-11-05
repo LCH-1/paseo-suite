@@ -15,7 +15,10 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
 import { accountsRpc } from "../shared/accounts-rpc";
-import { paseoHome as defaultPaseoHome } from "./accounts";
+import {
+  accountSecureDirectory,
+  paseoHome as defaultPaseoHome,
+} from "./accounts";
 import { codexOriginalCommand } from "./codex";
 import { codexTokens } from "./codex-runtime.mjs";
 import { createLocalPluginConnection } from "./legacy-credential-rpc";
@@ -32,6 +35,20 @@ const flowSchema = z.object({
   workspaceId: z.string(),
   status: z.string(),
   terminalId: z.string().optional(),
+  accountId: z.string().optional(),
+  email: z.string().nullable().optional(),
+});
+const registeredAccountsSchema = z.object({
+  accounts: z.array(
+    z
+      .object({
+        id: z.string(),
+        base: z.string(),
+        home: z.string().nullable().optional(),
+        email: z.string().nullable().optional(),
+      })
+      .passthrough(),
+  ),
 });
 const providersSchema = z.record(
   z.string(),
@@ -80,6 +97,7 @@ export function registerAccountManagement(
     home?: string;
     userHome?: string;
     pluginPath?: () => Promise<string>;
+    onRelogin?: () => void;
   } = {},
 ) {
   const paseoHome = options.home ?? defaultPaseoHome,
@@ -110,6 +128,66 @@ export function registerAccountManagement(
         ),
     );
   }
+  async function registeredClaudeAccounts() {
+    const registry = registeredAccountsSchema.parse(
+      await json(join(paseoHome, "paseo-accounts", "accounts.json"), {
+        accounts: [],
+      }),
+    );
+    return registry.accounts.filter((account) => account.base === "claude");
+  }
+  async function finishRelogin(flow: Flow) {
+    const profile = z
+      .object({ oauthAccount: z.object({ emailAddress: z.string() }) })
+      .safeParse(
+        await json(join(flow.home, ".claude.json"), null).catch(() => null),
+      );
+    const email = profile.success
+      ? profile.data.oauthAccount.emailAddress
+      : null;
+    const matches =
+      !flow.email || email?.toLowerCase() === flow.email.toLowerCase();
+    if (matches) options.onRelogin?.();
+    await writeJson(flowFile(flow.id), {
+      ...flow,
+      status: matches
+        ? "재로그인 완료 · 구독과 한도를 다시 확인합니다"
+        : `${email ?? "알 수 없는 계정"}(으)로 로그인됨 · ${flow.email} 계정으로 다시 로그인하세요`,
+    });
+  }
+  async function loginCommand(paseo: PaseoApi) {
+    const { config } = await paseo.config.get();
+    const claudeExe = join(userHome, ".local", "bin", "claude.exe");
+    return (
+      providersSchema.parse(config.providers ?? {}).claude?.command ?? [
+        process.platform === "win32" && existsSync(claudeExe)
+          ? claudeExe
+          : "claude",
+      ]
+    );
+  }
+  async function loginLauncher() {
+    const launcher = join(await pluginPath(), "server/account-login.mjs");
+    if (!(await lstat(launcher)).isFile())
+      throw Error("계정 로그인 모듈이 설치되지 않았습니다.");
+    return launcher;
+  }
+  function loginTerminal(
+    paseo: PaseoApi,
+    workspaceId: string,
+    name: string,
+    launcher: string,
+    login: Record<string, unknown>,
+  ) {
+    return paseo.terminals.create({
+      workspaceId,
+      name,
+      command: /^node(?:\.exe)?$/i.test(basename(process.execPath))
+        ? process.execPath
+        : "node",
+      args: [launcher, JSON.stringify(login)],
+    });
+  }
   async function finish(paseo: PaseoApi) {
     for (const flow of await flows()) {
       lifetime.signal.throwIfAborted();
@@ -122,8 +200,14 @@ export function registerAccountManagement(
       if (!result.success) {
         await writeJson(flowFile(flow.id), {
           ...flow,
-          status: "로그인 실패 · 다시 추가하세요",
+          status: flow.accountId
+            ? "재로그인 실패 · 다시 시도하세요"
+            : "로그인 실패 · 다시 추가하세요",
         });
+        continue;
+      }
+      if (flow.accountId) {
+        await finishRelogin(flow);
         continue;
       }
       let email: string | null = null,
@@ -259,18 +343,11 @@ export function registerAccountManagement(
           process.platform === "win32" ? "junction" : "dir",
         );
       }
-      const claudeExe = join(userHome, ".local", "bin", "claude.exe");
       const command =
         input.base === "codex"
           ? codexOriginalCommand(providers.codex?.command)
-          : (providers.claude?.command ?? [
-              process.platform === "win32" && existsSync(claudeExe)
-                ? claudeExe
-                : "claude",
-            ]);
-      const launcher = join(await pluginPath(), "server/account-login.mjs");
-      if (!(await lstat(launcher)).isFile())
-        throw Error("계정 로그인 모듈이 설치되지 않았습니다.");
+          : await loginCommand(paseo);
+      const launcher = await loginLauncher();
       const flow: Flow = {
         id,
         base: input.base,
@@ -279,22 +356,67 @@ export function registerAccountManagement(
         status: "pending",
       };
       await writeJson(flowFile(id), flow);
-      const terminal = await paseo.terminals.create({
-        workspaceId: workspace.id,
-        name: `${input.base} 계정 추가`,
-        command: /^node(?:\.exe)?$/i.test(basename(process.execPath))
-          ? process.execPath
-          : "node",
-        args: [
-          launcher,
-          JSON.stringify({
-            base: input.base,
-            home,
-            command,
-            done: join(flowsDirectory, `${id}.done`),
-          }),
-        ],
-      });
+      const terminal = await loginTerminal(
+        paseo,
+        workspace.id,
+        `${input.base} 계정 추가`,
+        launcher,
+        {
+          base: input.base,
+          home,
+          command,
+          done: join(flowsDirectory, `${id}.done`),
+        },
+      );
+      await writeJson(flowFile(id), { ...flow, terminalId: terminal.id });
+      return { id, workspaceId: workspace.id };
+    }),
+  );
+  server.handle(accountsRpc.relogin, async (input, { paseo }) =>
+    serialize(async () => {
+      api = paseo;
+      const workspace = await paseo.workspaces.ref(input.workspaceId).refresh();
+      if (!workspace?.workspaceDirectory)
+        throw Error("로그인 터미널을 열 워크스페이스를 선택하세요.");
+      // The folder comes from the registry so the client can only name a known account.
+      const account = (await registeredClaudeAccounts()).find(
+        (entry) => entry.id === input.accountId,
+      );
+      if (!account) throw Error("다시 로그인할 Claude 계정을 찾지 못했습니다.");
+      const home = account.home ?? join(userHome, ".claude");
+      const command = await loginCommand(paseo);
+      const launcher = await loginLauncher();
+      await mkdir(flowsDirectory, { recursive: true, mode: 0o700 });
+      const id = randomUUID();
+      const flow: Flow = {
+        id,
+        base: "claude",
+        home,
+        workspaceId: input.workspaceId,
+        status: "pending",
+        accountId: account.id,
+        email: account.email ?? null,
+      };
+      await writeJson(flowFile(id), flow);
+      const terminal = await loginTerminal(
+        paseo,
+        workspace.id,
+        `${account.email ?? account.id} 재로그인`,
+        launcher,
+        {
+          base: "claude",
+          home,
+          // Same credential location sessions use, so the new login reaches them.
+          secureDirectory: accountSecureDirectory(
+            { home },
+            process.platform,
+            userHome,
+          ),
+          email: account.email ?? undefined,
+          command,
+          done: join(flowsDirectory, `${id}.done`),
+        },
+      );
       await writeJson(flowFile(id), { ...flow, terminalId: terminal.id });
       return { id, workspaceId: workspace.id };
     }),
@@ -303,13 +425,19 @@ export function registerAccountManagement(
     api = paseo;
     await serialize(() => finish(paseo));
     const { config } = await paseo.config.get();
-    const [accounts, workspaces, pending] = await Promise.all([
+    const [accounts, workspaces, pending, registered] = await Promise.all([
       status(config.providers ?? {}, lifetime.signal),
       paseo.workspaces.list(),
       flows(),
+      registeredClaudeAccounts(),
     ]);
     return {
-      accounts,
+      accounts: accounts.map((account) => ({
+        ...account,
+        canRelogin:
+          account.base === "claude" &&
+          registered.some((entry) => entry.id === account.id),
+      })),
       workspaces: workspaces.entries.map((workspace) => ({
         id: workspace.id,
         label: workspace.name ?? workspace.workspaceDirectory,
@@ -318,6 +446,9 @@ export function registerAccountManagement(
         id: flow.id,
         base: flow.base,
         workspaceId: flow.workspaceId,
+        label: flow.accountId
+          ? `${flow.email ?? flow.accountId} 재로그인`
+          : `${flow.base} 계정 추가`,
         status:
           flow.status === "pending"
             ? "터미널에서 공식 CLI 로그인을 완료하세요"
