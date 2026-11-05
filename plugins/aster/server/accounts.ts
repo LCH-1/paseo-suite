@@ -187,6 +187,18 @@ function matchingReports(
     ),
   ];
 }
+/**
+ * A root Claude session with no recorded account would reopen on the main login,
+ * which may be gone, so it has nothing worth preserving.
+ */
+export function hasPreviousAccount(
+  request: { provider: string; env: Record<string, string | undefined> },
+  bound: boolean,
+) {
+  return (
+    bound || !!request.env.ASTER_ACCOUNT_ID || request.provider !== "claude"
+  );
+}
 /** No usable login, as opposed to an ended subscription or a usage API failure. */
 export function needsLogin(
   account: Account,

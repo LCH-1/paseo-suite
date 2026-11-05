@@ -5,6 +5,7 @@ import type {
 import {
   accountSecureDirectory,
   bootstrapAccounts,
+  hasPreviousAccount,
   needsLogin,
   discoverAccounts,
   mapReports,
@@ -263,7 +264,11 @@ export default function contribute(server: PluginServerContext) {
             if (
               !selectedId &&
               (request.reason === "create" ||
-                authenticationRecovery.has(request.agentId))
+                authenticationRecovery.has(request.agentId) ||
+                !hasPreviousAccount(
+                  request,
+                  controller.bindings.has(request.agentId),
+                ))
             ) {
               selectedId = controller.bootstrap(
                 request.agentId,
