@@ -33,6 +33,11 @@ import { registerAccountManagement } from "./server/account-management";
 import { providerFamily, type ProviderEntries } from "./server/provider-policy";
 import { rankAccounts } from "./server/scheduler";
 
+const NO_USAGE_READINGS =
+  "Aster: Claude 계정의 사용량 정보를 확인할 수 없습니다. Paseo 사용량 화면과 각 계정의 실제 로그인 상태를 확인하세요. 이전 로그인 표시는 현재 인증 상태를 보장하지 않습니다.";
+const NO_SELECTABLE_ACCOUNT =
+  "Aster: Claude 계정의 잔여 한도 또는 최신 초기화 정보를 확인하세요. 현재 자동 선택 가능한 계정이 없습니다.";
+
 class NoEligibleSubscription extends Error {}
 
 export default function contribute(server: PluginServerContext) {
@@ -209,6 +214,17 @@ export default function contribute(server: PluginServerContext) {
           )
         )
           return;
+        // A dry run has no session behind it: decide only, and keep every route and binding as is.
+        const preflight =
+          (request as { preflight?: boolean }).preflight === true;
+        if (
+          preflight &&
+          (request.env.ASTER_DISABLED === "1" ||
+            authenticationOverrides.some(
+              (key) => request.env[key] || process.env[key],
+            ))
+        )
+          return;
         if (
           request.env.ASTER_DISABLED === "1" ||
           authenticationOverrides.some(
@@ -224,7 +240,8 @@ export default function contribute(server: PluginServerContext) {
             signal.throwIfAborted();
             const settings = await readSettings();
             const accounts = await discoverAccounts();
-            await restoreRoute(request.agentId, accounts, false);
+            if (!preflight)
+              await restoreRoute(request.agentId, accounts, false);
             const eligible = await subscriptions.filter(
               accounts,
               async () => (await paseo.config.get()).config.providers ?? {},
@@ -258,6 +275,23 @@ export default function contribute(server: PluginServerContext) {
               return preserveAccount();
             }
             const readings = mapReports(eligible, reports, settings.capacities);
+            if (preflight) {
+              if (
+                controller.choose(request.agentId, readings, Date.now()) ||
+                controller.canBootstrap(
+                  bootstrapAccounts(eligible, reports).map(
+                    (account) => account.id,
+                  ),
+                  Date.now(),
+                )
+              )
+                return;
+              throw new Error(
+                readings.length === 0
+                  ? NO_USAGE_READINGS
+                  : NO_SELECTABLE_ACCOUNT,
+              );
+            }
             let selectedId =
               controller.choose(request.agentId, readings, Date.now())?.id ??
               null;
@@ -292,12 +326,10 @@ export default function contribute(server: PluginServerContext) {
                 );
                 return preserveAccount();
               }
-              if (readings.length === 0)
-                throw new Error(
-                  "Aster: Claude 계정의 사용량 정보를 확인할 수 없습니다. Paseo 사용량 화면과 각 계정의 실제 로그인 상태를 확인하세요. 이전 로그인 표시는 현재 인증 상태를 보장하지 않습니다.",
-                );
               throw new Error(
-                "Aster: Claude 계정의 잔여 한도 또는 최신 초기화 정보를 확인하세요. 현재 자동 선택 가능한 계정이 없습니다.",
+                readings.length === 0
+                  ? NO_USAGE_READINGS
+                  : NO_SELECTABLE_ACCOUNT,
               );
             }
             const account = accounts.find((entry) => entry.id === selectedId)!;

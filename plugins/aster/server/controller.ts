@@ -40,6 +40,11 @@ export class Controller {
     this.blocked.set(accountId, now + 60_000);
   }
 
+  /** Whether bootstrap could pick an account, without advancing its rotation. */
+  canBootstrap(accountIds: readonly string[], now: number) {
+    return accountIds.some((id) => (this.blocked.get(id) ?? 0) <= now);
+  }
+
   bootstrap(agentId: string, accountIds: readonly string[], now: number) {
     const load = (id: string) => [...this.bindings].filter(([otherId, binding]) => otherId !== agentId && binding.accountId === id && (this.busy.has(otherId) || (this.reservations.get(otherId) ?? 0) > now)).length;
     const selected = [...new Set(accountIds)].filter(id => (this.blocked.get(id) ?? 0) <= now)
