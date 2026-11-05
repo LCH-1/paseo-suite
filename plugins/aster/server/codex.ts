@@ -221,6 +221,30 @@ export async function installCodexBridge(home = paseoHome) {
   }
 }
 
+/** The first attempt can run before the daemon accepts connections, so a failure is not final. */
+export function retryingBridge(
+  install: () => Promise<void>,
+  onError: (error: unknown) => void,
+) {
+  let attempt: Promise<boolean> | null = null;
+  const start = () =>
+    (attempt = install().then(
+      () => true,
+      (error: unknown) => {
+        onError(error);
+        return false;
+      },
+    ));
+  start();
+  return async () => {
+    if (await attempt) return true;
+    // Waiters of one failed attempt share a single retry.
+    const failed = attempt;
+    await Promise.resolve();
+    return attempt === failed ? start() : attempt;
+  };
+}
+
 export function registerCodexRouting(server: PluginServerContext) {
   const lifetime = new AbortController(),
     bindings = new Map<string, CodexBinding>(),
@@ -237,12 +261,16 @@ export function registerCodexRouting(server: PluginServerContext) {
     reservations = new Map<string, number>();
   const excluded = new Set<string>();
   let serial: Promise<unknown> = Promise.resolve(),
-    sequence = 0,
-    bridgeError: unknown;
-  const bridgeReady = installCodexBridge().catch((error) => {
-    bridgeError = error;
-    console.error("[aster] Codex 자동 계정 실행 모듈을 초기화하지 못했습니다.");
-  });
+    sequence = 0;
+  const bridgeReady = retryingBridge(
+    () => installCodexBridge(),
+    (error) => {
+      console.error(
+        "[aster] Codex 자동 계정 실행 모듈을 초기화하지 못했습니다.",
+        error instanceof Error ? error.message : String(error),
+      );
+    },
+  );
   const serialize = <T>(action: () => Promise<T>): Promise<T> => {
     const result = serial.then(action);
     serial = result.catch(() => undefined);
@@ -365,8 +393,7 @@ export function registerCodexRouting(server: PluginServerContext) {
           return;
         }
         if (!preflight) excluded.delete(request.agentId);
-        await bridgeReady;
-        if (bridgeError)
+        if (!(await bridgeReady()))
           throw Error(
             "Aster Codex 계정 실행 모듈을 확인하세요. 기존 대화 기록은 유지됩니다.",
           );
