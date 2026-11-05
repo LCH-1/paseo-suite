@@ -6,6 +6,7 @@ import {
   writeFile,
   rename,
   readdir,
+  rm,
   symlink,
   lstat,
 } from "node:fs/promises";
@@ -37,7 +38,11 @@ const flowSchema = z.object({
   terminalId: z.string().optional(),
   accountId: z.string().optional(),
   email: z.string().nullable().optional(),
+  expiresAt: z.number().optional(),
 });
+// A finished login is only a notice; a failure stays longer because it needs action.
+const successNoticeMs = 60_000;
+const failureNoticeMs = 60 * 60_000;
 const registeredAccountsSchema = z.object({
   accounts: z.array(
     z
@@ -129,6 +134,17 @@ export function registerAccountManagement(
         ),
     );
   }
+  function closeFlow(flow: Flow, status: string, noticeMs: number) {
+    return writeJson(flowFile(flow.id), {
+      ...flow,
+      status,
+      expiresAt: Date.now() + noticeMs,
+    });
+  }
+  async function removeFlow(id: string) {
+    await rm(join(flowsDirectory, `${id}.done`), { force: true });
+    await rm(flowFile(id), { force: true });
+  }
   async function registeredClaudeAccounts() {
     const registry = registeredAccountsSchema.parse(
       await json(join(paseoHome, "paseo-accounts", "accounts.json"), {
@@ -149,12 +165,13 @@ export function registerAccountManagement(
     const matches =
       !flow.email || email?.toLowerCase() === flow.email.toLowerCase();
     if (matches) options.onRelogin?.();
-    await writeJson(flowFile(flow.id), {
-      ...flow,
-      status: matches
+    await closeFlow(
+      flow,
+      matches
         ? "재로그인 완료 · 구독과 한도를 다시 확인합니다"
         : `${email ?? "알 수 없는 계정"}(으)로 로그인됨 · ${flow.email} 계정으로 다시 로그인하세요`,
-    });
+      matches ? successNoticeMs : failureNoticeMs,
+    );
   } // A terminal must belong to a workspace; the choice does not affect the login.
   async function loginWorkspace(paseo: PaseoApi) {
     const { entries } = await paseo.workspaces.list();
@@ -201,19 +218,23 @@ export function registerAccountManagement(
   async function finish(paseo: PaseoApi) {
     for (const flow of await flows()) {
       lifetime.signal.throwIfAborted();
-      if (flow.status !== "pending") continue;
+      if (flow.status !== "pending") {
+        if ((flow.expiresAt ?? 0) <= Date.now()) await removeFlow(flow.id);
+        continue;
+      }
       const result = z
         .object({ success: z.boolean() })
         .nullable()
         .parse(await json(join(flowsDirectory, `${flow.id}.done`), null));
       if (!result) continue;
       if (!result.success) {
-        await writeJson(flowFile(flow.id), {
-          ...flow,
-          status: flow.accountId
+        await closeFlow(
+          flow,
+          flow.accountId
             ? "재로그인 실패 · 다시 시도하세요"
             : "로그인 실패 · 다시 추가하세요",
-        });
+          failureNoticeMs,
+        );
         continue;
       }
       if (flow.accountId) {
@@ -307,10 +328,11 @@ export function registerAccountManagement(
           account,
         ],
       });
-      await writeJson(flowFile(flow.id), {
-        ...flow,
-        status: "등록 완료 · 구독과 한도에 따라 자동 분배",
-      });
+      await closeFlow(
+        flow,
+        "등록 완료 · 구독과 한도에 따라 자동 분배",
+        successNoticeMs,
+      );
     }
   }
   async function pluginPath() {
@@ -429,11 +451,14 @@ export function registerAccountManagement(
   );
   server.handle(accountsRpc.status, async (_, { paseo }) => {
     api = paseo;
-    await serialize(() => finish(paseo));
+    // Read inside the queue: a concurrent poll may be removing an expired flow.
+    const pending = await serialize(async () => {
+      await finish(paseo);
+      return flows();
+    });
     const { config } = await paseo.config.get();
-    const [accounts, pending, registered] = await Promise.all([
+    const [accounts, registered] = await Promise.all([
       status(config.providers ?? {}, lifetime.signal),
-      flows(),
       registeredClaudeAccounts(),
     ]);
     return {
