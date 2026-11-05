@@ -1,4 +1,11 @@
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
@@ -345,16 +352,19 @@ export function registerCodexRouting(server: PluginServerContext) {
         const { config } = await paseo.config.get(),
           providers = providersSchema.parse(config.providers ?? {});
         if (!codexProvider(request.provider, providers)) return;
+        // A dry run has no session behind it: decide only, and keep every binding as is.
+        const preflight =
+          (request as { preflight?: boolean }).preflight === true;
         if (
           request.env.ASTER_DISABLED === "1" ||
           ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"].some(
             (key) => request.env[key] || process.env[key],
           )
         ) {
-          excluded.add(request.agentId);
+          if (!preflight) excluded.add(request.agentId);
           return;
         }
-        excluded.delete(request.agentId);
+        if (!preflight) excluded.delete(request.agentId);
         await bridgeReady;
         if (bridgeError)
           throw Error(
@@ -369,6 +379,7 @@ export function registerCodexRouting(server: PluginServerContext) {
             throw Error(
               "Aster: 현재 사용할 수 있는 Codex 구독 계정이 없습니다. 구독·로그인·사용 한도를 확인하세요. 기존 대화 기록은 유지됩니다.",
             );
+          if (preflight) return;
           const previous = bindings.get(request.agentId);
           bindings.set(request.agentId, {
             account,
