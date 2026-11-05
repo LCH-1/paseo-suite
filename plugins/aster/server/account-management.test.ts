@@ -407,3 +407,79 @@ test("열린 워크스페이스가 없으면 로그인 터미널을 만들지 �
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+async function finishedRelogin(
+  f: Awaited<ReturnType<typeof reloginFixture>>,
+  email: string,
+) {
+  await f.call(accountsRpc.relogin, { accountId: "profile" });
+  const done: string = JSON.parse(f.terminals.at(-1).args[1]).done;
+  await writeFile(
+    join(f.profile, ".claude.json"),
+    JSON.stringify({ oauthAccount: { emailAddress: email } }),
+  );
+  await writeFile(done, '{"success":true}');
+  return { done, file: done.replace(/\.done$/, ".json") };
+}
+
+test("완료 안내는 잠시 보인 뒤 파일과 함께 사라진다", async () => {
+  const f = await reloginFixture();
+  try {
+    const { done, file } = await finishedRelogin(f, "second@example.invalid");
+    const shown = await f.call(accountsRpc.status);
+    assert.match(shown.flows[0].status, /재로그인 완료/);
+    assert.match(
+      (await f.call(accountsRpc.status)).flows[0].status,
+      /재로그인 완료/,
+    );
+    const flow = JSON.parse(await readFile(file, "utf8"));
+    assert.ok(flow.expiresAt - Date.now() <= 60_000);
+    await writeFile(
+      file,
+      JSON.stringify({ ...flow, expiresAt: Date.now() - 1 }),
+    );
+    assert.deepEqual((await f.call(accountsRpc.status)).flows, []);
+    await assert.rejects(readFile(file), { code: "ENOENT" });
+    await assert.rejects(readFile(done), { code: "ENOENT" });
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("이전 버전이 남긴 완료 안내는 바로 지운다", async () => {
+  const f = await reloginFixture();
+  try {
+    const { file } = await finishedRelogin(f, "second@example.invalid");
+    await f.call(accountsRpc.status);
+    const { expiresAt: _, ...legacy } = JSON.parse(
+      await readFile(file, "utf8"),
+    );
+    await writeFile(file, JSON.stringify(legacy));
+    assert.deepEqual((await f.call(accountsRpc.status)).flows, []);
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("조치가 필요한 안내는 성공 안내보다 오래 남고 진행 중인 로그인은 지우지 않는다", async () => {
+  const f = await reloginFixture();
+  try {
+    const { file } = await finishedRelogin(f, "other@example.invalid");
+    await f.call(accountsRpc.status);
+    const flow = JSON.parse(await readFile(file, "utf8"));
+    assert.ok(flow.expiresAt - Date.now() > 30 * 60_000);
+    await rm(file);
+
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    const state = await f.call(accountsRpc.status);
+    assert.match(
+      state.flows[0].status,
+      /터미널에서 공식 CLI 로그인을 완료하세요/,
+    );
+  } finally {
+    f.dispose();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
