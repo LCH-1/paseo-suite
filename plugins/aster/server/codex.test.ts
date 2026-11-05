@@ -15,7 +15,35 @@ import {
   codexNodeLauncher,
   codexOriginalCommand,
   discoverCodexAccounts,
+  retryingBridge,
 } from "./codex";
+
+test("Codex 실행 모듈은 시작 시 실패해도 다음 세션에서 한 번만 다시 준비한다", async () => {
+  let calls = 0;
+  const errors: unknown[] = [];
+  const ready = retryingBridge(
+    async () => {
+      calls++;
+      if (calls === 1) throw Error("not listening");
+    },
+    (error) => errors.push(error),
+  );
+  assert.deepEqual(await Promise.all([ready(), ready()]), [true, true]);
+  assert.equal(calls, 2);
+  assert.equal(errors.length, 1);
+  assert.equal(await ready(), true);
+  assert.equal(calls, 2);
+});
+
+test("Codex 실행 모듈이 계속 실패하면 실패를 알린다", async () => {
+  const ready = retryingBridge(
+    async () => {
+      throw Error("down");
+    },
+    () => {},
+  );
+  assert.equal(await ready(), false);
+});
 
 const now = 1800000000000;
 function reading(id: string, used = 20): CodexReading {
