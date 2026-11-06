@@ -252,54 +252,26 @@ test("an account logged in on one host reaches hosts that have never seen it, ex
   assert.deepEqual(received.map((r) => [r.to, r.input.identities]), [["blank", [other]]]);
 });
 
-function renewable(serverId: string, expiresAt: number | null, calls: string[], endpoint: "sync" | "aster" = "sync"): RelayPeer {
-  return {
+test("a refresh token held by two hosts stays on one, preferring a Linux host", async () => {
+  const released: unknown[] = [];
+  const holder = (serverId: string, platform: string, chains: string[]): RelayPeer => ({
     serverId,
-    endpoint,
+    endpoint: "sync",
     client: {
-      async invokePluginRpc(_, method) {
+      async invokePluginRpc(_, method, input) {
         if (method.includes("status"))
-          return { version: 1, publicKey: key, provision: true, refresh: true, accounts: [{ identity: id, expiresAt, availableExpiresAt: expiresAt, revision: null }] };
-        if (method.includes("refresh")) { calls.push(serverId); return { refreshed: true }; }
+          return { version: 1, publicKey: key, borrow: true, platform, accounts: [{ identity: id, expiresAt: 8 * hour, revision: null, chains }] };
+        if (method.includes("release")) released.push([serverId, input]);
         return { changed: 0 };
       },
     },
-  };
-}
-test("an idle login expiring everywhere is renewed by exactly one host and not retried at once", async () => {
-  const calls: string[] = [];
-  const attempts = new Map<string, number>();
-  const peers = [renewable("b", 100, calls), renewable("a", 100, calls), renewable("c", 100, calls)];
-  await relayCredentials(peers, 1000, undefined, { attempts });
-  assert.deepEqual(calls, ["a"]);
-  await relayCredentials(peers, 2000, undefined, { attempts });
-  assert.deepEqual(calls, ["a"]);
-  await relayCredentials(peers, 1000 + 6 * 60_000, undefined, { attempts });
-  assert.deepEqual(calls, ["a", "a"]);
-});
-test("a failed renewal never moves on to the next host's copy", async () => {
-  const calls: string[] = [];
-  const attempts = new Map<string, number>();
-  const failing = (serverId: string): RelayPeer => {
-    const peer = renewable(serverId, 100, calls);
-    const invoke = peer.client.invokePluginRpc;
-    peer.client.invokePluginRpc = async (...args) => {
-      const value: any = await invoke(...args);
-      return args[1].includes("refresh") ? { refreshed: false } : value;
-    };
-    return peer;
-  };
-  const peers = [failing("a"), failing("b"), failing("c")];
-  await relayCredentials(peers, 1000, undefined, { attempts });
-  await relayCredentials(peers, 1000 + 6 * 60_000, undefined, { attempts });
-  await relayCredentials(peers, 1000 + 60 * 60_000, undefined, { attempts });
-  assert.deepEqual(calls, ["a"]);
-});
-test("a usable copy anywhere means no renewal, and old plugins are never asked", async () => {
-  const calls: string[] = [];
-  const attempts = new Map<string, number>();
-  await relayCredentials([renewable("fresh", 8 * hour, calls), renewable("old", 100, calls)], 0, undefined, { attempts });
-  assert.deepEqual(calls, []);
-  await relayCredentials([renewable("legacy", 100, calls, "aster")], 1000, undefined, { attempts });
-  assert.deepEqual(calls, []);
+  });
+  await relayCredentials(
+    [holder("a-windows", "win32", ["c1"]), holder("b-linux", "linux", ["c1"]), holder("c-linux", "linux", ["c1"]), holder("d-own-login", "linux", ["c2"])],
+    0,
+  );
+  assert.deepEqual(released, [
+    ["c-linux", { identity: id, chain: "c1" }],
+    ["a-windows", { identity: id, chain: "c1" }],
+  ]);
 });

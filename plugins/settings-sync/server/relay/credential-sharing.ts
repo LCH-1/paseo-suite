@@ -18,6 +18,7 @@ import type {
   CredentialEnvelope,
   CredentialShareStatus,
   SharedCredential,
+  CredentialProviders,
   CredentialState,
 } from "./credential-types";
 
@@ -31,6 +32,19 @@ const envelope = z
   })
   .strict();
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const refreshTokenOf = (record: SharedCredential | null | undefined) => {
+  const oauth = record?.credential.claudeAiOauth as { refreshToken?: unknown } | undefined;
+  return typeof oauth?.refreshToken === "string" && oauth.refreshToken ? oauth.refreshToken : null;
+};
+export const chainOf = (record: SharedCredential | null | undefined) => {
+  const token = refreshTokenOf(record);
+  return token ? digest("chain:" + token).slice(0, 32) : null;
+};
+/** Refresh tokens rotate: a second copy dies on the first renewal and takes that host's login with it. */
+export function withoutRefreshToken(record: SharedCredential): SharedCredential {
+  const { refreshToken: _refreshToken, ...oauth } = (record.credential.claudeAiOauth ?? {}) as Record<string, unknown>;
+  return { ...record, credential: { ...record.credential, claudeAiOauth: oauth } };
+}
 const newest = (state: CredentialState, identity: string) =>
   state.accounts
     .filter((a) => a.identity === identity && a.record)
@@ -59,6 +73,11 @@ export function renewWithCli(
 }
 /** Local first: a login with this much time left is never replaced by another host's copy. */
 const usableMarginMs = 10 * 60_000;
+const renewWithinMs = 5 * 60_000;
+const renewRetryMs = 10 * 60_000;
+// Gives the relay time to clear duplicated refresh tokens before anything renews one.
+const renewStartDelayMs = 3 * 60_000;
+type PaseoConfigReader = { config: { get(): Promise<{ config: { providers?: CredentialProviders } }> } };
 export class CredentialSharing {
   readonly keys = generateKeyPairSync("rsa", { modulusLength: 3072 });
   readonly publicKey = this.keys.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -68,7 +87,8 @@ export class CredentialSharing {
       version: 1,
       publicKey: this.publicKey,
       provision: true,
-      refresh: true,
+      borrow: true,
+      platform: process.platform,
       declined: state.declined ?? [],
       accounts: [...new Set(state.accounts.map((a) => a.identity))].map((identity) => {
         const source = newest(state, identity);
@@ -80,6 +100,7 @@ export class CredentialSharing {
             : Math.min(...aliases.map((a) => a.record!.expiresAt!)),
           availableExpiresAt: source?.expiresAt ?? null,
           revision: source ? digest(JSON.stringify(source.credential)) : null,
+          chains: [...new Set(aliases.flatMap((a) => chainOf(a.record) ?? []))],
         };
       }),
     };
@@ -89,7 +110,8 @@ export class CredentialSharing {
       bits = recipient.asymmetricKeyDetails?.modulusLength;
     if (recipient.asymmetricKeyType !== "rsa" || !bits || bits < 2048 || bits > 4096)
       throw Error("Aster: 지원하지 않는 수신 암호화 키입니다.");
-    const records = identities.map((id) => newest(state, id));
+    const newestRecords = identities.map((id) => newest(state, id));
+    const records = newestRecords.map((r) => (r ? withoutRefreshToken(r) : r));
     if (
       !records.length ||
       records.some((r) => !r || r.vendor !== "claude" || (r.expiresAt ?? 0) <= this.now() + 60000)
@@ -172,11 +194,44 @@ export function registerCredentialSharing(
   }
   const rpc = <T extends z.ZodType>(name: string, input: T) =>
     defineRpc({ name: name.replace("aster.credentials.", "sync.credentials.") + ".request", input, output: z.unknown() });
+  // The official CLI renews a login when it reads one, so an unused account stays alive
+  // the way any single-machine login does. Each refresh token lives on one host only.
+  let renewApi: PaseoConfigReader | undefined;
+  const nextRenewal = new Map<string, number>();
+  const renew = () =>
+    serial(async () => {
+      if (!renewApi) return;
+      const providers = (await renewApi.config.get()).config.providers ?? {};
+      const state = await store.read(providers);
+      for (const own of state.accounts) {
+        if (!refreshTokenOf(own.record) || (own.record?.expiresAt ?? 0) > Date.now() + renewWithinMs) continue;
+        if (Date.now() < (nextRenewal.get(own.directory) ?? 0)) continue;
+        nextRenewal.set(own.directory, Date.now() + renewRetryMs);
+        const entry = providers[own.providerIds[0]] as { command?: string[]; env?: Record<string, string> } | undefined;
+        const root = providers.claude as { command?: string[]; env?: Record<string, string> } | undefined;
+        await renewWithCli(entry?.command ?? root?.command ?? ["claude"], {
+          ...process.env,
+          ...root?.env,
+          ...entry?.env,
+          CLAUDE_CONFIG_DIR: own.directory,
+          CLAUDE_SECURESTORAGE_CONFIG_DIR: own.directory,
+        });
+        assertActive();
+        await onChanged();
+      }
+    }).catch(() => {});
+  const renewFirst = setTimeout(() => void renew(), renewStartDelayMs);
+  const renewTimer = setInterval(() => void renew(), 60_000);
+  renewFirst.unref?.();
+  renewTimer.unref?.();
   const registrations: unknown[] = [
     server.handle(rpc("aster.credentials.status", z.object({})), async (_, { paseo }) =>
-      serial(async () =>
-        share.status(await store.read((await paseo.config.get()).config.providers ?? {})),
-      ),
+      serial(async () => {
+        renewApi = paseo;
+        return (
+        share.status(await store.read((await paseo.config.get()).config.providers ?? {}))
+        );
+      }),
     ),
     server.handle(
       rpc(
@@ -195,31 +250,37 @@ export function registerCredentialSharing(
         ),
     ),
     server.handle(
-      rpc("aster.credentials.refresh", z.object({ identity }).strict()),
+      rpc(
+        "aster.credentials.release",
+        z.object({ identity, chain: z.string().regex(/^[a-f0-9]{32}$/) }).strict(),
+      ),
       async (input, { paseo }) =>
         serial(async () => {
           const providers = (await paseo.config.get()).config.providers ?? {},
             state = await store.read(providers),
-            own = state.accounts.find((account) => {
-              const oauth = account.record?.credential.claudeAiOauth as { refreshToken?: unknown } | undefined;
-              return account.identity === input.identity && typeof oauth?.refreshToken === "string" && oauth.refreshToken.length > 0;
-            });
-          if (!own) return { refreshed: false };
-          const before = own.record?.expiresAt ?? 0;
-          // Another relay may have renewed it while this request waited.
-          if (before > Date.now() + 5 * 60_000) return { refreshed: false, expiresAt: before };
-          const entry = providers[own.providerIds[0]] as { command?: string[]; env?: Record<string, string> } | undefined;
-          const root = providers.claude as { command?: string[]; env?: Record<string, string> } | undefined;
-          await renewWithCli(entry?.command ?? root?.command ?? ["claude"], {
-            ...process.env,
-            ...root?.env,
-            ...entry?.env,
-            CLAUDE_CONFIG_DIR: own.directory,
-            CLAUDE_SECURESTORAGE_CONFIG_DIR: own.directory,
-          });
-          const after = (await store.read(providers)).accounts.find((account) => account.directory === own.directory)?.record?.expiresAt ?? 0;
-          if (after > before) await onChanged();
-          return { refreshed: after > before, expiresAt: after };
+            owned = state.accounts.filter(
+              (a) => a.identity === input.identity && chainOf(a.record) === input.chain,
+            );
+          if (!owned.length) return { released: 0 };
+          const stripped = withoutRefreshToken(owned[0].record!);
+          let expected = providers;
+          await store.write(
+            providers,
+            [{ ...stripped, updatedAt: stripped.updatedAt + 1 }],
+            async (next) => {
+              assertActive();
+              const changes = Object.fromEntries(
+                Object.entries(next).filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(expected[id])),
+              );
+              if (Object.keys(changes).length) await paseo.config.patch({ providers: changes });
+              expected = next;
+            },
+            async () => {},
+            0,
+            (own) => chainOf(own.record) === input.chain,
+          );
+          await onChanged();
+          return { released: owned.length };
         }),
     ),
     server.handle(rpc("aster.credentials.receive", envelope), async (input, { paseo }) =>
@@ -295,6 +356,8 @@ export function registerCredentialSharing(
   return [
     () => {
       active = false;
+      clearTimeout(renewFirst);
+      clearInterval(renewTimer);
     },
     ...registrations.filter((remove): remove is () => void => typeof remove === "function"),
   ];

@@ -44,7 +44,10 @@ test("credential envelope is private to its receiver and contains no plaintext c
     other = new CredentialSharing(() => now);
   const envelope = sender.export(state(), receiver.publicKey, ["a".repeat(64)]);
   assert.ok(!JSON.stringify(envelope).includes("synthetic-access"));
-  assert.deepEqual(receiver.open(envelope, state())[0].credential, record().credential);
+  assert.ok(!JSON.stringify(envelope).includes("synthetic-refresh"));
+  const delivered = receiver.open(envelope, state())[0].credential.claudeAiOauth as Record<string, unknown>;
+  assert.equal(delivered.accessToken, "synthetic-access");
+  assert.equal(delivered.refreshToken, undefined);
   assert.throws(() => other.open(envelope, state()));
   assert.throws(() =>
     receiver.open({ ...envelope, tag: Buffer.alloc(16).toString("base64") }, state()),

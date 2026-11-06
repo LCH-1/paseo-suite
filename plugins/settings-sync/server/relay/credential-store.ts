@@ -216,6 +216,8 @@ export function credentialStore(
     authorize: () => Promise<void> = async () => {},
     /** A login still valid past this moment stays untouched, however new the incoming one is. */
     keepUsableUntil = 0,
+    /** Drops the refresh token of the matching profiles instead of delivering a login. */
+    release?: (own: CredentialOwnership) => boolean,
   ) {
     const current = await read(providers),
       updates: SharedCredential[] = [];
@@ -224,8 +226,23 @@ export function credentialStore(
       const matches = current.accounts.filter((a) => a.identity === record.identity);
       if (!matches.length) throw Error("Aster: 대상에 등록되지 않은 계정의 인증은 받지 않습니다.");
       for (const own of matches) {
-        if ((own.record?.expiresAt ?? 0) >= (record.expiresAt ?? 0)) continue;
-        if (keepUsableUntil && (own.record?.expiresAt ?? 0) > keepUsableUntil) continue;
+        if (release) {
+          if (!release(own)) continue;
+        } else {
+          if ((own.record?.expiresAt ?? 0) >= (record.expiresAt ?? 0)) continue;
+          if (keepUsableUntil && (own.record?.expiresAt ?? 0) > keepUsableUntil) continue;
+        }
+        // A borrowed access token never costs this host its own login.
+        const ownOauth = own.record?.credential.claudeAiOauth;
+        const ownRefresh = !release && object(ownOauth) ? ownOauth.refreshToken : undefined;
+        const incomingOauth = object(record.credential.claudeAiOauth) ? record.credential.claudeAiOauth : {};
+        const delivered = {
+          ...record,
+          credential: {
+            ...record.credential,
+            claudeAiOauth: typeof ownRefresh === "string" && ownRefresh ? { ...incomingOauth, refreshToken: ownRefresh } : incomingOauth,
+          },
+        };
         const leaf = path.basename(own.directory),
           managedRoot = path.join(home, "settings-sync", "provider-profiles");
         const id =
@@ -237,7 +254,7 @@ export function credentialStore(
         const sameDirectory = normalized(own.directory) === normalized(path.join(managedRoot, id));
         const { accounts: registryAccounts, ...metadata } = own.metadata;
         updates.push({
-          ...record,
+          ...delivered,
           id,
           providerIds: own.providerIds,
           metadata: own.record || sameDirectory ? metadata : own.metadata,

@@ -1,6 +1,6 @@
 {
   "name": "paseo-settings-sync",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "repository": {
@@ -21,7 +21,7 @@
     "build": "node scripts/build.mjs",
     "check:dist": "node scripts/build.mjs --check",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --import ./tests/support/clean-env.ts --test tests/*.test.ts server/relay/*.test.ts client/*.test.ts",
     "test:installers": "node scripts/check-installers.mjs",
     "check:client": "esbuild index.client.tsx --bundle --platform=browser --format=esm --packages=external --outfile=.check/client.js",
     "check:server": "esbuild index.server.ts --bundle --platform=node --format=esm --packages=external --outfile=.check/server.js"

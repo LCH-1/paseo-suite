@@ -29,6 +29,8 @@ export interface SharedAccountStatus {
   expiresAt: number | null;
   availableExpiresAt?: number | null;
   revision: string | null;
+  /** Digests of the refresh tokens held here; the same digest on two hosts is a conflict. */
+  chains?: string[];
 }
 export interface CredentialShareStatus {
   version: 1;
@@ -36,8 +38,9 @@ export interface CredentialShareStatus {
   accounts: SharedAccountStatus[];
   /** This host registers same-owner accounts it has not seen yet. */
   provision?: boolean;
-  /** This host can renew a login with the official CLI when the relay asks. */
-  refresh?: boolean;
+  /** Delivers access tokens only and keeps each refresh token on one host. */
+  borrow?: boolean;
+  platform?: string;
   /** Accounts signed out here; a relay must never bring them back. */
   declined?: string[];
 }

@@ -11,24 +11,19 @@ interface AccountStatus {
   expiresAt: number | null;
   availableExpiresAt?: number | null;
   revision: string | null;
+  chains?: string[];
 }
 interface Status {
   version: 1;
   publicKey: string;
   accounts: AccountStatus[];
   provision?: boolean;
-  refresh?: boolean;
+  borrow?: boolean;
+  platform?: string;
   declined?: string[];
 }
 /** Keep a host's own login until it is this close to expiring; only then look elsewhere. */
 const usableMarginMs = 10 * 60_000;
-/** Nobody renews an account no session uses, so it would expire on every host at once. */
-const renewWithinMs = 5 * 60_000;
-const renewEveryMs = 5 * 60_000;
-// The CLI clears a login whose refresh token is rejected. Asking the next host would clear
-// that copy too, so a failed renewal waits for a new login instead of moving on.
-const renewAfterFailureMs = 24 * 60 * 60_000;
-const renewAttempts = new Map<string, number>();
 function status(value: unknown): Status {
   const s = value as Partial<Status> | null;
   if (
@@ -66,13 +61,12 @@ export async function relayCredentials(
   peers: readonly RelayPeer[],
   now = Date.now(),
   signal?: AbortSignal,
-  options: { rpcTimeoutMs?: number; renewTimeoutMs?: number; attempts?: Map<string, number> } = {},
+  options: { rpcTimeoutMs?: number } = {},
 ) {
   if (signal?.aborted) return { peers: 0, changed: 0 };
   const timeout = options.rpcTimeoutMs ?? 15000;
   if (!Number.isFinite(timeout) || timeout <= 0) throw Error("Invalid Claude relay deadline");
-  const invoke = (peer: RelayPeer, method: string, input: unknown) => invokeWith(peer, method, input, timeout);
-  const invokeWith = (peer: RelayPeer, method: string, input: unknown, deadline: number) =>
+  const invoke = (peer: RelayPeer, method: string, input: unknown) =>
     new Promise<unknown>((resolve, reject) => {
       let settled = false;
       const finish = (value: unknown, error = false) => {
@@ -86,7 +80,7 @@ export async function relayCredentials(
       const onAbort = () => finish(new Error("Claude relay disposed"), true);
       const timer = setTimeout(
         () => finish(new Error("Claude relay RPC timed out"), true),
-        deadline,
+        timeout,
       );
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
@@ -174,23 +168,28 @@ export async function relayCredentials(
       }
     }
   }
-  // One host renews, then the loop above delivers it: refresh tokens rotate, so several
-  // hosts renewing the same login would invalidate each other.
-  const attempts = options.attempts ?? renewAttempts;
-  for (const identity of known) {
-    const holders = ready
-      .flatMap((peer) => {
-        const own = peer.status.accounts.find((a) => a.identity === identity);
-        return own ? [{ peer, expiry: own.availableExpiresAt ?? own.expiresAt ?? 0 }] : [];
-      })
-      .sort((a, b) => b.expiry - a.expiry || a.peer.serverId.localeCompare(b.peer.serverId));
-    if ((holders[0]?.expiry ?? 0) > now + renewWithinMs) continue;
-    if (now < (attempts.get(identity) ?? -Infinity)) continue;
-    const renewer = holders.find(({ peer }) => peer.status.refresh && peer.endpoint === "sync")?.peer;
-    if (!renewer || signal?.aborted) continue;
-    attempts.set(identity, now + renewAfterFailureMs);
-    const result = (await invokeWith(renewer, "aster.credentials.refresh", { identity }, options.renewTimeoutMs ?? 60000).catch(() => null)) as { refreshed?: unknown } | null;
-    if (result?.refreshed === true) attempts.set(identity, now + renewEveryMs);
+  // A refresh token on two hosts dies on the first renewal, so only one of them may keep it.
+  // Linux hosts stay on, which makes them the better place to keep a login alive.
+  const holders = new Map<string, { identity: string; peers: RelayPeer[] }>();
+  for (const peer of ready) {
+    if (!peer.status.borrow || peer.endpoint !== "sync") continue;
+    for (const account of peer.status.accounts) {
+      for (const chain of account.chains ?? []) {
+        const entry = holders.get(chain) ?? { identity: account.identity, peers: [] };
+        entry.peers.push(peer);
+        holders.set(chain, entry);
+      }
+    }
+  }
+  for (const [chain, { identity, peers: owners }] of holders) {
+    if (owners.length < 2 || signal?.aborted) continue;
+    const rank = (peer: (typeof ready)[number]) => (peer.status.platform === "win32" ? 1 : 0);
+    const [, ...others] = [...owners].sort(
+      (a, b) => rank(a as (typeof ready)[number]) - rank(b as (typeof ready)[number]) || a.serverId.localeCompare(b.serverId),
+    );
+    for (const peer of others) {
+      await invoke(peer, "aster.credentials.release", { identity, chain }).catch(() => {});
+    }
   }
   return { peers: ready.length, changed };
 }

@@ -561,3 +561,41 @@ test("a dead CLI's refresh lock is reclaimed but a live or ownerless one stays b
   assert.equal(await blocked(), false, "dead owner: reclaimed");
   await assert.rejects(() => readFile(lock + ".owner"));
 });
+
+test("a delivered login never carries a refresh token and never costs the receiver its own", async () => {
+  const sender = new CredentialSharing(() => Date.now()), receiver = new CredentialSharing(() => Date.now());
+  const source = await fixture();
+  const fresh = Date.now() + 8 * 3600000;
+  await writeFile(path.join(source.profile, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "source-access", refreshToken: "source-refresh", expiresAt: fresh } }));
+  const sourceState = await source.store.read(source.providers);
+  assert.equal(new Set(sender.status(sourceState).accounts[0].chains).size, 1);
+  const target = await fixture();
+  await writeFile(path.join(target.profile, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "old-access", refreshToken: "target-own-refresh", expiresAt: Date.now() + 60000 } }));
+  const envelope = sender.export(sourceState, receiver.publicKey, [sourceState.accounts[0].identity]);
+  const records = receiver.open(envelope, await target.store.read(target.providers));
+  assert.equal((records[0].credential.claudeAiOauth as any).refreshToken, undefined);
+  await target.store.write(target.providers, records, async () => {}, async () => {}, Date.now() + 600000);
+  const after = JSON.parse(await readFile(path.join(target.profile, ".credentials.json"), "utf8")).claudeAiOauth;
+  assert.equal(after.accessToken, "source-access");
+  assert.equal(after.refreshToken, "target-own-refresh");
+  const cleared = await fixture();
+  await writeFile(path.join(cleared.profile, ".credentials.json"), "{}");
+  const opened = receiver.open(envelope, await cleared.store.read(cleared.providers));
+  await cleared.store.write(cleared.providers, opened, async () => {}, async () => {}, Date.now() + 600000);
+  const borrowed = JSON.parse(await readFile(path.join(cleared.profile, ".credentials.json"), "utf8")).claudeAiOauth;
+  assert.equal(borrowed.accessToken, "source-access");
+  assert.equal(borrowed.refreshToken, undefined);
+  assert.equal((await cleared.store.read(cleared.providers)).accounts[0].record?.expiresAt, fresh);
+});
+
+test("releasing a duplicated login removes only that refresh token and keeps access working", async () => {
+  const f = await fixture();
+  await writeFile(path.join(f.profile, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "access", refreshToken: "shared", expiresAt: Date.now() + 3600000 } }));
+  const record = (await f.store.read(f.providers)).accounts[0].record!;
+  const { refreshToken: _drop, ...oauth } = record.credential.claudeAiOauth as Record<string, unknown>;
+  const changed = await f.store.write(f.providers, [{ ...record, updatedAt: record.updatedAt + 1, credential: { claudeAiOauth: oauth } }], async () => {}, async () => {}, 0, () => true);
+  assert.equal(changed.length, 1);
+  const after = JSON.parse(await readFile(path.join(f.profile, ".credentials.json"), "utf8")).claudeAiOauth;
+  assert.equal(after.accessToken, "access");
+  assert.equal(after.refreshToken, undefined);
+});
