@@ -25,6 +25,9 @@ const usableMarginMs = 10 * 60_000;
 /** Nobody renews an account no session uses, so it would expire on every host at once. */
 const renewWithinMs = 5 * 60_000;
 const renewEveryMs = 5 * 60_000;
+// The CLI clears a login whose refresh token is rejected. Asking the next host would clear
+// that copy too, so a failed renewal waits for a new login instead of moving on.
+const renewAfterFailureMs = 24 * 60 * 60_000;
 const renewAttempts = new Map<string, number>();
 function status(value: unknown): Status {
   const s = value as Partial<Status> | null;
@@ -182,11 +185,12 @@ export async function relayCredentials(
       })
       .sort((a, b) => b.expiry - a.expiry || a.peer.serverId.localeCompare(b.peer.serverId));
     if ((holders[0]?.expiry ?? 0) > now + renewWithinMs) continue;
-    if (now - (attempts.get(identity) ?? -Infinity) < renewEveryMs) continue;
+    if (now < (attempts.get(identity) ?? -Infinity)) continue;
     const renewer = holders.find(({ peer }) => peer.status.refresh && peer.endpoint === "sync")?.peer;
     if (!renewer || signal?.aborted) continue;
-    attempts.set(identity, now);
-    await invokeWith(renewer, "aster.credentials.refresh", { identity }, options.renewTimeoutMs ?? 60000).catch(() => {});
+    attempts.set(identity, now + renewAfterFailureMs);
+    const result = (await invokeWith(renewer, "aster.credentials.refresh", { identity }, options.renewTimeoutMs ?? 60000).catch(() => null)) as { refreshed?: unknown } | null;
+    if (result?.refreshed === true) attempts.set(identity, now + renewEveryMs);
   }
   return { peers: ready.length, changed };
 }
