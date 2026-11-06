@@ -48,7 +48,7 @@ export default function contribute(client) {
   }
   if (!modules) throw new Error("Global Workspace Tabs: unsupported Paseo module exports");
   const leaseKey = "__PASEO_GLOBAL_TABS_LEASE__";
-  const revision = "e00dd52937e9ad2f992c97697fd1fe44500f694655086c070969dd03f8b46d6a";
+  const revision = "26985a9037a5aa4996a9b7b05d42dc7eec3447b45097a06a17f2b4077d681480";
   let lease = globalThis[leaseKey];
   function retain(current) {
     const owner = Symbol();
@@ -1111,7 +1111,8 @@ export default function contribute(client) {
   }
   function closeVirtual(draft, props, preserveGroup=false, preserveDraft=false) {
     if (draft.target) return sourceAction(draft, "onCloseTab", draft.tabId,
-      source => closeNative(draft.tabId, source, { draft, preserveGroup }));
+      source => closeNative(draft.tabId, source, { draft, preserveGroup }),
+      () => forgetUnreachable(draft, props, preserveGroup));
     const items = cycleRows(props, true, virtualId(draft.draftId));
     const index = items.findIndex((item) => item.key === virtualId(draft.draftId));
     const replacement = items[index + 1] || items[index - 1];
@@ -1128,7 +1129,26 @@ export default function contribute(client) {
       else draftBridge.dismiss?.();
     }
   }
-  function sourceAction(entry, name, value, action) {
+  // No pane ever mounts for a workspace that no longer exists, so close the tab without one.
+  function forgetUnreachable(draft, props, preserveGroup) {
+    const id = virtualId(draft.draftId);
+    const items = cycleRows(props, true, id);
+    const index = items.findIndex((item) => item.key === id);
+    const replacement = items[index + 1] || items[index - 1];
+    const selected = currentSelection();
+    const shown = selected?.serverId === draft.serverId && selected.workspaceId === draft.workspaceId;
+    if (!preserveGroup) groupModule?.forgetTabGroupKey(id);
+    handoffs.delete(draft.draftId);
+    knownDrafts.delete(draft.draftId);
+    draftSlots.delete(draft.draftId);
+    pinnedDrafts.delete(draft.draftId);
+    layouts.getState().closeTab?.(draft.serverId + ":" + draft.workspaceId, draft.tabId);
+    notifyProjection();
+    if (!shown) return;
+    if (replacement) activateItem(replacement, props);
+    else draftBridge?.dismiss?.();
+  }
+  function sourceAction(entry, name, value, action, onUnreachable) {
     const sourceForEntry = () => {
       const registered = [...(sources.get(JSON.stringify([entry.serverId, entry.workspaceId]))?.values() || [])];
       return registered.find(source => source.isFocused !== false) || registered[0];
@@ -1142,6 +1162,7 @@ export default function contribute(client) {
       const source = sourceForEntry();
       if (source || ++attempts >= 30) { clearInterval(timer); timers.delete(timer); }
       if (source) { if (action) action(source); else source[name](value); }
+      else if (attempts >= 30) onUnreachable?.();
     }, 50);
     timers.add(timer);
   }
