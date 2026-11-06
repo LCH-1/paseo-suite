@@ -1668,3 +1668,15 @@ test("작성 bridge 구독과 Bar 등록은 dispose 때 해제되고 재등록 �
   const id = app.bridge.open(); completeDraft(app, id, { kind: "agent", agentId: "after-dispose" }, "unused");
   assert.equal(app.model.revision(), before);
 });
+
+test("워크스페이스를 쓸 수 없어 패널이 뜨지 않는 작성 탭도 닫을 수 있다", () => {
+  const app = harness(null, true); pinned(app, ["a"]);
+  const id = app.bridge.open(); app.renderDraft();
+  completeDraft(app, id, { kind: "draft", draftId: "native" }, "native-tab", "gone");
+  const props = app.props("a", [row("a")]);
+  const rendered = app.render(props);
+  assert.ok(rendered.tabs.some(item => item.tab.tabId === draftIdOf(id)));
+  rendered.onCloseTab(draftIdOf(id));
+  for (let tick = 0; tick < 30; tick++) app.tickTimers();
+  assert.ok(app.render(props).tabs.every(item => item.tab.tabId !== draftIdOf(id)));
+});

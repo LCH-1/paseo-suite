@@ -553,7 +553,8 @@
   }
   function closeVirtual(draft, props, preserveGroup=false, preserveDraft=false) {
     if (draft.target) return sourceAction(draft, "onCloseTab", draft.tabId,
-      source => closeNative(draft.tabId, source, { draft, preserveGroup }));
+      source => closeNative(draft.tabId, source, { draft, preserveGroup }),
+      () => forgetUnreachable(draft, props, preserveGroup));
     const items = cycleRows(props, true, virtualId(draft.draftId));
     const index = items.findIndex((item) => item.key === virtualId(draft.draftId));
     const replacement = items[index + 1] || items[index - 1];
@@ -570,7 +571,26 @@
       else draftBridge.dismiss?.();
     }
   }
-  function sourceAction(entry, name, value, action) {
+  // No pane ever mounts for a workspace that no longer exists, so close the tab without one.
+  function forgetUnreachable(draft, props, preserveGroup) {
+    const id = virtualId(draft.draftId);
+    const items = cycleRows(props, true, id);
+    const index = items.findIndex((item) => item.key === id);
+    const replacement = items[index + 1] || items[index - 1];
+    const selected = currentSelection();
+    const shown = selected?.serverId === draft.serverId && selected.workspaceId === draft.workspaceId;
+    if (!preserveGroup) groupModule?.forgetTabGroupKey(id);
+    handoffs.delete(draft.draftId);
+    knownDrafts.delete(draft.draftId);
+    draftSlots.delete(draft.draftId);
+    pinnedDrafts.delete(draft.draftId);
+    layouts.getState().closeTab?.(draft.serverId + ":" + draft.workspaceId, draft.tabId);
+    notifyProjection();
+    if (!shown) return;
+    if (replacement) activateItem(replacement, props);
+    else draftBridge?.dismiss?.();
+  }
+  function sourceAction(entry, name, value, action, onUnreachable) {
     const sourceForEntry = () => {
       const registered = [...(sources.get(JSON.stringify([entry.serverId, entry.workspaceId]))?.values() || [])];
       return registered.find(source => source.isFocused !== false) || registered[0];
@@ -584,6 +604,7 @@
       const source = sourceForEntry();
       if (source || ++attempts >= 30) { clearInterval(timer); timers.delete(timer); }
       if (source) { if (action) action(source); else source[name](value); }
+      else if (attempts >= 30) onUnreachable?.();
     }, 50);
     timers.add(timer);
   }
