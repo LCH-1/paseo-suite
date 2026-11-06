@@ -36,6 +36,8 @@ export interface CredentialShareStatus {
   accounts: SharedAccountStatus[];
   /** This host registers same-owner accounts it has not seen yet. */
   provision?: boolean;
+  /** This host can renew a login with the official CLI when the relay asks. */
+  refresh?: boolean;
   /** Accounts signed out here; a relay must never bring them back. */
   declined?: string[];
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, mock } from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, symlink, rmdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, symlink, rmdir, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { credentialStore } from "./credential-store";
@@ -542,4 +542,22 @@ test("a signed-out account, a same-address entry and a forged identity are not p
   raw.accounts.push({ id: "other", base: "claude", home: null, email: "second@example.test", identity: "org-1|someone", signedIn: true });
   await writeFile(clean.registry, JSON.stringify(raw));
   await assert.rejects(() => clean.store.provision(clean.providers, record, reject()), /이미 있어/);
+});
+
+test("a dead CLI's refresh lock is reclaimed but a live or ownerless one stays busy", async () => {
+  const f = await fixture();
+  const lock = path.join(f.profile, ".oauth_refresh.lock");
+  const old = new Date(Date.now() - 120000);
+  const blocked = async () => (await f.store.read(f.providers)).accounts[0].record === null;
+  await mkdir(lock);
+  await utimes(lock, old, old);
+  assert.equal(await blocked(), true, "no owner: stays busy");
+  await writeFile(lock + ".owner", JSON.stringify({ pid: process.pid }));
+  assert.equal(await blocked(), true, "live owner: stays busy");
+  await writeFile(lock + ".owner", JSON.stringify({ pid: 2147483000 }));
+  await utimes(lock, new Date(), new Date());
+  assert.equal(await blocked(), true, "recently touched: stays busy");
+  await utimes(lock, old, old);
+  assert.equal(await blocked(), false, "dead owner: reclaimed");
+  await assert.rejects(() => readFile(lock + ".owner"));
 });
