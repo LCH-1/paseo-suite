@@ -182,3 +182,72 @@ test("dispose releases a cycle waiting for a nonresponsive status without forwar
   abort.abort();
   assert.deepEqual(await task, { peers: 0, changed: 0 });
 });
+
+function fuller(serverId: string, accounts: { identity: string; expiresAt: number | null }[], received: unknown[], extra: Record<string, unknown> = {}): RelayPeer {
+  return {
+    serverId,
+    endpoint: "aster",
+    client: {
+      async invokePluginRpc(_, method, input: any) {
+        if (method.endsWith("status"))
+          return { version: 1, publicKey: key, ...extra, accounts: accounts.map((a) => ({ ...a, revision: null })) };
+        if (method.endsWith("export")) return { from: serverId, identities: input.identities };
+        received.push({ to: serverId, input });
+        return { changed: 1 };
+      },
+    },
+  };
+}
+const hour = 3_600_000;
+test("a host keeps its own usable login even when another host has a newer one", async () => {
+  const received: unknown[] = [];
+  const result = await relayCredentials(
+    [fuller("newer", [{ identity: id, expiresAt: 8 * hour }], received), fuller("usable", [{ identity: id, expiresAt: hour }], received)],
+    0,
+  );
+  assert.equal(result.changed, 0);
+  assert.deepEqual(received, []);
+});
+test("a login about to expire is replaced before its own refresh can consume a stale token", async () => {
+  const received: any[] = [];
+  await relayCredentials(
+    [fuller("fresh", [{ identity: id, expiresAt: 8 * hour }], received), fuller("expiring", [{ identity: id, expiresAt: 5 * 60_000 }], received)],
+    0,
+  );
+  assert.deepEqual(received.map((r) => [r.to, r.input.from]), [["expiring", "fresh"]]);
+});
+test("no host's near-expiry copy is passed around when nobody has a usable one", async () => {
+  const received: unknown[] = [];
+  await relayCredentials(
+    [fuller("a", [{ identity: id, expiresAt: 9 * 60_000 }], received), fuller("b", [{ identity: id, expiresAt: 5 * 60_000 }], received)],
+    0,
+  );
+  assert.deepEqual(received, []);
+});
+test("the host's own healthy alias is preferred over a newer copy elsewhere", async () => {
+  const received: any[] = [];
+  const own = fuller("own", [{ identity: id, expiresAt: null }], received);
+  const invoke = own.client.invokePluginRpc;
+  own.client.invokePluginRpc = async (...args) => {
+    const value: any = await invoke(...args);
+    if (args[1].endsWith("status")) value.accounts[0].availableExpiresAt = hour;
+    return value;
+  };
+  await relayCredentials([fuller("remote", [{ identity: id, expiresAt: 8 * hour }], received), own], 0);
+  assert.deepEqual(received.map((r) => [r.to, r.input.from]), [["own", "own"]]);
+});
+test("an account logged in on one host reaches hosts that have never seen it, except where declined", async () => {
+  const received: any[] = [];
+  const other = "b".repeat(64);
+  const provision = { provision: true };
+  await relayCredentials(
+    [
+      fuller("login", [{ identity: id, expiresAt: 8 * hour }, { identity: other, expiresAt: 8 * hour }], received, provision),
+      fuller("blank", [{ identity: id, expiresAt: 8 * hour }], received, provision),
+      fuller("signedout", [{ identity: id, expiresAt: 8 * hour }], received, { provision: true, declined: [other] }),
+      fuller("old-plugin", [{ identity: id, expiresAt: 8 * hour }], received),
+    ],
+    0,
+  );
+  assert.deepEqual(received.map((r) => [r.to, r.input.identities]), [["blank", [other]]]);
+});

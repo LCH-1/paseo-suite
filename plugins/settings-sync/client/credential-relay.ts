@@ -16,7 +16,11 @@ interface Status {
   version: 1;
   publicKey: string;
   accounts: AccountStatus[];
+  provision?: boolean;
+  declined?: string[];
 }
+/** Keep a host's own login until it is this close to expiring; only then look elsewhere. */
+const usableMarginMs = 10 * 60_000;
 function status(value: unknown): Status {
   const s = value as Partial<Status> | null;
   if (
@@ -102,17 +106,39 @@ export async function relayCredentials(
   );
   const ready = loaded.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
   let changed = 0;
+  const usableAfter = now + usableMarginMs;
+  const known = [...new Set(ready.flatMap((peer) => peer.status.accounts.map((a) => a.identity)))];
   for (const target of ready) {
-    for (const account of target.status.accounts) {
+    const wanted = [
+      // An account this host has but cannot use right now.
+      ...target.status.accounts.filter((a) => (a.expiresAt ?? 0) <= usableAfter),
+      // An account logged in elsewhere that this host has never seen.
+      ...(target.status.provision
+        ? known
+            .filter(
+              (identity) =>
+                !target.status.accounts.some((a) => a.identity === identity) &&
+                !target.status.declined?.includes(identity),
+            )
+            .map((identity) => ({ identity, expiresAt: null }))
+        : []),
+    ];
+    for (const account of wanted) {
       const sources = ready
         .flatMap((source) => {
           const other = source.status.accounts.find((a) => a.identity === account.identity);
           const available = other?.availableExpiresAt ?? other?.expiresAt ?? 0;
-          return other && available > Math.max(now + 120000, account.expiresAt ?? 0)
+          return other && available > Math.max(usableAfter, account.expiresAt ?? 0)
             ? [{ source, expiry: available }]
             : [];
         })
-        .sort((a, b) => b.expiry - a.expiry || a.source.serverId.localeCompare(b.source.serverId));
+        // The host's own healthy alias comes first; other hosts are the fallback.
+        .sort(
+          (a, b) =>
+            Number(b.source === target) - Number(a.source === target) ||
+            b.expiry - a.expiry ||
+            a.source.serverId.localeCompare(b.source.serverId),
+        );
       for (const { source } of sources) {
         if (signal?.aborted) return { peers: ready.length, changed };
         try {

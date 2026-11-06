@@ -14,7 +14,6 @@ import type {
   SharedCredential,
 } from "./credential-types";
 
-const managed = (id: string) => id === "claude" || id.startsWith("claude-");
 const authKeys = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -70,7 +69,7 @@ export function credentialStore(
         (p) =>
           p.vendor === "claude" &&
           p.providerIds.some(
-            (id) => managed(id) && providers[id] && providers[id].enabled !== false,
+            (id) => providers[id] && providers[id].enabled !== false,
           ),
       )) {
       if (authKeys.some((k) => profile.env[k])) continue;
@@ -135,13 +134,88 @@ export function credentialStore(
       JSON.stringify(registry)
     )
       throw Error("Aster: 계정 목록이 변경되었습니다. 다음 검사에서 다시 확인합니다.");
-    return { providers, accounts };
+    const declined = registered.flatMap((a) => {
+      if (a.base !== "claude" || a.signedIn === true || typeof a.identity !== "string") return [];
+      const [organization, account] = a.identity.split("|");
+      return account ? [hash(["claude", account, organization])] : [];
+    });
+    return { providers, accounts, declined: [...new Set(declined)] };
+  }
+  /** Registers an account this host has not seen, in the same shape as a local login. */
+  async function provision(
+    providers: CredentialProviders,
+    record: SharedCredential,
+    patch: (providers: CredentialProviders) => Promise<void>,
+  ) {
+    const state = await read(providers);
+    if (state.accounts.some((a) => a.identity === record.identity)) return false;
+    if (state.declined?.includes(record.identity))
+      throw Error("Aster: 이 서버에서 로그아웃한 계정은 자동으로 다시 등록하지 않습니다.");
+    const oauth = object(record.metadata.oauthAccount) ? record.metadata.oauthAccount : null;
+    if (accountIdentity(oauth) !== record.identity || typeof oauth?.organizationUuid !== "string")
+      throw Error("Aster: 등록할 Claude 계정 정보를 확인할 수 없습니다.");
+    const email = typeof oauth.emailAddress === "string" ? oauth.emailAddress : null;
+    const registry = await json(path.join(home, "paseo-accounts", "accounts.json"));
+    const known = (Array.isArray(registry.accounts) ? registry.accounts.filter(object) : []).filter(
+      (a) => a.base === "claude" && !!email && a.email === email,
+    );
+    // A same-address entry without credentials is a local decision (or another organization).
+    if (known.length) throw Error("Aster: 같은 주소의 계정이 이미 있어 자동 등록을 보류합니다.");
+    const providerId = "claude-" + record.identity.slice(0, 12);
+    if (providers[providerId]) throw Error("Aster: 등록할 프로바이더 이름이 이미 사용 중입니다.");
+    const id = "claude-" + hash(["provision", record.identity]).slice(0, 24);
+    const { accounts: _sourceAccounts, ...metadata } = record.metadata;
+    const entry: SharedCredential = {
+      ...record,
+      id,
+      providerIds: [providerId],
+      metadata: {
+        ...metadata,
+        accounts: [
+          {
+            id: providerId,
+            base: "claude",
+            home: null,
+            email,
+            identity: `${oauth.organizationUuid}|${String(oauth.accountUuid)}`,
+            signedIn: true,
+          },
+        ],
+      },
+    };
+    const planned: CredentialProviders = {
+      ...providers,
+      [providerId]: {
+        extends: "claude",
+        label: `claude · ${email ?? providerId}`,
+        enabled: true,
+        selectable: false,
+        ...((options.platform ?? process.platform) === "win32"
+          ? { env: { CLAUDE_CODE_FORCE_WINDOWS_CREDMAN: "1" } }
+          : {}),
+      },
+    };
+    const operation = await store.restore(planned, { version: 1, records: [entry] }, providers, {});
+    let patched = false;
+    try {
+      await patch(operation.providers);
+      patched = true;
+      await operation.commit();
+    } catch (error) {
+      if (operation.committed) throw error;
+      await operation.rollback();
+      if (patched) await patch(providers);
+      throw error;
+    }
+    return true;
   }
   async function write(
     providers: CredentialProviders,
     incoming: SharedCredential[],
     patch: (providers: CredentialProviders) => Promise<void>,
     authorize: () => Promise<void> = async () => {},
+    /** A login still valid past this moment stays untouched, however new the incoming one is. */
+    keepUsableUntil = 0,
   ) {
     const current = await read(providers),
       updates: SharedCredential[] = [];
@@ -151,6 +225,7 @@ export function credentialStore(
       if (!matches.length) throw Error("Aster: 대상에 등록되지 않은 계정의 인증은 받지 않습니다.");
       for (const own of matches) {
         if ((own.record?.expiresAt ?? 0) >= (record.expiresAt ?? 0)) continue;
+        if (keepUsableUntil && (own.record?.expiresAt ?? 0) > keepUsableUntil) continue;
         const leaf = path.basename(own.directory),
           managedRoot = path.join(home, "settings-sync", "provider-profiles");
         const id =
@@ -250,5 +325,5 @@ export function credentialStore(
       throw error;
     }
   }
-  return { read, write };
+  return { read, write, provision };
 }
