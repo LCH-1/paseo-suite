@@ -43,6 +43,8 @@ const flowSchema = z.object({
 // A finished login is only a notice; a failure stays longer because it needs action.
 const successNoticeMs = 60_000;
 const failureNoticeMs = 60 * 60_000;
+// A closed terminal or a daemon restart never reports back, so a login cannot wait forever.
+const pendingLimitMs = 60 * 60_000;
 const registeredAccountsSchema = z.object({
   accounts: z.array(
     z
@@ -226,7 +228,15 @@ export function registerAccountManagement(
         .object({ success: z.boolean() })
         .nullable()
         .parse(await json(join(flowsDirectory, `${flow.id}.done`), null));
-      if (!result) continue;
+      if (!result) {
+        if (Date.now() - (await lstat(flowFile(flow.id))).mtimeMs >= pendingLimitMs)
+          await closeFlow(
+            flow,
+            "로그인이 완료되지 않았습니다 · 필요하면 다시 시도하세요",
+            failureNoticeMs,
+          );
+        continue;
+      }
       if (!result.success) {
         await closeFlow(
           flow,

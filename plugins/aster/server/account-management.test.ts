@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
+import { utimes,
   mkdtemp,
   mkdir,
   readFile,
@@ -421,6 +421,21 @@ async function finishedRelogin(
   await writeFile(done, '{"success":true}');
   return { done, file: done.replace(/\.done$/, ".json") };
 }
+
+test("끝나지 않은 로그인은 한 시간 뒤 대기 목록에서 내려온다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    const done: string = JSON.parse(f.terminals.at(-1).args[1]).done;
+    const file = done.replace(/\.done$/, ".json");
+    assert.match((await f.call(accountsRpc.status)).flows[0].status, /공식 CLI 로그인/);
+    const past = new Date(Date.now() - 2 * 60 * 60_000);
+    await utimes(file, past, past);
+    assert.match((await f.call(accountsRpc.status)).flows[0].status, /완료되지 않았습니다/);
+  } finally {
+    await f.cleanup?.();
+  }
+});
 
 test("완료 안내는 잠시 보인 뒤 파일과 함께 사라진다", async () => {
   const f = await reloginFixture();

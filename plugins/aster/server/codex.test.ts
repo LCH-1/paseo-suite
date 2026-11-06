@@ -15,6 +15,7 @@ import {
   codexNodeLauncher,
   codexOriginalCommand,
   discoverCodexAccounts,
+  resumableCodexAccount,
   retryingBridge,
 } from "./codex";
 
@@ -43,6 +44,59 @@ test("Codex 실행 모듈이 계속 실패하면 실패를 알린다", async () 
     () => {},
   );
   assert.equal(await ready(), false);
+});
+
+test("Codex 실행 모듈은 데몬 준비 전 실패를 알리지 않고 스스로 다시 준비한다", async () => {
+  let calls = 0;
+  const errors: unknown[] = [];
+  const ready = retryingBridge(
+    async () => {
+      if (++calls < 3) throw Error("listen is null");
+    },
+    (error) => errors.push(error),
+    { attempts: 5, retryMs: 1 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(calls, 3);
+  assert.deepEqual(errors, []);
+  assert.equal(await ready(), true);
+  assert.equal(calls, 3);
+});
+
+test("Codex 실행 모듈 재시도는 해제 후 멈추고 소진되면 실패를 알린다", async () => {
+  let calls = 0;
+  const errors: unknown[] = [];
+  const stopped = retryingBridge(
+    async () => {
+      calls++;
+      throw Error("down");
+    },
+    () => {},
+    { attempts: 5, retryMs: 1 },
+  );
+  stopped.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls, 1);
+  retryingBridge(
+    async () => {
+      throw Error("down");
+    },
+    (error) => errors.push(error),
+    { attempts: 2, retryMs: 1 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(errors.length, 1);
+});
+
+test("한도가 없어도 기존 대화는 열리지만 새 세션과 사전 점검은 막힌다", () => {
+  const bound = { id: "second", home: "/second", identity: "b" };
+  const first = { id: "codex", home: "/codex", identity: "a" };
+  assert.equal(resumableCodexAccount({ reason: "resume" }, bound, [first]), bound);
+  assert.equal(resumableCodexAccount({ reason: "refresh" }, undefined, [first]), first);
+  assert.equal(resumableCodexAccount({ reason: "resume" }, undefined, []), null);
+  assert.equal(resumableCodexAccount({ reason: "create" }, bound, [first]), null);
+  assert.equal(resumableCodexAccount({ reason: "import" }, bound, [first]), null);
+  assert.equal(resumableCodexAccount({ reason: "resume", preflight: true }, bound, [first]), null);
 });
 
 const now = 1800000000000;
