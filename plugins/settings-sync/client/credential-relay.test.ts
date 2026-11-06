@@ -277,6 +277,24 @@ test("an idle login expiring everywhere is renewed by exactly one host and not r
   await relayCredentials(peers, 1000 + 6 * 60_000, undefined, { attempts });
   assert.deepEqual(calls, ["a", "a"]);
 });
+test("a failed renewal never moves on to the next host's copy", async () => {
+  const calls: string[] = [];
+  const attempts = new Map<string, number>();
+  const failing = (serverId: string): RelayPeer => {
+    const peer = renewable(serverId, 100, calls);
+    const invoke = peer.client.invokePluginRpc;
+    peer.client.invokePluginRpc = async (...args) => {
+      const value: any = await invoke(...args);
+      return args[1].includes("refresh") ? { refreshed: false } : value;
+    };
+    return peer;
+  };
+  const peers = [failing("a"), failing("b"), failing("c")];
+  await relayCredentials(peers, 1000, undefined, { attempts });
+  await relayCredentials(peers, 1000 + 6 * 60_000, undefined, { attempts });
+  await relayCredentials(peers, 1000 + 60 * 60_000, undefined, { attempts });
+  assert.deepEqual(calls, ["a"]);
+});
 test("a usable copy anywhere means no renewal, and old plugins are never asked", async () => {
   const calls: string[] = [];
   const attempts = new Map<string, number>();

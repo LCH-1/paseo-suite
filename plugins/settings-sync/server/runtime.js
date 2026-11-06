@@ -793,7 +793,7 @@ async function decryptLocal(raw, password) {
 }
 
 // server/environment.ts
-import { mkdir as mkdir7, rm as rm5 } from "node:fs/promises";
+import { mkdir as mkdir7, rm as rm6 } from "node:fs/promises";
 import { homedir as homedir5, hostname } from "node:os";
 import path15 from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
@@ -8648,7 +8648,7 @@ async function verifyPlugins(home, plugins, read = installedPlugins, reload = re
 // server/provider-credentials.ts
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
-import { lstat as lstat6, mkdir as mkdir5, readFile as readFile5, realpath as realpath3, rename as rename4, rm as rm3, symlink, utimes as utimes3, writeFile as writeFile3 } from "node:fs/promises";
+import { lstat as lstat6, mkdir as mkdir5, readFile as readFile6, realpath as realpath3, rename as rename4, rm as rm4, symlink, utimes as utimes3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import path10 from "node:path";
 import { randomUUID as randomUUID5 } from "node:crypto";
@@ -8961,9 +8961,33 @@ async function prepareVendorCredentialRestore(options, providers, input, current
 }
 
 // server/claude-auth-lock.ts
-import { lstat as lstat4, mkdir as mkdir3, realpath, rmdir, utimes as utimes2 } from "node:fs/promises";
+import { lstat as lstat4, mkdir as mkdir3, readFile as readFile4, realpath, rm as rm2, rmdir, utimes as utimes2 } from "node:fs/promises";
 import path6 from "node:path";
 var busy = () => new Error("Claude \uC778\uC99D \uAC31\uC2E0 \uB610\uB294 \uC800\uC7A5 \uC7A0\uAE08\uC774 \uC0AC\uC6A9 \uC911\uC785\uB2C8\uB2E4. \uD604\uC7AC \uC778\uC99D\uC744 \uBCF4\uC874\uD588\uC73C\uB2C8 \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
+async function reapDeadCliLock(file, legacy) {
+  let owner;
+  try {
+    owner = JSON.parse(await readFile4(file + ".owner", "utf8"));
+  } catch {
+    return false;
+  }
+  if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (error) {
+    if (error.code !== "ESRCH") return false;
+  }
+  const age = async (target) => Date.now() - (await lstat4(target)).mtimeMs;
+  if (await age(file).catch(() => 0) < 6e4) return false;
+  await rmdir(file).catch(() => {
+  });
+  await rm2(file + ".owner", { force: true }).catch(() => {
+  });
+  if (await age(legacy).catch(() => 0) >= 6e4) await rmdir(legacy).catch(() => {
+  });
+  return true;
+}
 async function lockClaudeAuthentication(directory2) {
   const resolved = await realpath(directory2);
   const held = [];
@@ -9011,6 +9035,7 @@ async function lockClaudeAuthentication(directory2) {
     if (failures.length) throw new Error("Claude \uC778\uC99D \uC800\uC7A5 \uC7A0\uAE08 \uD574\uC81C\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
   };
   try {
+    await reapDeadCliLock(path6.join(resolved, ".oauth_refresh.lock"), `${resolved}.lock`);
     for (const file of [path6.join(resolved, ".oauth_refresh.lock"), `${resolved}.lock`, path6.join(resolved, ".storage-write.lock")]) {
       try {
         await mkdir3(file, { mode: 448 });
@@ -9051,7 +9076,7 @@ var MAX_CHUNKS = 256;
 
 // server/claude-secure-journal.ts
 import { createHash as createHash4, randomBytes as randomBytes2, randomUUID as randomUUID4 } from "node:crypto";
-import { lstat as lstat5, mkdir as mkdir4, open as open2, readFile as readFile4, realpath as realpath2, rename as rename3, rm as rm2, rmdir as rmdir2 } from "node:fs/promises";
+import { lstat as lstat5, mkdir as mkdir4, open as open2, readFile as readFile5, realpath as realpath2, rename as rename3, rm as rm3, rmdir as rmdir2 } from "node:fs/promises";
 import path9 from "node:path";
 import { z as z31 } from "zod";
 
@@ -9214,7 +9239,7 @@ async function identifyProcess(pid) {
   }
   if (process.platform === "linux") {
     try {
-      const raw = await readFile4(`/proc/${pid}/stat`, "utf8");
+      const raw = await readFile5(`/proc/${pid}/stat`, "utf8");
       return raw.slice(raw.lastIndexOf(")") + 2).split(" ")[19];
     } catch (error) {
       if (error.code === "ENOENT") return null;
@@ -9286,7 +9311,7 @@ var ClaudeSecureJournal = class _ClaudeSecureJournal {
     });
     if (!info) return null;
     if (!info.isFile() || info.isSymbolicLink() || info.size > max) throw new Error("Unsafe credential journal");
-    return readFile4(file, "utf8");
+    return readFile5(file, "utf8");
   }
   async atomic(file, raw) {
     await mkdir4(path9.dirname(file), { recursive: true, mode: 448 });
@@ -9303,7 +9328,7 @@ var ClaudeSecureJournal = class _ClaudeSecureJournal {
       }
       await rename3(temporary, file);
     } finally {
-      await rm2(temporary, { force: true });
+      await rm3(temporary, { force: true });
     }
   }
   async load(profile) {
@@ -9330,13 +9355,13 @@ var ClaudeSecureJournal = class _ClaudeSecureJournal {
     const writer = writerSchema.parse(JSON.parse(raw));
     if (writer.nonce !== loaded.payload.nonce) throw changed();
     if (await this.identify(writer.pid) === writer.start) return true;
-    await rm2(this.writerFile(loaded));
+    await rm3(this.writerFile(loaded));
     return false;
   }
   async finish(loaded) {
     if (await this.writerAlive(loaded)) throw activeWriter();
     if (await this.safeRead(loaded.file, 8 * 1024 * 1024) !== loaded.raw) throw changed();
-    await rm2(loaded.file);
+    await rm3(loaded.file);
     await this.secrets.remove(loaded.envelope.key);
   }
   async beforeLock(profile) {
@@ -9497,7 +9522,7 @@ async function readKnown2(file) {
     }
     const stat2 = await lstat6(file);
     if (stat2.isSymbolicLink() || !stat2.isFile() || stat2.size > LIMIT2) throw new Error("unsafe");
-    return { raw: await readFile5(file, "utf8"), updatedAt: Math.max(0, Math.trunc(stat2.mtimeMs)) };
+    return { raw: await readFile6(file, "utf8"), updatedAt: Math.max(0, Math.trunc(stat2.mtimeMs)) };
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw new Error("\uD504\uB85C\uBC14\uC774\uB354 \uC778\uC99D \uD30C\uC77C\uC744 \uC548\uC804\uD558\uAC8C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uD30C\uC77C \uAD8C\uD55C\uACFC \uC2EC\uBCFC\uB9AD \uB9C1\uD06C\uB97C \uD655\uC778\uD558\uC138\uC694.");
@@ -9978,7 +10003,7 @@ var ProviderCredentialSync = class {
         if (previous) {
           await writeFile3(file, previous.raw, { mode: 384 });
           await utimes3(file, previous.updatedAt / 1e3, previous.updatedAt / 1e3);
-        } else await rm3(file, { force: true });
+        } else await rm4(file, { force: true });
       });
       const temporary = `${file}.${randomUUID5()}.tmp`;
       try {
@@ -9989,7 +10014,7 @@ var ProviderCredentialSync = class {
         applied = true;
         await utimes3(file, stamp / 1e3, stamp / 1e3);
       } finally {
-        await rm3(temporary, { force: true });
+        await rm4(temporary, { force: true });
       }
     };
     try {
@@ -10120,7 +10145,7 @@ var ProviderCredentialSync = class {
             } else {
               await symlink(shared, projects, this.platform === "win32" ? "junction" : "dir");
               undo.push(async () => {
-                await rm3(projects, { force: true });
+                await rm4(projects, { force: true });
               });
             }
           }
@@ -10318,7 +10343,7 @@ async function materializeProviders(value, current, options = {}) {
 // server/provider-install.ts
 import { spawn as spawn5 } from "node:child_process";
 import { createHash as createHash6 } from "node:crypto";
-import { chmod, lstat as lstat7, mkdir as mkdir6, mkdtemp, readFile as readFile6, rename as rename5, rm as rm4, writeFile as writeFile4 } from "node:fs/promises";
+import { chmod, lstat as lstat7, mkdir as mkdir6, mkdtemp, readFile as readFile7, rename as rename5, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { homedir as homedir4 } from "node:os";
 import path12 from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -10510,7 +10535,7 @@ async function install(name, options) {
   const root = await directory(options.paseoHome ?? path12.join(options.home ?? homedir4(), ".paseo"), "settings-sync/tools");
   if (name === "codex") {
     try {
-      const record2 = JSON.parse(await readFile6(path12.join(root, "codex-install.json"), "utf8"));
+      const record2 = JSON.parse(await readFile7(path12.join(root, "codex-install.json"), "utf8"));
       const file = path12.resolve(root, record2.path);
       if (record2.version !== 1 || typeof record2.path !== "string" || !within(root, file) || !(await lstat7(file)).isFile() || (await lstat7(file)).isSymbolicLink()) throw new Error("\uAE30\uC874 Codex \uC124\uCE58 \uAE30\uB85D\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
       return file;
@@ -10523,7 +10548,7 @@ async function install(name, options) {
     return name === "codex" ? await codex(root, temporary, options) : await script(name, temporary, options);
   } finally {
     if (!within(root, temporary) || !/^install-[a-zA-Z0-9]+$/.test(path12.basename(temporary))) throw new Error("CLI \uC784\uC2DC \uC124\uCE58 \uACBD\uB85C\uB97C \uC548\uC804\uD558\uAC8C \uC815\uB9AC\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-    await rm4(temporary, { recursive: true, force: true });
+    await rm5(temporary, { recursive: true, force: true });
   }
 }
 async function ensureProviderExecutable(name, options = {}) {
@@ -10542,7 +10567,7 @@ async function ensureProviderExecutable(name, options = {}) {
 
 // server/suite-compat.ts
 import path13 from "node:path";
-import { readFile as readFile7 } from "node:fs/promises";
+import { readFile as readFile8 } from "node:fs/promises";
 
 // shared/suite-transfer.ts
 import { z as z32 } from "zod";
@@ -10556,7 +10581,7 @@ var legacyUi = { tabs: "global-workspace-tabs", hosts: "host-order", import: "se
 async function suiteInstallation(home) {
   let raw;
   try {
-    raw = await readFile7(path13.join(home, "suite/installed.json"), "utf8");
+    raw = await readFile8(path13.join(home, "suite/installed.json"), "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;
@@ -10928,7 +10953,7 @@ var Environment = class {
         const before = previousSettings[index].raw;
         if (await readOptional(write.file) !== before) throw new Error("\uBCF5\uC6D0 \uC911 \uD50C\uB7EC\uADF8\uC778 \uC124\uC815\uC774 \uBCC0\uACBD\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uC5EC\uC138\uC694.");
         appliedSettings.push({ file: write.file, before, after: write.raw });
-        if (write.raw === null) await rm5(write.file, { force: true });
+        if (write.raw === null) await rm6(write.file, { force: true });
         else await atomicWrite(write.file, write.raw);
       }
       if (replaceProviders.length) await configuration.patch({ removeProviders: replaceProviders });
@@ -10949,7 +10974,7 @@ var Environment = class {
           const current = await readOptional(write.file);
           if (current === write.before) continue;
           if (current !== write.after) throw new Error("\uBCF5\uC6D0 \uC911 \uC678\uBD80\uC5D0\uC11C \uC218\uC815\uB41C \uD50C\uB7EC\uADF8\uC778 \uC124\uC815\uC740 \uBCF4\uC874\uD588\uC2B5\uB2C8\uB2E4.");
-          if (write.before === null) await rm5(write.file, { force: true });
+          if (write.before === null) await rm6(write.file, { force: true });
           else await atomicWrite(write.file, write.before);
         } catch (rollbackError) {
           failures.push(rollbackError);
