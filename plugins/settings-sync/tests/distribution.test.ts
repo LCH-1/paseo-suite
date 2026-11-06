@@ -37,7 +37,7 @@ test("downloaded plugin compiles and registers RPCs without installed packages",
   const nodeRequire = createRequire(import.meta.url);
   new Function("require", "module", "exports", server.outputFiles[0].text)((name: string) => name === "@getpaseo/plugin" ? sdk : name === "zod" ? zod : nodeRequire(name), module, module.exports);
   // The Suite entry also registers settings screens and hooks, which this test does not exercise.
-  const host = { registerSettings: () => ({ read: async () => ({ backup: false, relay: false }), write: async () => {}, subscribe: () => () => {} }), handle(contract: { name: string }, handler: (input: unknown, context: { paseo: unknown }) => Promise<unknown>) { handlers.set(contract.name, (input) => handler(input, { paseo: {} })); return () => {}; } };
+  const host = { registerSettings: () => ({ read: async () => ({ status: "ready", values: { backup: true, relay: true } }), write: async () => {}, subscribe: () => () => {} }), handle(contract: { name: string }, handler: (input: unknown, context: { paseo: unknown }) => Promise<unknown>) { handlers.set(contract.name, (input) => handler(input, { paseo: {} })); return () => {}; } };
   const dispose = module.exports.default(new Proxy(host, { get: (target, key) => (key in target ? target[key as keyof typeof target] : () => () => {}) }));
   try {
     for (const contract of [...Object.values(rpc), ...Object.values(manualRpc)]) assert.ok(handlers.has(contract.name), contract.name);
