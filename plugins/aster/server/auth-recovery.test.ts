@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { needsAuthenticationRecovery } from "./auth-recovery.ts";
+import { needsAuthenticationRecovery, needsLimitRecovery } from "./auth-recovery.ts";
 
 const error = "Failed to authenticate: OAuth session expired and could not be refreshed";
 const failed = { kind: "failed", error: { message: error } };
@@ -34,4 +34,15 @@ test("이전 턴 오류·사용자 인용·정상 설명·도구 결과는 인�
   assert.equal(needsAuthenticationRecovery(completed, [{ type: "tool_call", text: error }]), false);
   assert.equal(needsAuthenticationRecovery({ kind: "canceled" }, [{ type: "assistant_message", text: error }]), false);
   assert.equal(needsAuthenticationRecovery({ kind: "failed", error: { message: "network unavailable" } }), false);
+});
+
+test("응답 텍스트로 온 CLI 한도 안내를 감지하고 한도를 설명하는 답변은 무시한다", () => {
+  const notice = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message · your weekly limit resets Nov 10, 3pm (Asia/Seoul)";
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: notice }]), true);
+  assert.equal(needsLimitRecovery({ kind: "failed", error: { message: notice } }), true);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "Claude usage limit reached|1793000000" }]), true);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "이 API는 rate limit이 있어 429를 처리해야 합니다." }]), false);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "The weekly limit reached by users is documented here." }]), false);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: notice }, { type: "user_message", text: "continue" }]), false);
+  assert.equal(needsLimitRecovery({ kind: "canceled" }, [{ type: "assistant_message", text: notice }]), false);
 });
