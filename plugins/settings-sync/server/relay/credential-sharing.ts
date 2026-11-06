@@ -35,6 +35,8 @@ const newest = (state: CredentialState, identity: string) =>
     .filter((a) => a.identity === identity && a.record)
     .map((a) => a.record!)
     .sort((a, b) => (b.expiresAt ?? 0) - (a.expiresAt ?? 0) || b.updatedAt - a.updatedAt)[0];
+/** Local first: a login with this much time left is never replaced by another host's copy. */
+const usableMarginMs = 10 * 60_000;
 export class CredentialSharing {
   readonly keys = generateKeyPairSync("rsa", { modulusLength: 3072 });
   readonly publicKey = this.keys.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -43,6 +45,8 @@ export class CredentialSharing {
     return {
       version: 1,
       publicKey: this.publicKey,
+      provision: true,
+      declined: state.declined ?? [],
       accounts: [...new Set(state.accounts.map((a) => a.identity))].map((identity) => {
         const source = newest(state, identity);
         const aliases = state.accounts.filter((a) => a.identity === identity);
@@ -83,7 +87,14 @@ export class CredentialSharing {
       payload: payload.toString("base64"),
     };
   }
-  open(value: CredentialEnvelope, state: CredentialState): SharedCredential[] {
+  keepUsableUntil() {
+    return this.now() + usableMarginMs;
+  }
+  open(
+    value: CredentialEnvelope,
+    state: CredentialState,
+    options: { allowNew?: boolean } = {},
+  ): SharedCredential[] {
     const key = privateDecrypt(
         { key: this.keys.privateKey, oaepHash: "sha256" },
         Buffer.from(value.key, "base64"),
@@ -106,7 +117,7 @@ export class CredentialSharing {
         (r) =>
           r.vendor !== "claude" ||
           (r.expiresAt ?? 0) <= this.now() + 60000 ||
-          !state.accounts.some((a) => a.identity === r.identity),
+          (!options.allowNew && !state.accounts.some((a) => a.identity === r.identity)),
       )
     )
       throw Error("Aster: 이 서버에 등록된 같은 Claude 계정만 갱신할 수 있습니다.");
@@ -164,7 +175,26 @@ export function registerCredentialSharing(
       serial(async () => {
         const providers = (await paseo.config.get()).config.providers ?? {},
           state = await store.read(providers),
-          records = share.open(input, state);
+          opened = share.open(input, state, { allowNew: true }),
+          records = opened.filter((r) => state.accounts.some((a) => a.identity === r.identity)),
+          unseen = opened.filter((r) => !records.includes(r));
+        let current = providers;
+        const persist = async (next: typeof providers) => {
+          assertActive();
+          const changes = Object.fromEntries(
+            Object.entries(next).filter(
+              ([id, value]) => JSON.stringify(value) !== JSON.stringify(current[id]),
+            ),
+          );
+          const removed = Object.keys(current).filter((id) => !(id in next));
+          await paseo.config.patch({ providers: changes, ...(removed.length ? { removeProviders: removed } : {}) });
+          current = next;
+        };
+        let provisioned = 0;
+        for (const record of unseen)
+          if (await store.provision(current, record, persist)) provisioned++;
+        if (provisioned) await onChanged();
+        if (!records.length) return { changed: provisioned };
         let expected = providers;
         const ownedIds = state.accounts
           .filter((a) => records.some((r) => r.identity === a.identity))
@@ -200,13 +230,14 @@ export function registerCredentialSharing(
               )
                 throw Error("Aster: 계정 설정이 변경되어 인증 전달을 보류합니다.");
             },
+            share.keepUsableUntil(),
           )
           .catch(async (error) => {
             if ((error as { credentialCommitted?: boolean })?.credentialCommitted) await onChanged();
             throw error;
           });
         if (changed.length) await onChanged();
-        return { changed: changed.length };
+        return { changed: changed.length + provisioned };
       }),
     ),
   ];

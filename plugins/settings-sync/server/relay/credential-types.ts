@@ -22,6 +22,7 @@ export type CredentialProviders = Record<
 export interface CredentialState {
   providers: CredentialProviders;
   accounts: CredentialOwnership[];
+  declined?: string[];
 }
 export interface SharedAccountStatus {
   identity: string;
@@ -33,6 +34,10 @@ export interface CredentialShareStatus {
   version: 1;
   publicKey: string;
   accounts: SharedAccountStatus[];
+  /** This host registers same-owner accounts it has not seen yet. */
+  provision?: boolean;
+  /** Accounts signed out here; a relay must never bring them back. */
+  declined?: string[];
 }
 export interface CredentialEnvelope {
   key: string;

@@ -454,3 +454,92 @@ test("encrypted relay survives expiry, a busy alias, cleared credentials and a l
   assert.ok(!JSON.stringify(wire).includes("synthetic-next-"));
   assert.equal(target.providers["claude-alias"].env?.CLAUDE_CONFIG_DIR, aliasDirectory);
 });
+
+test("a usable local login is kept while an expiring alias of the same account is repaired", async () => {
+  const f = await fixture(),
+    directory = await alias(f);
+  const before = await f.store.read(f.providers);
+  const incoming = structuredClone(before.accounts[0].record!);
+  const now = Date.now();
+  incoming.expiresAt = now + 8 * 3600000;
+  incoming.updatedAt = incoming.expiresAt;
+  (incoming.credential.claudeAiOauth as any).expiresAt = incoming.expiresAt;
+  await writeFile(
+    path.join(directory, ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "old", refreshToken: "old", expiresAt: now + 60000 } }),
+  );
+  await f.store.write(f.providers, [incoming], async () => {}, async () => {}, now + 600000);
+  const after = await f.store.read(f.providers);
+  const local = after.accounts.find((a) => a.directory === f.profile)!;
+  const repaired = after.accounts.find((a) => a.directory === directory)!;
+  assert.equal(local.record?.expiresAt, before.accounts[0].record?.expiresAt);
+  assert.equal(repaired.record?.expiresAt, incoming.expiresAt);
+});
+
+test("accounts with a provider name outside claude-* are shared too", async () => {
+  const f = await fixture();
+  const directory = await alias(f);
+  f.providers["mengsk-claude"] = f.providers["claude-alias"];
+  delete f.providers["claude-alias"];
+  const registry = JSON.parse(await readFile(f.registry, "utf8"));
+  registry.accounts[1].id = "mengsk-claude";
+  await writeFile(f.registry, JSON.stringify(registry));
+  const state = await f.store.read(f.providers);
+  assert.ok(state.accounts.some((a) => a.directory === directory && a.providerIds.includes("mengsk-claude")));
+});
+
+async function foreignRecord(email = "second@example.test") {
+  const source = await fixture();
+  const oauth = { accountUuid: "account-9", organizationUuid: "org-9", emailAddress: email };
+  await writeFile(path.join(source.profile, ".claude.json"), JSON.stringify({ oauthAccount: oauth }));
+  return structuredClone((await source.store.read(source.providers)).accounts[0].record!);
+}
+
+test("a new account is registered like a local login: hidden provider, registry, shared history", async () => {
+  const f = await fixture();
+  const record = await foreignRecord();
+  let configured = f.providers;
+  // Linux credentials are simulated on Windows; precreate the shared junction as above.
+  const directory = path.join(f.home, "settings-sync", "provider-profiles");
+  const original = ProviderCredentialSync.prototype.restore;
+  const prepare = mock.method(ProviderCredentialSync.prototype, "restore", async function (this: ProviderCredentialSync, ...args: Parameters<typeof original>) {
+    const leaf = path.join(directory, args[1].records[0].id);
+    await mkdir(leaf, { recursive: true });
+    await symlink(path.join(f.userHome, ".claude", "projects"), path.join(leaf, "projects"), process.platform === "win32" ? "junction" : "dir");
+    return original.apply(this, args);
+  });
+  try {
+    assert.equal(await f.store.provision(f.providers, record, async (next) => { configured = next; }), true);
+  } finally {
+    prepare.mock.restore();
+  }
+  const providerId = "claude-" + record.identity.slice(0, 12);
+  assert.equal(configured[providerId].selectable, false);
+  assert.equal(configured[providerId].extends, "claude");
+  assert.equal(configured.claude.env?.CLAUDE_CONFIG_DIR, f.profile);
+  const after = await f.store.read(configured);
+  assert.equal(after.accounts.length, 2);
+  const added = after.accounts.find((a) => a.identity === record.identity)!;
+  assert.equal(added.record?.expiresAt, record.expiresAt);
+  const entry = JSON.parse(await readFile(f.registry, "utf8")).accounts.find((a: any) => a.id === providerId);
+  assert.equal(entry.identity, "org-9|account-9");
+  assert.equal(entry.signedIn, true);
+  assert.equal(await f.store.provision(configured, record, async () => { throw Error("no change expected"); }), false);
+});
+
+test("a signed-out account, a same-address entry and a forged identity are not provisioned", async () => {
+  const f = await fixture();
+  const record = await foreignRecord();
+  const registry = JSON.parse(await readFile(f.registry, "utf8"));
+  registry.accounts.push({ id: "claude-out", base: "claude", home: null, email: "second@example.test", identity: "org-9|account-9", signedIn: false });
+  await writeFile(f.registry, JSON.stringify(registry));
+  assert.ok((await f.store.read(f.providers)).declined?.includes(record.identity));
+  const reject = () => async () => { throw Error("must not patch"); };
+  await assert.rejects(() => f.store.provision(f.providers, record, reject()), /로그아웃/);
+  const clean = await fixture();
+  await assert.rejects(() => clean.store.provision(clean.providers, { ...record, identity: "c".repeat(64) }, reject()), /확인할 수 없습니다/);
+  const raw = JSON.parse(await readFile(clean.registry, "utf8"));
+  raw.accounts.push({ id: "other", base: "claude", home: null, email: "second@example.test", identity: "org-1|someone", signedIn: true });
+  await writeFile(clean.registry, JSON.stringify(raw));
+  await assert.rejects(() => clean.store.provision(clean.providers, record, reject()), /이미 있어/);
+});
