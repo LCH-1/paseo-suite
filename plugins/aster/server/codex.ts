@@ -225,24 +225,55 @@ export async function installCodexBridge(home = paseoHome) {
 export function retryingBridge(
   install: () => Promise<void>,
   onError: (error: unknown) => void,
+  options: { attempts?: number; retryMs?: number } = {},
 ) {
-  let attempt: Promise<boolean> | null = null;
-  const start = () =>
-    (attempt = install().then(
+  let attempt: Promise<boolean> | null = null,
+    remaining = options.attempts ?? 0,
+    timer: ReturnType<typeof setTimeout> | undefined,
+    stopped = false;
+  const start = (): Promise<boolean> => {
+    const current: Promise<boolean> = install().then(
       () => true,
       (error: unknown) => {
-        onError(error);
+        // The daemon publishes its address after plugins load, so an early failure is expected.
+        if (!stopped && remaining > 0) {
+          remaining--;
+          timer = setTimeout(() => {
+            if (!stopped && attempt === current) start();
+          }, options.retryMs ?? 5000);
+          timer.unref?.();
+        } else onError(error);
         return false;
       },
-    ));
+    );
+    attempt = current;
+    return current;
+  };
   start();
-  return async () => {
+  const ready = async () => {
     if (await attempt) return true;
     // Waiters of one failed attempt share a single retry.
     const failed = attempt;
     await Promise.resolve();
     return attempt === failed ? start() : attempt;
   };
+  return Object.assign(ready, {
+    dispose() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    },
+  });
+}
+
+/** Opening an existing conversation must not depend on quota; only a new turn can spend it. */
+export function resumableCodexAccount(
+  request: { reason?: string; preflight?: boolean },
+  previous: CodexAccount | undefined,
+  accounts: CodexAccount[],
+): CodexAccount | null {
+  if (request.preflight === true) return null;
+  if (request.reason !== "resume" && request.reason !== "refresh") return null;
+  return previous ?? accounts[0] ?? null;
 }
 
 export function registerCodexRouting(server: PluginServerContext) {
@@ -270,6 +301,7 @@ export function registerCodexRouting(server: PluginServerContext) {
         error instanceof Error ? error.message : String(error),
       );
     },
+    { attempts: 24, retryMs: 5000 },
   );
   const serialize = <T>(action: () => Promise<T>): Promise<T> => {
     const result = serial.then(action);
@@ -399,9 +431,16 @@ export function registerCodexRouting(server: PluginServerContext) {
           );
         return serialize(async () => {
           signal.throwIfAborted();
-          const account = await choose(request.agentId, providers);
+          const chosen = await choose(request.agentId, providers);
           signal.throwIfAborted();
           lifetime.signal.throwIfAborted();
+          const account =
+            chosen ??
+            resumableCodexAccount(
+              { reason: request.reason, preflight },
+              bindings.get(request.agentId)?.account,
+              await discoverCodexAccounts(providers),
+            );
           if (!account)
             throw Error(
               "Aster: 현재 사용할 수 있는 Codex 구독 계정이 없습니다. 구독·로그인·사용 한도를 확인하세요. 기존 대화 기록은 유지됩니다.",
@@ -513,6 +552,7 @@ export function registerCodexRouting(server: PluginServerContext) {
   ];
   return {
     dispose: () => {
+      bridgeReady.dispose();
       lifetime.abort();
       removals.forEach((remove) => remove());
     },
