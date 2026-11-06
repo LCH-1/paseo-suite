@@ -8,6 +8,9 @@ import { fileURLToPath } from "node:url";
 import { claudeCredentialService, ProviderCredentialSync, providerProfileDirectory, WindowsProviderSecureStore } from "../server/provider-credentials";
 import { ClaudeSecureJournal } from "../server/claude-secure-journal";
 import { CrashStore, syntheticJournal } from "./fixtures/claude-crash-store";
+import { createRequire } from "node:module";
+
+const TSX_CLI = createRequire(import.meta.url).resolve("tsx/cli");
 
 const oauth = (token: string, expiresAt: number) => ({ claudeAiOauth: { accessToken: token, refreshToken: "synthetic-refresh", expiresAt, scopes: ["user:inference"] } });
 const worker = fileURLToPath(new URL("./fixtures/claude-crash-worker.ts", import.meta.url).href);
@@ -36,7 +39,7 @@ async function fixture(t: test.TestContext, oldSize: number, nextSize: number, n
   const input = { home, userHome, providers: initialized.providers, incoming, native };
   await writeFile(path.join(root, "input.json"), JSON.stringify(input));
   const crash = (boundary: number, action = "restore") => new Promise<void>((resolve, reject) => {
-    execFile(process.execPath, [path.resolve("node_modules/tsx/dist/cli.mjs"), worker, root, String(boundary), action], { windowsHide: true, timeout: native ? 90_000 : 30_000, maxBuffer: 1_000_000 }, error => {
+    execFile(process.execPath, [TSX_CLI, worker, root, String(boundary), action], { windowsHide: true, timeout: native ? 90_000 : 30_000, maxBuffer: 1_000_000 }, error => {
       if ((error as { code?: string | number } | null)?.code === 23) resolve();
       else reject(new Error("Expected fixture-only abrupt process exit 23", { cause: error }));
     });
