@@ -454,9 +454,25 @@ async function prepareVendorCredentialRestore(options, providers, input, current
 }
 
 // ../../../파세오/settings-sync/.check/release-0.3.10-32479f22be0f460d87b8df70b7ea6cbd/settings-sync/server/claude-auth-lock.ts
-import { lstat as lstat2, mkdir as mkdir2, realpath, rmdir, utimes as utimes2 } from "node:fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, readFile as readFileLock, realpath, rm as rmLock, rmdir, utimes as utimes2 } from "node:fs/promises";
 import path2 from "node:path";
 var busy = () => new Error("Claude \uC778\uC99D \uAC31\uC2E0 \uB610\uB294 \uC800\uC7A5 \uC7A0\uAE08\uC774 \uC0AC\uC6A9 \uC911\uC785\uB2C8\uB2E4. \uD604\uC7AC \uC778\uC99D\uC744 \uBCF4\uC874\uD588\uC73C\uB2C8 \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
+// A CLI that died mid-refresh leaves its lock behind and would block this profile forever.
+// Only a lock with a recorded owner that is gone and has stopped being touched is reclaimed.
+async function reapDeadCliLock(file, legacy) {
+  let owner;
+  try { owner = JSON.parse(await readFileLock(file + ".owner", "utf8")); } catch { return false; }
+  if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  try { process.kill(owner.pid, 0); return false; }
+  catch (error) { if (error.code !== "ESRCH") return false; }
+  const age = async (target) => Date.now() - (await lstat2(target)).mtimeMs;
+  if (await age(file).catch(() => 0) < 60000) return false;
+  await rmdir(file).catch(() => {});
+  await rmLock(file + ".owner", { force: true }).catch(() => {});
+  if (await age(legacy).catch(() => 0) >= 60000) await rmdir(legacy).catch(() => {});
+  return true;
+}
+
 async function lockClaudeAuthentication(directory) {
   const resolved = await realpath(directory);
   const held = [];
@@ -504,6 +520,7 @@ async function lockClaudeAuthentication(directory) {
     if (failures.length) throw new Error("Claude \uC778\uC99D \uC800\uC7A5 \uC7A0\uAE08 \uD574\uC81C\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
   };
   try {
+    await reapDeadCliLock(path2.join(resolved, ".oauth_refresh.lock"), `${resolved}.lock`);
     for (const file of [path2.join(resolved, ".oauth_refresh.lock"), `${resolved}.lock`, path2.join(resolved, ".storage-write.lock")]) {
       try {
         await mkdir2(file, { mode: 448 });

@@ -17,10 +17,15 @@ interface Status {
   publicKey: string;
   accounts: AccountStatus[];
   provision?: boolean;
+  refresh?: boolean;
   declined?: string[];
 }
 /** Keep a host's own login until it is this close to expiring; only then look elsewhere. */
 const usableMarginMs = 10 * 60_000;
+/** Nobody renews an account no session uses, so it would expire on every host at once. */
+const renewWithinMs = 5 * 60_000;
+const renewEveryMs = 5 * 60_000;
+const renewAttempts = new Map<string, number>();
 function status(value: unknown): Status {
   const s = value as Partial<Status> | null;
   if (
@@ -58,12 +63,13 @@ export async function relayCredentials(
   peers: readonly RelayPeer[],
   now = Date.now(),
   signal?: AbortSignal,
-  options: { rpcTimeoutMs?: number } = {},
+  options: { rpcTimeoutMs?: number; renewTimeoutMs?: number; attempts?: Map<string, number> } = {},
 ) {
   if (signal?.aborted) return { peers: 0, changed: 0 };
   const timeout = options.rpcTimeoutMs ?? 15000;
   if (!Number.isFinite(timeout) || timeout <= 0) throw Error("Invalid Claude relay deadline");
-  const invoke = (peer: RelayPeer, method: string, input: unknown) =>
+  const invoke = (peer: RelayPeer, method: string, input: unknown) => invokeWith(peer, method, input, timeout);
+  const invokeWith = (peer: RelayPeer, method: string, input: unknown, deadline: number) =>
     new Promise<unknown>((resolve, reject) => {
       let settled = false;
       const finish = (value: unknown, error = false) => {
@@ -77,7 +83,7 @@ export async function relayCredentials(
       const onAbort = () => finish(new Error("Claude relay disposed"), true);
       const timer = setTimeout(
         () => finish(new Error("Claude relay RPC timed out"), true),
-        timeout,
+        deadline,
       );
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
@@ -164,6 +170,23 @@ export async function relayCredentials(
         }
       }
     }
+  }
+  // One host renews, then the loop above delivers it: refresh tokens rotate, so several
+  // hosts renewing the same login would invalidate each other.
+  const attempts = options.attempts ?? renewAttempts;
+  for (const identity of known) {
+    const holders = ready
+      .flatMap((peer) => {
+        const own = peer.status.accounts.find((a) => a.identity === identity);
+        return own ? [{ peer, expiry: own.availableExpiresAt ?? own.expiresAt ?? 0 }] : [];
+      })
+      .sort((a, b) => b.expiry - a.expiry || a.peer.serverId.localeCompare(b.peer.serverId));
+    if ((holders[0]?.expiry ?? 0) > now + renewWithinMs) continue;
+    if (now - (attempts.get(identity) ?? -Infinity) < renewEveryMs) continue;
+    const renewer = holders.find(({ peer }) => peer.status.refresh && peer.endpoint === "sync")?.peer;
+    if (!renewer || signal?.aborted) continue;
+    attempts.set(identity, now);
+    await invokeWith(renewer, "aster.credentials.refresh", { identity }, options.renewTimeoutMs ?? 60000).catch(() => {});
   }
   return { peers: ready.length, changed };
 }

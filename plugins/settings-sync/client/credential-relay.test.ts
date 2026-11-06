@@ -251,3 +251,37 @@ test("an account logged in on one host reaches hosts that have never seen it, ex
   );
   assert.deepEqual(received.map((r) => [r.to, r.input.identities]), [["blank", [other]]]);
 });
+
+function renewable(serverId: string, expiresAt: number | null, calls: string[], endpoint: "sync" | "aster" = "sync"): RelayPeer {
+  return {
+    serverId,
+    endpoint,
+    client: {
+      async invokePluginRpc(_, method) {
+        if (method.includes("status"))
+          return { version: 1, publicKey: key, provision: true, refresh: true, accounts: [{ identity: id, expiresAt, availableExpiresAt: expiresAt, revision: null }] };
+        if (method.includes("refresh")) { calls.push(serverId); return { refreshed: true }; }
+        return { changed: 0 };
+      },
+    },
+  };
+}
+test("an idle login expiring everywhere is renewed by exactly one host and not retried at once", async () => {
+  const calls: string[] = [];
+  const attempts = new Map<string, number>();
+  const peers = [renewable("b", 100, calls), renewable("a", 100, calls), renewable("c", 100, calls)];
+  await relayCredentials(peers, 1000, undefined, { attempts });
+  assert.deepEqual(calls, ["a"]);
+  await relayCredentials(peers, 2000, undefined, { attempts });
+  assert.deepEqual(calls, ["a"]);
+  await relayCredentials(peers, 1000 + 6 * 60_000, undefined, { attempts });
+  assert.deepEqual(calls, ["a", "a"]);
+});
+test("a usable copy anywhere means no renewal, and old plugins are never asked", async () => {
+  const calls: string[] = [];
+  const attempts = new Map<string, number>();
+  await relayCredentials([renewable("fresh", 8 * hour, calls), renewable("old", 100, calls)], 0, undefined, { attempts });
+  assert.deepEqual(calls, []);
+  await relayCredentials([renewable("legacy", 100, calls, "aster")], 1000, undefined, { attempts });
+  assert.deepEqual(calls, []);
+});

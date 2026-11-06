@@ -8,6 +8,7 @@ import {
   publicEncrypt,
   randomBytes,
 } from "node:crypto";
+import { execFile } from "node:child_process";
 import { defineRpc } from "@getpaseo/plugin";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
@@ -35,6 +36,27 @@ const newest = (state: CredentialState, identity: string) =>
     .filter((a) => a.identity === identity && a.record)
     .map((a) => a.record!)
     .sort((a, b) => (b.expiresAt ?? 0) - (a.expiresAt ?? 0) || b.updatedAt - a.updatedAt)[0];
+/** The CLI renews a login it reads; its own lock keeps this from racing a running session. */
+export function renewWithCli(
+  command: readonly string[],
+  env: Record<string, string | undefined>,
+  run: typeof execFile = execFile,
+) {
+  const [file, ...args] = command;
+  return new Promise<void>((resolve) => {
+    run(
+      file,
+      [...args, "auth", "status"],
+      {
+        env: env as NodeJS.ProcessEnv,
+        timeout: 40000,
+        windowsHide: true,
+        shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(file),
+      },
+      () => resolve(),
+    );
+  });
+}
 /** Local first: a login with this much time left is never replaced by another host's copy. */
 const usableMarginMs = 10 * 60_000;
 export class CredentialSharing {
@@ -46,6 +68,7 @@ export class CredentialSharing {
       version: 1,
       publicKey: this.publicKey,
       provision: true,
+      refresh: true,
       declined: state.declined ?? [],
       accounts: [...new Set(state.accounts.map((a) => a.identity))].map((identity) => {
         const source = newest(state, identity);
@@ -170,6 +193,34 @@ export function registerCredentialSharing(
             input.identities,
           ),
         ),
+    ),
+    server.handle(
+      rpc("aster.credentials.refresh", z.object({ identity }).strict()),
+      async (input, { paseo }) =>
+        serial(async () => {
+          const providers = (await paseo.config.get()).config.providers ?? {},
+            state = await store.read(providers),
+            own = state.accounts.find((account) => {
+              const oauth = account.record?.credential.claudeAiOauth as { refreshToken?: unknown } | undefined;
+              return account.identity === input.identity && typeof oauth?.refreshToken === "string" && oauth.refreshToken.length > 0;
+            });
+          if (!own) return { refreshed: false };
+          const before = own.record?.expiresAt ?? 0;
+          // Another relay may have renewed it while this request waited.
+          if (before > Date.now() + 5 * 60_000) return { refreshed: false, expiresAt: before };
+          const entry = providers[own.providerIds[0]] as { command?: string[]; env?: Record<string, string> } | undefined;
+          const root = providers.claude as { command?: string[]; env?: Record<string, string> } | undefined;
+          await renewWithCli(entry?.command ?? root?.command ?? ["claude"], {
+            ...process.env,
+            ...root?.env,
+            ...entry?.env,
+            CLAUDE_CONFIG_DIR: own.directory,
+            CLAUDE_SECURESTORAGE_CONFIG_DIR: own.directory,
+          });
+          const after = (await store.read(providers)).accounts.find((account) => account.directory === own.directory)?.record?.expiresAt ?? 0;
+          if (after > before) await onChanged();
+          return { refreshed: after > before, expiresAt: after };
+        }),
     ),
     server.handle(rpc("aster.credentials.receive", envelope), async (input, { paseo }) =>
       serial(async () => {
