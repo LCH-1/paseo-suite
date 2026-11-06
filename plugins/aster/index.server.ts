@@ -17,7 +17,7 @@ import {
 } from "./server/accounts";
 import { join } from "node:path";
 import { accountKey, RoutingCache } from "./server/routing-cache";
-import { needsAuthenticationRecovery } from "./server/auth-recovery";
+import { needsAuthenticationRecovery, needsLimitRecovery } from "./server/auth-recovery";
 import { Controller } from "./server/controller";
 import { runPaseo } from "./server/paseo";
 import { profileDiscovery } from "./server/profile-discovery";
@@ -29,6 +29,7 @@ import {
 import { usageRevision } from "./server/usage-revision";
 import { registerLegacyCredentialRpc } from "./server/legacy-credential-rpc";
 import { registerCodexRouting } from "./server/codex";
+import { keepAliasesHidden } from "./server/hidden-aliases";
 import { registerAccountManagement } from "./server/account-management";
 import { providerFamily, type ProviderEntries } from "./server/provider-policy";
 import { rankAccounts } from "./server/scheduler";
@@ -134,8 +135,10 @@ export default function contribute(server: PluginServerContext) {
   };
 
   const codex = registerCodexRouting(server);
+  const stopHidingAliases = keepAliasesHidden(paseoHome);
   const unregister = [
     codex.dispose,
+    stopHidingAliases,
     registerAccountManagement(
       server,
       async (providers, signal) => {
@@ -437,12 +440,9 @@ export default function contribute(server: PluginServerContext) {
         )
           authenticationRecovery.delete(agent.id);
         const limited =
-          outcome.kind === "failed" &&
           !authenticationFailed &&
           !subscriptionFailed &&
-          /rate.?limit|usage.?limit|quota|limit reached|429/i.test(
-            outcome.error.message + " " + (outcome.error.code ?? ""),
-          );
+          needsLimitRecovery(outcome, timeline);
         if (
           outcome.kind === "failed" &&
           !authenticationFailed &&
@@ -509,6 +509,10 @@ export default function contribute(server: PluginServerContext) {
         if (authenticationFailed || subscriptionFailed)
           authenticationRecovery.add(agent.id);
         try {
+          if (limited)
+            console.info(
+              `[aster] session ${agent.id}: 한도에 걸린 계정을 제외하고 연결 전환 (요청 재전송 없음)`,
+            );
           if (authenticationFailed)
             console.info(
               `[aster] session ${agent.id}: 인증 실행 환경 새로고침 (요청 재전송 없음)`,
