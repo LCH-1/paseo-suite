@@ -377,3 +377,16 @@ test("지운 호스트를 기억해 전달하고 다시 추가하면 잊는다",
   memory.set("@paseo:settings-sync-relay-hosts", "{broken");
   assert.deepEqual(trackRemovedHosts(storage, ["a"]), []);
 });
+
+test("저장이 오래 걸리는 호스트도 전달 성공으로 센다", async () => {
+  const target = peer("a", 1, []);
+  const invoke = target.client.invokePluginRpc;
+  target.client.invokePluginRpc = async (plugin, method, input) => {
+    if (method.endsWith("receive")) await new Promise((resolve) => setTimeout(resolve, 60));
+    return invoke(plugin, method, input);
+  };
+  const source = peer("b", 9_000_000_000, []);
+  const options = { rpcTimeoutMs: 20, receiveTimeoutMs: 1000 };
+  assert.equal((await relayCredentials([target, source], 1_000_000, undefined, options)).changed, 1);
+  assert.equal((await relayCredentials([target, source], 1_000_000, undefined, { rpcTimeoutMs: 20 })).changed, 0);
+});
