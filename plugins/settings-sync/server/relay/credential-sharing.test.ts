@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CredentialSharing, registerCredentialSharing, renewalEnvironment, renewalProviders, renewWithCli, vaultRenewalEnvironment } from "./credential-sharing";
+import { CredentialSharing, registerCredentialSharing, renewalEnvironment, renewalProviders, renewWithCli, vaultRenewalEnvironment, withoutRefreshToken } from "./credential-sharing";
+import { parseBundle } from "./credential-runtime.js";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -192,6 +193,7 @@ test("보관소 복사본은 리프레시 토큰을 담아 암호화되고 만�
   const target = new CredentialSharing(() => now + 100 * 3600000);
   const opened = target.openVaultRecord(source.exportVaultRecord(record(), target.publicKey));
   assert.equal((opened.credential.claudeAiOauth as any).refreshToken, "synthetic-refresh");
+  // Sealed for one host's key: no other host can open it.
   assert.throws(() => new CredentialSharing(() => now).openVaultRecord(source.exportVaultRecord(record(), target.publicKey)));
 });
 
@@ -216,4 +218,20 @@ test("갱신 환경은 임시 폴더만 가리키고 프로필과 저장소 강�
     "/renew",
   );
   assert.deepEqual(env, { PATH: "p", CLAUDE_CONFIG_DIR: "/renew" });
+});
+
+test("보관소 복사본의 출처 표시가 호스트 사이에서 유지된다", () => {
+  const source = new CredentialSharing(() => now);
+  const target = new CredentialSharing(() => now);
+  const renewed = { ...record(), vaultOrigin: "renewal" as const };
+  assert.equal(target.openVaultRecord(source.exportVaultRecord(renewed, target.publicKey)).vaultOrigin, "renewal");
+  assert.equal(target.openVaultRecord(source.exportVaultRecord(record(), target.publicKey)).vaultOrigin, undefined);
+});
+
+test("갱신 표시가 붙은 토큰도 저장 형식 검사를 통과해 프로필에 쓰인다", () => {
+  const renewed = { ...record(), vaultOrigin: "renewal" as const };
+  const stripped = withoutRefreshToken(renewed);
+  assert.equal("vaultOrigin" in stripped, false);
+  assert.equal((stripped.credential.claudeAiOauth as any).refreshToken, undefined);
+  assert.doesNotThrow(() => parseBundle({ version: 1, records: [stripped] }));
 });

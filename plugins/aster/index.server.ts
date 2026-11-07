@@ -286,9 +286,9 @@ export default function contribute(server: PluginServerContext) {
               if (
                 controller.choose(request.agentId, readings, Date.now()) ||
                 controller.canBootstrap(
-                  bootstrapAccounts(eligible, reports).map(
-                    (account) => account.id,
-                  ),
+                  bootstrapAccounts(eligible, reports, Date.now(), (id) =>
+                    controller.isBlocked(id, Date.now()),
+                  ).map((account) => account.id),
                   Date.now(),
                 )
               )
@@ -313,9 +313,9 @@ export default function contribute(server: PluginServerContext) {
             ) {
               selectedId = controller.bootstrap(
                 request.agentId,
-                bootstrapAccounts(eligible, reports).map(
-                  (account) => account.id,
-                ),
+                bootstrapAccounts(eligible, reports, Date.now(), (id) =>
+                  controller.isBlocked(id, Date.now()),
+                ).map((account) => account.id),
                 Date.now(),
               );
               if (selectedId) {
