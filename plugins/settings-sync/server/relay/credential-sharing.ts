@@ -16,7 +16,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { parseBundle } from "./credential-runtime.js";
 import { credentialStore } from "./credential-store";
-import { DaemonRelay, peerConnections, savePeers } from "./daemon-relay";
+import { DaemonRelay, peerConnections, removedPeers, savePeers } from "./daemon-relay";
 import { connectPeer } from "./peer-connection";
 import type {
   CredentialEnvelope,
@@ -270,8 +270,8 @@ export function registerCredentialSharing(
       }),
     ),
     server.handle(
-      rpc("aster.credentials.peers", z.object({ peers: peerConnections }).strict()),
-      async (input) => serial(async () => ({ peers: await savePeers(home, input.peers) })),
+      rpc("aster.credentials.peers", z.object({ peers: peerConnections, removed: removedPeers.optional() }).strict()),
+      async (input) => serial(async () => ({ peers: await savePeers(home, input.peers, { removed: input.removed }) })),
     ),
     server.handle(
       rpc(

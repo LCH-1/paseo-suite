@@ -1,7 +1,7 @@
-import { peerConnectionsOf, startCredentialRelay } from "./credential-relay";
+import { peerConnectionsOf, startCredentialRelay, trackRemovedHosts } from "./credential-relay";
 
 // Plugins are replaced one host at a time, so a shared loop must also yield to newer code.
-const relayCodeVersion = 2;
+const relayCodeVersion = 3;
 interface RelayLease { owners: Set<symbol>; dispose(): void; version?: number; }
 export function contributeRelay() {
   const runtime = globalThis as typeof globalThis & {
@@ -11,16 +11,25 @@ export function contributeRelay() {
   if (typeof document === "undefined" || !runtime.__r) return () => {};
   const owner = Symbol();
   const running = runtime.__PASEO_SYNC_CREDENTIAL_RELAY__;
-  if (running && (running.version ?? 0) < relayCodeVersion) {
-    running.dispose();
+  const outdated = running && (running.version ?? 0) < relayCodeVersion ? running : undefined;
+  if (outdated) {
+    outdated.dispose();
     delete runtime.__PASEO_SYNC_CREDENTIAL_RELAY__;
   }
   if (!runtime.__PASEO_SYNC_CREDENTIAL_RELAY__) {
     const request = new AbortController();
     let relay: ReturnType<typeof startCredentialRelay> | undefined;
     const lease: RelayLease = {
-      owners: new Set(), version: relayCodeVersion, dispose() { request.abort(); relay?.dispose(); },
+      // Hosts still on the older plugin keep this loop alive until they release it.
+      owners: outdated?.owners ?? new Set(), version: relayCodeVersion,
+      dispose() {
+        request.abort();
+        relay?.dispose();
+        if (runtime.__PASEO_SYNC_CREDENTIAL_RELAY__ === lease) delete runtime.__PASEO_SYNC_CREDENTIAL_RELAY__;
+      },
     };
+    // Their cleanup calls the old lease, so it has to stop this one.
+    if (outdated) outdated.dispose = () => lease.dispose();
     runtime.__PASEO_SYNC_CREDENTIAL_RELAY__ = lease;
     const scripts = [...new Set(Array.from(document.scripts, (script) => script.src)
       .filter((src) => /\/index-[a-f0-9]+\.js(?:\?.*)?$/.test(src)))];
@@ -50,8 +59,14 @@ export function contributeRelay() {
           .some((plugin: any) => plugin.serverId === serverId && ["aster", "settings-sync"].includes(plugin.id) && !plugin.lifetime.signal.aborted)
           ? [{ serverId, client: session.client }] : []),
         () => {
-          try { return peerConnectionsOf(JSON.parse(localStorage.getItem("@paseo:daemon-registry") ?? "[]")); }
-          catch { return []; }
+          try {
+            const peers = peerConnectionsOf(JSON.parse(localStorage.getItem("@paseo:daemon-registry") ?? "[]"));
+            // An empty list means the hosts are not loaded yet, never that all of them were deleted.
+            if (!peers.length) return { peers: [], removed: [] };
+            return { peers, removed: trackRemovedHosts(localStorage, peers.map((peer) => peer.serverId)) };
+          } catch {
+            return { peers: [], removed: [] };
+          }
         });
     })().catch((error) => {
       if (!request.signal.aborted) console.error("[settings-sync] 인증 전달을 시작하지 못했습니다.", error);
