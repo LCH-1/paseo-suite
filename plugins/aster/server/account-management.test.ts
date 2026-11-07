@@ -570,3 +570,60 @@ test("한 시간이 지나 내려간 로그인은 터미널도 닫아 늦은 성
     await f.cleanup?.();
   }
 });
+
+test("일시적 오류는 성공한 로그인을 버리지 않고 다음 확인에서 등록한다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.add, { base: "claude" });
+    const launcher = JSON.parse(f.terminals.at(-1).args[1]);
+    await writeFile(
+      join(launcher.home, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "new@example.invalid", accountUuid: "a", organizationUuid: "o" } }),
+    );
+    await writeFile(launcher.done, '{"success":true}');
+    (f.paseo.config as any).patch = async () => {
+      throw new Error("socket dropped");
+    };
+    assert.match((await f.call(accountsRpc.status)).flows.at(-1).status, /공식 CLI 로그인/);
+    (f.paseo.config as any).patch = async () => ({});
+    assert.match((await f.call(accountsRpc.status)).flows.at(-1).status, /등록 완료/);
+  } finally {
+    await f.cleanup?.();
+  }
+});
+
+test("손상된 로그인 파일이 있어도 상태 화면이 열린다", async () => {
+  const f = await reloginFixture();
+  try {
+    const flow = await f.call(accountsRpc.relogin, { accountId: "profile" });
+    const done: string = JSON.parse(f.terminals.at(-1).args[1]).done;
+    await writeFile(done.replace(flow.id + ".done", "00000000-0000-0000-0000-000000000000.json"), "{broken");
+    assert.equal((await f.call(accountsRpc.status)).flows.length, 1);
+  } finally {
+    await f.cleanup?.();
+  }
+});
+
+test("새 터미널을 열 수 없으면 기존 로그인 터미널을 닫지 않는다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    await assert.rejects(f.call(accountsRpc.relogin, { accountId: "missing-account" }));
+    assert.deepEqual(f.killed, []);
+    assert.equal((await f.call(accountsRpc.status)).flows.length, 1);
+  } finally {
+    await f.cleanup?.();
+  }
+});
+
+test("방금 끝난 로그인은 다시 눌러도 유실되지 않는다", async () => {
+  const f = await reloginFixture();
+  try {
+    const { done } = await finishedRelogin(f, "second@example.invalid").catch(() => ({ done: "" }));
+    assert.ok(done);
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    assert.ok(f.refreshed.includes("usage"));
+  } finally {
+    await f.cleanup?.();
+  }
+});

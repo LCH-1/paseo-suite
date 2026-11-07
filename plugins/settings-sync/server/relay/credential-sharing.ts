@@ -9,6 +9,8 @@ import {
   randomBytes,
 } from "node:crypto";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { defineRpc } from "@getpaseo/plugin";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
@@ -55,21 +57,47 @@ export function renewWithCli(
   command: readonly string[],
   env: Record<string, string | undefined>,
   run: typeof execFile = execFile,
+  platform: NodeJS.Platform = process.platform,
 ) {
   const [file, ...args] = command;
-  return new Promise<void>((resolve) => {
-    run(
-      file,
-      [...args, "auth", "status"],
-      {
-        env: env as NodeJS.ProcessEnv,
-        timeout: 40000,
-        windowsHide: true,
-        shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(file),
-      },
-      () => resolve(),
-    );
+  const parameters = [...args, "auth", "status"];
+  // A .cmd shim or a name npm resolves needs a shell, which joins arguments without quoting them.
+  const shell = platform === "win32" && (/\.(cmd|bat)$/i.test(file) || !path.win32.isAbsolute(file));
+  const quote = (value: string) => `"${value.replace(/"/g, '""')}"`;
+  return new Promise<string | null>((resolve) => {
+    try {
+      run(
+        shell ? [file, ...parameters].map(quote).join(" ") : file,
+        shell ? [] : parameters,
+        { env: env as NodeJS.ProcessEnv, timeout: 40000, windowsHide: true, shell },
+        (error) => resolve(error ? String(error.code ?? "failed") : null),
+      );
+    } catch (error) {
+      resolve(String((error as NodeJS.ErrnoException).code ?? "failed"));
+    }
   });
+}
+type ProviderEntry = { command?: string[]; env?: Record<string, string> } | undefined;
+const profileVariables = [
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+];
+/** Same spelling the sessions use: on Windows the credential entry name is hashed from it. */
+export function renewalEnvironment(base: Record<string, string | undefined>, root: ProviderEntry, entry: ProviderEntry) {
+  const env = { ...base };
+  for (const name of profileVariables) delete env[name];
+  return { ...env, ...root?.env, ...entry?.env };
+}
+/** After a restart no client has called in yet, and a login must not wait for one. */
+export async function renewalProviders(home: string, api?: PaseoConfigReader): Promise<CredentialProviders> {
+  if (api) return (await api.config.get()).config.providers ?? {};
+  const config = JSON.parse(await readFile(path.join(home, "config.json"), "utf8")) as {
+    agents?: { providers?: CredentialProviders };
+  };
+  return config.agents?.providers ?? {};
 }
 /** Local first: a login with this much time left is never replaced by another host's copy. */
 const usableMarginMs = 10 * 60_000;
@@ -200,26 +228,28 @@ export function registerCredentialSharing(
   const nextRenewal = new Map<string, number>();
   const renew = () =>
     serial(async () => {
-      if (!renewApi) return;
-      const providers = (await renewApi.config.get()).config.providers ?? {};
+      const providers = await renewalProviders(home, renewApi);
       const state = await store.read(providers);
       for (const own of state.accounts) {
         if (!refreshTokenOf(own.record) || (own.record?.expiresAt ?? 0) > Date.now() + renewWithinMs) continue;
         if (Date.now() < (nextRenewal.get(own.directory) ?? 0)) continue;
         nextRenewal.set(own.directory, Date.now() + renewRetryMs);
-        const entry = providers[own.providerIds[0]] as { command?: string[]; env?: Record<string, string> } | undefined;
-        const root = providers.claude as { command?: string[]; env?: Record<string, string> } | undefined;
-        await renewWithCli(entry?.command ?? root?.command ?? ["claude"], {
-          ...process.env,
-          ...root?.env,
-          ...entry?.env,
-          CLAUDE_CONFIG_DIR: own.directory,
-          CLAUDE_SECURESTORAGE_CONFIG_DIR: own.directory,
-        });
+        const entry = providers[own.providerIds[0]] as ProviderEntry;
+        const root = providers.claude as ProviderEntry;
+        const failure = await renewWithCli(
+          entry?.command ?? root?.command ?? ["claude"],
+          renewalEnvironment(process.env, root, entry),
+        );
         assertActive();
+        const after = (await store.read(providers)).accounts.find((a) => a.directory === own.directory);
+        if (failure || (after?.record?.expiresAt ?? 0) <= (own.record?.expiresAt ?? 0))
+          console.warn(`[settings-sync] Claude 인증을 갱신하지 못했습니다 (${failure ?? "만료 시각 그대로"}). 10분 뒤 다시 시도합니다.`);
         await onChanged();
       }
-    }).catch(() => {});
+    }).catch((error) => {
+      if (active)
+        console.warn("[settings-sync] Claude 인증 갱신 확인에 실패했습니다.", error instanceof Error ? error.name : "");
+    });
   const renewFirst = setTimeout(() => void renew(), renewStartDelayMs);
   const renewTimer = setInterval(() => void renew(), 60_000);
   renewFirst.unref?.();

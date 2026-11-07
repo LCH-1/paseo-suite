@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CredentialSharing, registerCredentialSharing } from "./credential-sharing";
-import { mkdtemp } from "node:fs/promises";
+import { CredentialSharing, registerCredentialSharing, renewalEnvironment, renewalProviders, renewWithCli } from "./credential-sharing";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CredentialState, SharedCredential } from "./credential-types";
@@ -144,4 +144,45 @@ test("unloading rejects queued credential RPC work before it reads another profi
   await first;
   await rejected;
   assert.equal(reads, 1);
+});
+
+test("갱신은 Windows .cmd와 공백 경로를 인용해서 셸로 실행한다", async () => {
+  const calls: any[] = [];
+  const run: any = (file: string, args: string[], options: any, done: (error: unknown) => void) => {
+    calls.push({ file, args, shell: options.shell });
+    done(null);
+  };
+  assert.equal(await renewWithCli(["C:\\Program Files\\nodejs\\claude.cmd"], {}, run, "win32"), null);
+  assert.deepEqual(calls.at(-1), { file: '"C:\\Program Files\\nodejs\\claude.cmd" "auth" "status"', args: [], shell: true });
+  await renewWithCli(["claude"], {}, run, "win32");
+  assert.equal(calls.at(-1).shell, true);
+  await renewWithCli(["C:\\tools\\claude.exe"], {}, run, "win32");
+  assert.deepEqual(calls.at(-1), { file: "C:\\tools\\claude.exe", args: ["auth", "status"], shell: false });
+  await renewWithCli(["claude"], {}, run, "linux");
+  assert.deepEqual(calls.at(-1), { file: "claude", args: ["auth", "status"], shell: false });
+});
+
+test("갱신 실패는 오류 코드로 알려 주고 동기 예외도 삼키지 않는다", async () => {
+  const failed: any = (_f: string, _a: string[], _o: any, done: (error: unknown) => void) => done(Object.assign(new Error("x"), { code: "ENOENT" }));
+  assert.equal(await renewWithCli(["claude"], {}, failed, "linux"), "ENOENT");
+  const thrown: any = () => { throw Object.assign(new Error("x"), { code: "EINVAL" }); };
+  assert.equal(await renewWithCli(["claude"], {}, thrown, "linux"), "EINVAL");
+});
+
+test("갱신 환경은 세션과 같은 프로필 값을 쓰고 데몬에서 물려받은 인증 값을 버린다", () => {
+  const env = renewalEnvironment(
+    { PATH: "p", CLAUDE_CONFIG_DIR: "/daemon", CLAUDE_CODE_OAUTH_TOKEN: "synthetic", ANTHROPIC_API_KEY: "synthetic" },
+    { env: { CLAUDE_CODE_FORCE_WINDOWS_CREDMAN: "1" } },
+    { env: { CLAUDE_CONFIG_DIR: "/profile" } },
+  );
+  assert.deepEqual(env, { PATH: "p", CLAUDE_CODE_FORCE_WINDOWS_CREDMAN: "1", CLAUDE_CONFIG_DIR: "/profile" });
+  assert.equal(renewalEnvironment({ CLAUDE_CONFIG_DIR: "/daemon" }, undefined, undefined).CLAUDE_CONFIG_DIR, undefined);
+});
+
+test("앱 창이 연결되기 전에도 설정 파일로 갱신 대상을 찾는다", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "renew-"));
+  await writeFile(path.join(home, "config.json"), JSON.stringify({ agents: { providers: { claude: { command: ["x"] } } } }));
+  assert.deepEqual(await renewalProviders(home), { claude: { command: ["x"] } });
+  const api = { config: { get: async () => ({ config: { providers: { other: {} } } }) } } as any;
+  assert.deepEqual(await renewalProviders(home, api), { other: {} });
 });

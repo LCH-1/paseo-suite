@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { isAbsolute } from "node:path";
 import { writeFile, rename } from "node:fs/promises";
 import { codexCommand } from "./codex-runtime.mjs";
 
@@ -14,14 +15,19 @@ for (const key of [
 ])
   delete env[key];
 let command, args;
+let startError = null;
 if (options.base === "codex") {
   env.CODEX_HOME = options.home;
-  [command, args] = codexCommand(options.command, [
-    "-c",
-    'cli_auth_credentials_store="file"',
-    "login",
-    "--device-auth",
-  ]);
+  try {
+    [command, args] = codexCommand(options.command, [
+      "-c",
+      'cli_auth_credentials_store="file"',
+      "login",
+      "--device-auth",
+    ]);
+  } catch (error) {
+    startError = error;
+  }
 } else {
   env.CLAUDE_CONFIG_DIR = options.home;
   env.CLAUDE_SECURESTORAGE_CONFIG_DIR = options.secureDirectory ?? options.home;
@@ -43,12 +49,14 @@ if (options.base !== "codex")
     ].join("\n"),
   );
 // npm installs a .cmd shim on Windows, which Node refuses to start without a shell.
-const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+const needsShell =
+  process.platform === "win32" &&
+  command !== undefined &&
+  (/\.(cmd|bat)$/i.test(command) || !isAbsolute(command));
 const quote = (value) => `"${String(value).replace(/"/g, '""')}"`;
 let child;
-let startError = null;
 try {
-  child = needsShell
+  if (!startError) child = needsShell
     ? spawn([quote(command), ...args.map(quote)].join(" "), { stdio: "inherit", env, windowsHide: true, shell: true })
     : spawn(command, args, { stdio: "inherit", env, windowsHide: true });
 } catch (error) {
