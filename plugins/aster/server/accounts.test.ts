@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
+import { exhaustedUntil,
   accountSecureDirectory,
   bootstrapAccounts,
   expiredAccounts,
@@ -628,4 +628,13 @@ test("계정 기록이 없는 기본 Claude 세션만 유지할 이전 계정이
     hasPreviousAccount({ provider: "claude-profile", env: {} }, false),
     true,
   );
+});
+
+test("소진된 한도의 복귀 시각을 알려 준다", () => {
+  const account = { id: "a", base: "claude", home: "h", email: "a@example.invalid", identity: null } as any;
+  const report = (windows: any[]) => [{ id: "claude:a", sourceId: "claude", fetchedAt: new Date(1000).toISOString(), account: { label: "a@example.invalid" }, report: { status: "available", windows } }] as any;
+  const reset = new Date(5000).toISOString();
+  assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 100, resetsAt: reset }]), 2000), 5000);
+  assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 40, resetsAt: reset }]), 2000), null);
+  assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 100, resetsAt: reset }]), 9000), null);
 });
