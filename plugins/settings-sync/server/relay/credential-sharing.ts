@@ -1,7 +1,6 @@
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
   createPublicKey,
   generateKeyPairSync,
   privateDecrypt,
@@ -10,13 +9,27 @@ import {
 } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { defineRpc } from "@getpaseo/plugin";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { parseBundle } from "./credential-runtime.js";
 import { credentialStore } from "./credential-store";
-import { DaemonRelay, peerConnections, removedPeers, savePeers } from "./daemon-relay";
+import { DaemonRelay, peerConnections, readPeers, removedPeers, savePeers } from "./daemon-relay";
+import { chainOf, digest, refreshTokenOf, withoutRefreshToken } from "./credential-tokens";
+import {
+  absorbDecision,
+  dropFromVault,
+  putVault,
+  readVault,
+  recoverRenewal,
+  renewBeforeExpiryMs,
+  renewVaultRecord,
+  supersedes,
+  vaultAllows,
+  vaultStatus,
+} from "./token-vault";
 import { connectPeer } from "./peer-connection";
 import type {
   CredentialEnvelope,
@@ -35,20 +48,7 @@ const envelope = z
     payload: z.string().max(3000000),
   })
   .strict();
-const digest = (value: string) => createHash("sha256").update(value).digest("hex");
-const refreshTokenOf = (record: SharedCredential | null | undefined) => {
-  const oauth = record?.credential.claudeAiOauth as { refreshToken?: unknown } | undefined;
-  return typeof oauth?.refreshToken === "string" && oauth.refreshToken ? oauth.refreshToken : null;
-};
-export const chainOf = (record: SharedCredential | null | undefined) => {
-  const token = refreshTokenOf(record);
-  return token ? digest("chain:" + token).slice(0, 32) : null;
-};
-/** Refresh tokens rotate: a second copy dies on the first renewal and takes that host's login with it. */
-export function withoutRefreshToken(record: SharedCredential): SharedCredential {
-  const { refreshToken: _refreshToken, ...oauth } = (record.credential.claudeAiOauth ?? {}) as Record<string, unknown>;
-  return { ...record, credential: { ...record.credential, claudeAiOauth: oauth } };
-}
+export { chainOf, withoutRefreshToken };
 const newest = (state: CredentialState, identity: string) =>
   state.accounts
     .filter((a) => a.identity === identity && a.record)
@@ -93,6 +93,12 @@ export function renewalEnvironment(base: Record<string, string | undefined>, roo
   for (const name of profileVariables) delete env[name];
   return { ...env, ...root?.env, ...entry?.env };
 }
+/** Runs the CLI against its own folder only, on the same file store on every platform. */
+export function vaultRenewalEnvironment(base: Record<string, string | undefined>, configDirectory: string) {
+  const env = { ...base };
+  for (const name of [...profileVariables, "CLAUDE_CODE_FORCE_WINDOWS_CREDMAN"]) delete env[name];
+  return { ...env, CLAUDE_CONFIG_DIR: configDirectory };
+}
 /** After a restart no client has called in yet, and a login must not wait for one. */
 export async function renewalProviders(home: string, api?: PaseoConfigReader): Promise<CredentialProviders> {
   if (api) return (await api.config.get()).config.providers ?? {};
@@ -136,10 +142,6 @@ export class CredentialSharing {
     };
   }
   export(state: CredentialState, publicKey: string, identities: string[]): CredentialEnvelope {
-    const recipient = createPublicKey(publicKey),
-      bits = recipient.asymmetricKeyDetails?.modulusLength;
-    if (recipient.asymmetricKeyType !== "rsa" || !bits || bits < 2048 || bits > 4096)
-      throw Error("Aster: 지원하지 않는 수신 암호화 키입니다.");
     const newestRecords = identities.map((id) => newest(state, id));
     const records = newestRecords.map((r) => (r ? withoutRefreshToken(r) : r));
     if (
@@ -147,6 +149,17 @@ export class CredentialSharing {
       records.some((r) => !r || r.vendor !== "claude" || (r.expiresAt ?? 0) <= this.now() + 60000)
     )
       throw Error("Aster: 갱신된 Claude 인증을 확인할 수 없습니다.");
+    return this.seal(records as SharedCredential[], publicKey);
+  }
+  /** The vault copy, refresh token included; only for another host's vault, never for a profile. */
+  exportVaultRecord(record: SharedCredential, publicKey: string) {
+    return this.seal([record], publicKey);
+  }
+  private seal(records: SharedCredential[], publicKey: string): CredentialEnvelope {
+    const recipient = createPublicKey(publicKey),
+      bits = recipient.asymmetricKeyDetails?.modulusLength;
+    if (recipient.asymmetricKeyType !== "rsa" || !bits || bits < 2048 || bits > 4096)
+      throw Error("Aster: 지원하지 않는 수신 암호화 키입니다.");
     const key = randomBytes(32),
       iv = randomBytes(12),
       cipher = createCipheriv("aes-256-gcm", key, iv);
@@ -165,11 +178,14 @@ export class CredentialSharing {
   keepUsableUntil() {
     return this.now() + usableMarginMs;
   }
-  open(
-    value: CredentialEnvelope,
-    state: CredentialState,
-    options: { allowNew?: boolean } = {},
-  ): SharedCredential[] {
+  /** Expired or not: the refresh token in it is what matters. */
+  openVaultRecord(value: CredentialEnvelope): SharedCredential {
+    const records = this.unseal(value);
+    if (records.length !== 1 || records[0].vendor !== "claude" || !refreshTokenOf(records[0]) || typeof records[0].expiresAt !== "number")
+      throw Error("Aster: 보관할 Claude 토큰을 확인할 수 없습니다.");
+    return records[0];
+  }
+  private unseal(value: CredentialEnvelope) {
     const key = privateDecrypt(
         { key: this.keys.privateKey, oaepHash: "sha256" },
         Buffer.from(value.key, "base64"),
@@ -177,7 +193,7 @@ export class CredentialSharing {
       decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64"));
     decipher.setAAD(Buffer.from(digest(this.publicKey)));
     decipher.setAuthTag(Buffer.from(value.tag, "base64"));
-    const records = parseBundle(
+    return parseBundle(
       JSON.parse(
         Buffer.concat([
           decipher.update(Buffer.from(value.payload, "base64")),
@@ -185,6 +201,13 @@ export class CredentialSharing {
         ]).toString("utf8"),
       ),
     ).records;
+  }
+  open(
+    value: CredentialEnvelope,
+    state: CredentialState,
+    options: { allowNew?: boolean } = {},
+  ): SharedCredential[] {
+    const records = this.unseal(value);
     if (
       !records.length ||
       records.length > 2 ||
@@ -226,14 +249,81 @@ export function registerCredentialSharing(
     defineRpc({ name: name.replace("aster.credentials.", "sync.credentials.") + ".request", input, output: z.unknown() });
   // The official CLI renews a login when it reads one, so an unused account stays alive
   // the way any single-machine login does. Each refresh token lives on one host only.
-  let renewApi: PaseoConfigReader | undefined;
+  let renewApi: (PaseoConfigReader & { config: { patch(input: unknown): Promise<unknown> } }) | undefined;
   const nextRenewal = new Map<string, number>();
+  const defaultProfile = path.join(homedir(), ".claude");
+  const isDefaultProfile = (directory: string) =>
+    process.platform === "win32"
+      ? path.resolve(directory).toLowerCase() === path.resolve(defaultProfile).toLowerCase()
+      : path.resolve(directory) === path.resolve(defaultProfile);
+  const patcher = (paseo: { config: { patch(input: unknown): Promise<unknown> } }, providers: CredentialProviders) => {
+    let expected = providers;
+    return async (next: CredentialProviders) => {
+      assertActive();
+      const changes = Object.fromEntries(
+        Object.entries(next).filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(expected[id])),
+      );
+      if (Object.keys(changes).length) await paseo.config.patch({ providers: changes });
+      expected = next;
+    };
+  };
+  /** Takes the refresh token out of a profile, so the CLI there can never use it on its own. */
+  const stripProfile = async (
+    paseo: { config: { patch(input: unknown): Promise<unknown> } },
+    providers: CredentialProviders,
+    own: CredentialState["accounts"][number],
+  ) => {
+    const chain = chainOf(own.record);
+    const stripped = withoutRefreshToken(own.record!);
+    await store.write(
+      providers,
+      [{ ...stripped, updatedAt: stripped.updatedAt + 1 }],
+      patcher(paseo, providers),
+      async () => {},
+      0,
+      (candidate) => chainOf(candidate.record) === chain,
+    );
+  };
+  /**
+   * Moves logins into the vault. False only when renewing in the profile still applies: a login
+   * outside the vault's care. Waiting for a client counts as handled, because a token found in a
+   * profile right after a restart may already be dead, and must not reach the CLI first.
+   */
+  const absorb = async (own: CredentialState["accounts"][number], providers: CredentialProviders) => {
+    if (isDefaultProfile(own.directory)) return false;
+    if (!(await readPeers(home, () => {})).length || !(await vaultAllows(home, own.identity))) return false;
+    if (!renewApi) return true;
+    const held = (await readVault(home)).find((record) => record.identity === own.identity);
+    const decision = absorbDecision(own.record!, held);
+    if (decision === "absorb") await putVault(home, own.record!);
+    await stripProfile(renewApi, providers, own);
+    console.log(`[settings-sync] ${own.identity.slice(0, 6)} 로그인을 토큰 보관소로 ${decision === "absorb" ? "옮김" : "정리"}`);
+    await onChanged();
+    return true;
+  };
   const renew = () =>
     serial(async () => {
       const providers = await renewalProviders(home, renewApi);
       const state = await store.read(providers);
+      if (state.declined?.length) await dropFromVault(home, state.declined);
+      for (const record of await readVault(home, () => {})) await recoverRenewal(home, record);
+      for (const record of await readVault(home, () => {})) {
+        const own = state.accounts.find((account) => account.identity === record.identity);
+        if (
+          renewApi &&
+          own &&
+          !refreshTokenOf(own.record) &&
+          (own.record?.expiresAt ?? 0) <= share.keepUsableUntil() &&
+          (record.expiresAt ?? 0) > Math.max(own.record?.expiresAt ?? 0, Date.now() + 60_000)
+        ) {
+          await store.write(providers, [withoutRefreshToken(record)], patcher(renewApi, providers), async () => {}, share.keepUsableUntil());
+          await onChanged();
+        }
+      }
       for (const own of state.accounts) {
-        if (!refreshTokenOf(own.record) || (own.record?.expiresAt ?? 0) > Date.now() + renewWithinMs) continue;
+        if (!refreshTokenOf(own.record)) continue;
+        if (await absorb(own, providers)) continue;
+        if ((own.record?.expiresAt ?? 0) > Date.now() + renewWithinMs) continue;
         if (Date.now() < (nextRenewal.get(own.directory) ?? 0)) continue;
         nextRenewal.set(own.directory, Date.now() + renewRetryMs);
         const entry = providers[own.providerIds[0]] as ProviderEntry;
@@ -252,10 +342,13 @@ export function registerCredentialSharing(
       if (active)
         console.warn("[settings-sync] Claude 인증 갱신 확인에 실패했습니다.", error instanceof Error ? error.name : "");
     });
-  const renewFirst = setTimeout(() => void renew(), renewStartDelayMs);
-  const renewTimer = setInterval(() => void renew(), 60_000);
+  let renewTimer: ReturnType<typeof setInterval> | undefined;
+  const renewFirst = setTimeout(() => {
+    void renew();
+    renewTimer = setInterval(() => void renew(), 60_000);
+    renewTimer.unref?.();
+  }, renewStartDelayMs);
   renewFirst.unref?.();
-  renewTimer.unref?.();
   // Delivery must not depend on an open app window, only on a daemon being alive.
   const daemonRelay = new DaemonRelay({ home, enabled, connect: connectPeer });
   daemonRelay.start();
@@ -266,12 +359,87 @@ export function registerCredentialSharing(
         return {
           ...share.status(await store.read((await paseo.config.get()).config.providers ?? {})),
           daemonRelay: await daemonRelay.snapshot(),
+          vault: vaultStatus(await readVault(home)),
         };
       }),
     ),
     server.handle(
       rpc("aster.credentials.peers", z.object({ peers: peerConnections, removed: removedPeers.optional() }).strict()),
       async (input) => serial(async () => ({ peers: await savePeers(home, input.peers, { removed: input.removed }) })),
+    ),
+    server.handle(
+      rpc("aster.credentials.vault.export", z.object({ publicKey: z.string().max(8192), identity }).strict()),
+      async (input) =>
+        serial(async () => {
+          const record = (await readVault(home)).find((entry) => entry.identity === input.identity);
+          if (!record) throw Error("Settings Sync: 보관된 토큰이 없습니다.");
+          return share.exportVaultRecord(record, input.publicKey);
+        }),
+    ),
+    server.handle(rpc("aster.credentials.vault.receive", envelope), async (input) =>
+      serial(async () => {
+        const record = share.openVaultRecord(input);
+        // A host signed out of this account does not keep its token.
+        const state = await store.read(await renewalProviders(home, renewApi));
+        if (state.declined?.includes(record.identity)) return { changed: false };
+        return { changed: await putVault(home, record) };
+      }),
+    ),
+    server.handle(
+      rpc("aster.credentials.vault.renew", z.object({ identity, force: z.boolean().optional() }).strict()),
+      async (input, { paseo }) =>
+        serial(async () => {
+          renewApi = paseo as typeof renewApi;
+          const record = (await readVault(home)).find((entry) => entry.identity === input.identity);
+          if (!record) throw Error("Settings Sync: 보관된 토큰이 없습니다.");
+          // The second of two leaders asking lands here: the first one has just renewed it.
+          if (!input.force && (record.expiresAt ?? 0) > Date.now() + renewBeforeExpiryMs + 60_000) return { status: "not-due" };
+          const providers = (await paseo.config.get()).config.providers ?? {};
+          const root = providers.claude as ProviderEntry;
+          const result = await renewVaultRecord(home, record, (configDirectory) =>
+            renewWithCli(root?.command ?? ["claude"], vaultRenewalEnvironment(process.env, configDirectory)),
+          );
+          assertActive();
+          if (result.outcome === "renewed" || result.outcome === "recovered") {
+            const state = await store.read(providers);
+            if (state.accounts.some((account) => account.identity === input.identity)) {
+              await store.write(providers, [withoutRefreshToken(result.record)], patcher(paseo, providers));
+              await onChanged();
+            }
+          } else {
+            console.warn(`[settings-sync] ${input.identity.slice(0, 6)} 토큰 갱신 결과: ${result.outcome} ${result.failure ?? ""}`.trim());
+          }
+          return { status: result.outcome === "recovered" ? "renewed" : result.outcome, failure: result.failure ?? null };
+        }),
+    ),
+    server.handle(
+      rpc("aster.credentials.vault.drop", z.object({ identity }).strict()),
+      async (input) =>
+        serial(async () => {
+          await dropFromVault(home, [input.identity]);
+          return { dropped: true };
+        }),
+    ),
+    server.handle(
+      rpc("aster.credentials.vault.restore", z.object({ identity }).strict()),
+      async (input, { paseo }) =>
+        serial(async () => {
+          // The way back: puts the login into this host's profile, where its CLI renews it again.
+          const record = (await readVault(home)).find((entry) => entry.identity === input.identity);
+          if (!record) throw Error("Settings Sync: 보관된 토큰이 없습니다.");
+          const providers = (await paseo.config.get()).config.providers ?? {};
+          const changed = await store.write(
+            providers,
+            [{ ...record, updatedAt: Date.now() }],
+            patcher(paseo, providers),
+            async () => {},
+            0,
+            (candidate) => candidate.identity === input.identity,
+          );
+          await dropFromVault(home, [input.identity]);
+          await onChanged();
+          return { changed: changed.length };
+        }),
     ),
     server.handle(
       rpc(

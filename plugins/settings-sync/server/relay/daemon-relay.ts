@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { relayCredentials, type RelayClient, type RelayPeer } from "../../client/credential-relay";
+import { ownerOnlyFile, writeOwnerOnly } from "./secure-file";
+import { syncVaults, type VaultSyncState } from "./token-vault";
 
 // Holds what it takes to reach every other host, so it is only ever written with owner-only
 // access, never logged, never returned over RPC, and lives outside the settings backup.
@@ -67,25 +67,6 @@ export function mergePeers(
   return [...merged.values()].sort((a, b) => a.serverId.localeCompare(b.serverId));
 }
 
-const systemProgram = (name: string) =>
-  path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", name);
-const run = (file: string, args: string[]) =>
-  new Promise<string>((resolve, reject) => {
-    execFile(file, args, { windowsHide: true, timeout: 15_000 }, (error, stdout) =>
-      error ? reject(error) : resolve(String(stdout)),
-    );
-  });
-/** A Windows profile grants inherited read access to other groups, which mode bits cannot remove. */
-export function ownerOnlyArguments(file: string, userSid: string) {
-  return [file, "/inheritance:r", "/grant:r", `*${userSid}:F`, "*S-1-5-18:F"];
-}
-/** SIDs, because account and group names are localized and may need a domain to resolve. */
-async function restrictOnWindows(file: string) {
-  const sid = (await run(systemProgram("whoami.exe"), ["/user", "/fo", "csv", "/nh"])).match(/S-1-[\d-]+/)?.[0];
-  if (!sid) throw new Error("Windows user SID not found");
-  await run(systemProgram("icacls.exe"), ownerOnlyArguments(file, sid));
-}
-
 export async function savePeers(
   home: string,
   incoming: readonly PeerConnection[],
@@ -96,7 +77,7 @@ export async function savePeers(
   } = {},
 ) {
   const file = peersFile(home);
-  const restrict = (options.platform ?? process.platform) === "win32" ? (options.restrict ?? restrictOnWindows) : null;
+  const restrict = ownerOnlyFile(options.platform ?? process.platform, options.restrict);
   const current = await readPeers(home);
   const next = mergePeers(current, incoming, options.removed);
   if (JSON.stringify(next) === JSON.stringify(current)) {
@@ -104,17 +85,7 @@ export async function savePeers(
     if (current.length) await restrict?.(file).catch(() => console.log("[settings-sync] 호스트 접속 정보 파일 권한을 다시 확인하지 못했습니다."));
     return next.length;
   }
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: "wx" });
-    // Restricted before it takes the name, so a failure leaves the working list untouched.
-    await restrict?.(temporary);
-    await rename(temporary, file);
-  } catch (error) {
-    await rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
+  await writeOwnerOnly(file, JSON.stringify(next), restrict);
   return next.length;
 }
 
@@ -178,6 +149,7 @@ export class DaemonRelay {
   private readonly clients = new Map<string, { peer: PeerConnection; client: PeerClient }>();
   private readonly retryAt = new Map<string, number>();
   private readonly failing = new Set<string>();
+  private readonly vaultState: VaultSyncState = { retryAt: new Map(), aloneSince: null };
   private state: { role: DaemonRelayState["role"]; activeAt: number | null; reached: string[]; changed: number } = {
     role: "idle",
     activeAt: null,
@@ -194,6 +166,7 @@ export class DaemonRelay {
       enabled: () => Promise<boolean>;
       connect: (peer: PeerConnection, selfId: string) => Promise<PeerClient>;
       relay?: typeof relayCredentials;
+      syncVaults?: typeof syncVaults;
       now?: () => number;
       log?: (message: string) => void;
     },
@@ -303,6 +276,17 @@ export class DaemonRelay {
         if (client) ready.push({ serverId: peer.serverId, client });
       }),
     );
+    if (this.stopped) return;
+    // A failure here must not stop access tokens from going out.
+    await (this.options.syncVaults ?? syncVaults)(ready, {
+      order: peers.map((peer) => peer.serverId),
+      known: peers.length,
+      now: this.now,
+      state: this.vaultState,
+      log: (message) => this.log(message.replace("[settings-sync] ", "")),
+    }).catch((error) => {
+      this.log(`토큰 복제 확인 실패: ${error instanceof Error ? error.name : "unknown"}`);
+    });
     if (this.stopped) return;
     const result = await (this.options.relay ?? relayCredentials)(ready, this.now, undefined, { receiveTimeoutMs });
     for (const [serverId, { client }] of this.clients) if (!client.isConnected) this.close(serverId);

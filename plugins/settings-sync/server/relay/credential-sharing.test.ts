@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CredentialSharing, registerCredentialSharing, renewalEnvironment, renewalProviders, renewWithCli } from "./credential-sharing";
+import { CredentialSharing, registerCredentialSharing, renewalEnvironment, renewalProviders, renewWithCli, vaultRenewalEnvironment } from "./credential-sharing";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -185,4 +185,35 @@ test("앱 창이 연결되기 전에도 설정 파일로 갱신 대상을 찾는
   assert.deepEqual(await renewalProviders(home), { claude: { command: ["x"] } });
   const api = { config: { get: async () => ({ config: { providers: { other: {} } } }) } } as any;
   assert.deepEqual(await renewalProviders(home, api), { other: {} });
+});
+
+test("보관소 복사본은 리프레시 토큰을 담아 암호화되고 만료돼도 받을 수 있다", () => {
+  const source = new CredentialSharing(() => now);
+  const target = new CredentialSharing(() => now + 100 * 3600000);
+  const opened = target.openVaultRecord(source.exportVaultRecord(record(), target.publicKey));
+  assert.equal((opened.credential.claudeAiOauth as any).refreshToken, "synthetic-refresh");
+  assert.throws(() => new CredentialSharing(() => now).openVaultRecord(source.exportVaultRecord(record(), target.publicKey)));
+});
+
+test("일반 전달은 여전히 리프레시 토큰을 내보내지 않는다", () => {
+  const source = new CredentialSharing(() => now);
+  const target = new CredentialSharing(() => now);
+  const state = { providers: {}, accounts: [{ identity: record().identity, providerIds: ["claude"], record: record(), metadata: {}, directory: "x" }] };
+  const [opened] = target.open(source.export(state, target.publicKey, [record().identity]), state);
+  assert.equal((opened.credential.claudeAiOauth as any).refreshToken, undefined);
+});
+
+test("보관소 토큰이 없는 복사본은 받지 않는다", () => {
+  const source = new CredentialSharing(() => now);
+  const target = new CredentialSharing(() => now);
+  const envelope = source.export({ providers: {}, accounts: [{ identity: record().identity, providerIds: ["claude"], record: record(), metadata: {}, directory: "x" }] }, target.publicKey, [record().identity]);
+  assert.throws(() => target.openVaultRecord(envelope));
+});
+
+test("갱신 환경은 임시 폴더만 가리키고 프로필과 저장소 강제 설정을 쓰지 않는다", () => {
+  const env = vaultRenewalEnvironment(
+    { PATH: "p", CLAUDE_CONFIG_DIR: "/profile", CLAUDE_SECURESTORAGE_CONFIG_DIR: "/profile", CLAUDE_CODE_FORCE_WINDOWS_CREDMAN: "1", CLAUDE_CODE_OAUTH_TOKEN: "synthetic" },
+    "/renew",
+  );
+  assert.deepEqual(env, { PATH: "p", CLAUDE_CONFIG_DIR: "/renew" });
 });
