@@ -528,3 +528,17 @@ test("같은 계정의 로그인을 다시 시작하면 대기 항목이 쌓이�
     await f.cleanup?.();
   }
 });
+
+test("계정 정보 없이 끝난 로그인은 실패로 표시되고 화면 전체를 깨지 않는다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.add, { base: "claude" });
+    const launcher = JSON.parse(f.terminals.at(-1).args[1]);
+    await writeFile(launcher.done, '{"success":true}');
+    const state = await f.call(accountsRpc.status);
+    assert.ok(state.accounts.length > 0);
+    assert.match(state.flows.at(-1).status, /확인하지 못했습니다/);
+  } finally {
+    await f.cleanup?.();
+  }
+});
