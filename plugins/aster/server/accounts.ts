@@ -364,6 +364,7 @@ export function bootstrapAccounts(
   accounts: Account[],
   reports: z.infer<typeof reportsSchema>,
   now = Date.now(),
+  isBlocked: (accountId: string) => boolean = () => false,
 ) {
   const expired = new Set(expiredAccounts(accounts, reports, now));
   const seen = new Set<string>();
@@ -422,7 +423,7 @@ export function bootstrapAccounts(
     return true;
   });
   // A session sent to an expired login fails, so that is only worth trying with nothing better.
-  const verified = startable.filter((account) => !expired.has(account));
+  const verified = startable.filter((account) => !expired.has(account) && !isBlocked(account.id));
   return verified.length ? verified : startable;
 }
 

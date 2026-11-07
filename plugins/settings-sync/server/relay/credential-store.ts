@@ -139,7 +139,9 @@ export function credentialStore(
       const [organization, account] = a.identity.split("|");
       return account ? [hash(["claude", account, organization])] : [];
     });
-    return { providers, accounts, declined: [...new Set(declined)] };
+    // One stale signed-out entry next to a signed-in login of the same account is not a sign-out.
+    const signedIn = new Set(accounts.map((account) => account.identity));
+    return { providers, accounts, declined: [...new Set(declined)].filter((identity) => !signedIn.has(identity)) };
   }
   /** Registers an account this host has not seen, in the same shape as a local login. */
   async function provision(

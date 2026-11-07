@@ -652,3 +652,15 @@ test("확인된 계정이 있으면 만료된 계정으로 세션을 보내지 �
   assert.deepEqual(bootstrapAccounts([lapsed, healthy], reports, now).map((entry: any) => entry.id), ["main"]);
   assert.deepEqual(bootstrapAccounts([lapsed], reports, now).map((entry: any) => entry.id), ["second"]);
 });
+
+test("확인된 계정이 잠시 막혀 있으면 만료된 계정을 대안으로 남긴다", () => {
+  const now = Date.parse("2026-11-07T10:00:00Z");
+  const account = (id: string, email: string) => ({ id, base: "claude", home: "/" + id, email, identity: id + "-org|" + id, signedIn: true }) as any;
+  const reportFor = (email: string, value: object) => ({ id: "claude:" + email + "." + email.split("@")[0] + "-org", sourceId: "claude", sourceLabel: "Claude", fetchedAt: "2026-11-07T09:59:00Z", account: { label: email }, report: value }) as any;
+  const reports = [
+    reportFor("main@example.invalid", { status: "available", windows: [{ id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" }] }),
+    reportFor("second@example.invalid", { status: "unavailable", problem: { kind: "expired", expiresAt: "2026-11-07T09:30:00Z" } }),
+  ];
+  const all = [account("main", "main@example.invalid"), account("second", "second@example.invalid")];
+  assert.deepEqual(bootstrapAccounts(all, reports, now, (id) => id === "main").map((entry: any) => entry.id).sort(), ["main", "second"]);
+});

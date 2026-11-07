@@ -149,7 +149,7 @@ export class DaemonRelay {
   private readonly clients = new Map<string, { peer: PeerConnection; client: PeerClient }>();
   private readonly retryAt = new Map<string, number>();
   private readonly failing = new Set<string>();
-  private readonly vaultState: VaultSyncState = { retryAt: new Map(), aloneSince: null };
+  private readonly vaultState: VaultSyncState = { retryAt: new Map(), failed: new Map(), aloneSince: null };
   private state: { role: DaemonRelayState["role"]; activeAt: number | null; reached: string[]; changed: number } = {
     role: "idle",
     activeAt: null,

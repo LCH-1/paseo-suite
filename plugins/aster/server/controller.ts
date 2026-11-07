@@ -41,6 +41,10 @@ export class Controller {
   }
 
   /** Whether bootstrap could pick an account, without advancing its rotation. */
+  isBlocked(accountId: string, now: number) {
+    return (this.blocked.get(accountId) ?? 0) > now;
+  }
+
   canBootstrap(accountIds: readonly string[], now: number) {
     return accountIds.some((id) => (this.blocked.get(id) ?? 0) <= now);
   }

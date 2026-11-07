@@ -35,6 +35,13 @@ const record = (refreshToken: string, expiresAt: number, id = identity): SharedC
 });
 const home = () => mkdtemp(path.join(tmpdir(), "token-vault-"));
 const save = (root: string, entry: SharedCredential) => putVault(root, entry, { restrict: noRestriction });
+const rewrites = (next: Record<string, unknown> | null) => async (directory: string) => {
+  const file = path.join(directory, ".credentials.json");
+  const before = JSON.parse(await readFile(file, "utf8"));
+  await writeFile(file, JSON.stringify(next ?? { ...before, claudeAiOauth: {} }));
+  return null;
+};
+const options = { restrict: noRestriction, restrictDirectory: noRestriction, now: 1000 };
 
 test("더 늦게 만료되는 토큰이 항상 최신이다", () => {
   assert.equal(supersedes(record("new", 2000), record("old", 1000)), true);
@@ -107,13 +114,40 @@ test("프로필의 토큰은 새 로그인이면 옮기고 죽은 것이면 버�
   assert.equal(absorbDecision(record("first", 1000), undefined), "absorb");
 });
 
-const rewrites = (next: Record<string, unknown> | null) => async (directory: string) => {
-  const file = path.join(directory, ".credentials.json");
-  const before = JSON.parse(await readFile(file, "utf8"));
-  await writeFile(file, JSON.stringify(next ?? { ...before, claudeAiOauth: {} }));
-  return null;
-};
-const options = { restrict: noRestriction, restrictDirectory: noRestriction, now: 1000 };
+test("전달로 만료 시각만 같아진 죽은 토큰은 보관소의 토큰을 이기지 못한다", () => {
+  // Relay deliveries keep a profile's refresh token and copy the expiry, so ties are normal.
+  assert.equal(absorbDecision(record("forked-dead", 2000), record("alive", 2000)), "drop");
+  assert.equal(absorbDecision(record("zzz-forked-dead", 2000), record("aaa-alive", 2000)), "drop");
+});
+
+test("만료 시각이 같으면 실제 갱신으로 나온 토큰이 이긴다", () => {
+  const renewed = { ...record("aaa-renewed", 2000), vaultOrigin: "renewal" as const };
+  const absorbed = record("zzz-absorbed", 2000);
+  assert.equal(supersedes(renewed, absorbed), true);
+  assert.equal(supersedes(absorbed, renewed), false);
+  assert.deepEqual(
+    planTransfers([
+      { serverId: "a", publicKey: "k", accounts: [], declined: [], vault: [{ identity, chain: "zzz", expiresAt: 2000 }] },
+      { serverId: "b", publicKey: "k", accounts: [], declined: [], vault: [{ identity, chain: "aaa", expiresAt: 2000, renewal: true }] },
+    ]),
+    [{ identity, from: "b", to: "a" }],
+  );
+});
+
+test("만료 시각이 없는 로그인은 보관소로 옮기지 않아 프로필에서 지워지지 않는다", () => {
+  assert.equal(absorbDecision({ ...record("x", 1000), expiresAt: null }, undefined), "skip");
+});
+
+test("방금 회전한 토큰은 시계가 어긋나도 보관한다", async () => {
+  const root = await home();
+  const old = record("old", 5000);
+  await save(root, old);
+  const result = await renewVaultRecord(root, old, rewrites({ claudeAiOauth: { accessToken: "a", refreshToken: "next", expiresAt: 4000 } }), { ...options, now: 1000 });
+  assert.equal(result.outcome, "renewed");
+  assert.equal(chainOf((await readVault(root))[0]), chainOf(record("next", 4000)));
+  assert.equal((await readVault(root))[0].vaultOrigin, "renewal");
+});
+
 
 test("CLI가 갱신하면 새 토큰을 보관하고 임시 폴더를 지운다", async () => {
   const root = await home();
@@ -211,30 +245,31 @@ test("a에서 로그인하고 b에 복제된 뒤 a가 꺼지면 켜지는 c는 b
 
 const now = 1_000_000;
 const due = now + 60_000;
+const renewalTargets = (...args: Parameters<typeof planRenewals>) => planRenewals(...args).map(({ identity: id, serverId }) => ({ identity: id, serverId }));
 test("만료가 임박하면 순서상 첫 호스트 한 곳에만 갱신을 맡긴다", () => {
   const peers = [status("win", [["c", due]]), status("linux2", [["c", due]]), status("linux1", [["c", due]])];
-  assert.deepEqual(planRenewals(peers, ["linux1", "linux2", "win"], now, null), [{ identity, serverId: "linux1" }]);
-  assert.deepEqual(planRenewals([status("a", [["c", now + 3_600_000]])], ["a"], now, null), []);
+  assert.deepEqual(renewalTargets(peers, ["linux1", "linux2", "win"], now, null), [{ identity, serverId: "linux1" }]);
+  assert.deepEqual(renewalTargets([status("a", [["c", now + 3_600_000]])], ["a"], now, null), []);
 });
 
 test("최신 토큰을 받지 못한 호스트에는 갱신을 맡기지 않는다", () => {
   const peers = [status("stale", [["old", due - 1000]]), status("fresh", [["new", due]])];
-  assert.deepEqual(planRenewals(peers, ["stale", "fresh"], now, null), [{ identity, serverId: "fresh" }]);
+  assert.deepEqual(renewalTargets(peers, ["stale", "fresh"], now, null), [{ identity, serverId: "fresh" }]);
 });
 
 test("로그아웃했거나 계정이 없는 호스트는 갱신 대상에서 뺀다", () => {
   const peers = [status("out", [["c", due]], { declined: [identity] }), status("none", [["c", due]], { accounts: [] }), status("ok", [["c", due]])];
-  assert.deepEqual(planRenewals(peers, ["out", "none", "ok"], now, null), [{ identity, serverId: "ok" }]);
-  assert.deepEqual(planRenewals([status("none", [["c", due]], { accounts: [] })], ["none"], now, null), []);
+  assert.deepEqual(renewalTargets(peers, ["out", "none", "ok"], now, null), [{ identity, serverId: "ok" }]);
+  assert.deepEqual(renewalTargets([status("none", [["c", due]], { accounts: [] })], ["none"], now, null), []);
 });
 
 test("혼자 켜져 있고 토큰이 이미 만료됐으면 다른 호스트를 잠시 기다린다", () => {
   const expired = [status("a", [["c", now - 1000]])];
-  assert.deepEqual(planRenewals(expired, ["a"], now, 60_000), []);
-  assert.deepEqual(planRenewals(expired, ["a"], now, 11 * 60_000), [{ identity, serverId: "a" }]);
-  assert.deepEqual(planRenewals(expired, ["a"], now, null), [{ identity, serverId: "a" }]);
+  assert.deepEqual(renewalTargets(expired, ["a"], now, 60_000), []);
+  assert.deepEqual(renewalTargets(expired, ["a"], now, 11 * 60_000), [{ identity, serverId: "a" }]);
+  assert.deepEqual(renewalTargets(expired, ["a"], now, null), [{ identity, serverId: "a" }]);
   // Not expired yet: nobody can have renewed it, so there is nothing to wait for.
-  assert.deepEqual(planRenewals([status("a", [["c", due]])], ["a"], now, 60_000), [{ identity, serverId: "a" }]);
+  assert.deepEqual(renewalTargets([status("a", [["c", due]])], ["a"], now, 60_000), [{ identity, serverId: "a" }]);
 });
 
 function fleet(initial: Record<string, { chain: string; expiresAt: number } | null>, renewTo?: { chain: string; expiresAt: number }, renewStatus = "renewed") {
@@ -258,7 +293,7 @@ function fleet(initial: Record<string, { chain: string; expiresAt: number } | nu
   });
   return { peers: Object.keys(initial).map(peer), held, calls };
 }
-const context = (order: string[], known = order.length) => ({ order, known, now, state: { retryAt: new Map<string, number>(), aloneSince: null }, log: () => {} });
+const context = (order: string[], known = order.length) => ({ order, known, now, state: { retryAt: new Map<string, number>(), failed: new Map<string, Set<string>>(), aloneSince: null }, log: () => {} });
 
 test("한 번의 처리로 뒤처진 호스트를 채우고 갱신한 뒤 새 토큰까지 다시 복제한다", async () => {
   const f = fleet({ a: { chain: "c1", expiresAt: due }, b: { chain: "c1", expiresAt: due }, c: null }, { chain: "c2", expiresAt: now + 8 * 3_600_000 });
@@ -311,4 +346,33 @@ test("로그에 토큰이 나타나지 않는다", async () => {
   await syncVaults([failing], { ...context(["a"]), log: (message) => logs.push(message) });
   assert.ok(logs.length > 0);
   assert.ok(!logs.join().includes("secret-refresh-token"));
+});
+
+test("다른 호스트가 갱신 중이면 같은 토큰을 맡기지 않는다", () => {
+  const peers = [status("a", [["c", due]], { renewing: identity }), status("b", [["c", due]])];
+  assert.deepEqual(renewalTargets(peers, ["b", "a"], now, null), []);
+});
+
+test("첫 호스트가 CLI를 실행하지 못하면 다음 차례에 다른 호스트가 갱신한다", async () => {
+  const f = fleet({ a: { chain: "c", expiresAt: due }, b: { chain: "c", expiresAt: due } }, undefined, "unchanged");
+  const ctx = context(["a", "b"]);
+  await syncVaults(f.peers, ctx);
+  await syncVaults(f.peers, ctx);
+  assert.deepEqual(f.calls.filter((call) => call.startsWith("vault.renew")), ["vault.renew:a", "vault.renew:b"]);
+  // Both failed: the wait starts, then the first host is tried again.
+  await syncVaults(f.peers, ctx);
+  assert.equal(f.calls.filter((call) => call.startsWith("vault.renew")).length, 2);
+  await syncVaults(f.peers, { ...ctx, now: now + 11 * 60_000 });
+  assert.equal(f.calls.filter((call) => call.startsWith("vault.renew")).length, 3);
+});
+
+test("거부된 토큰의 대기가 새 로그인을 막지 않는다", async () => {
+  const f = fleet({ a: { chain: "dead", expiresAt: due } }, undefined, "rejected");
+  const ctx = context(["a"]);
+  await syncVaults(f.peers, ctx);
+  await syncVaults(f.peers, ctx);
+  assert.equal(f.calls.filter((call) => call.startsWith("vault.renew")).length, 1);
+  f.held.set("a", { chain: "fresh-login", expiresAt: due + 1000 });
+  await syncVaults(f.peers, ctx);
+  assert.equal(f.calls.filter((call) => call.startsWith("vault.renew")).length, 2);
 });

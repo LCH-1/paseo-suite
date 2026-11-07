@@ -9,6 +9,9 @@ import { ownerOnlyDirectory, ownerOnlyFile, writeOwnerOnly, type Restrict } from
 // finds in its profile. So profiles hold access tokens only, every host keeps the refresh token
 // here where no CLI looks, and exactly one host at a time renews it and hands the result around.
 
+/** Marks a token that came out of a renewal rather than being picked up from a profile. */
+export type VaultRecord = SharedCredential & { vaultOrigin?: "renewal" };
+
 const vaultFile = (home: string) => path.join(home, "settings-sync", "claude-vault.json");
 const renewRoot = (home: string) => path.join(home, "settings-sync", "vault-renew");
 const renewDirectory = (home: string, identity: string) => path.join(renewRoot(home), identity.slice(0, 16));
@@ -45,12 +48,15 @@ export async function readVault(home: string, log: (message: string) => void = c
 }
 
 /**
- * Every renewal issues a token that expires later, so the later expiry is always the living one,
- * and a host that slept through renewals can never put back a refresh token that already died.
+ * Every renewal issues a token that expires later, so a later expiry is the living one, and a host
+ * that slept through renewals cannot put back a token that already died. A tie says less: relayed
+ * access tokens copy their expiry onto a profile whose own refresh token they leave in place, so
+ * a dead token can match a living one exactly. Only a renewal's own output is certain then.
  */
-export function supersedes(a: SharedCredential, b: SharedCredential | undefined) {
+export function supersedes(a: VaultRecord, b: VaultRecord | undefined) {
   if (!b) return true;
   if ((a.expiresAt ?? 0) !== (b.expiresAt ?? 0)) return (a.expiresAt ?? 0) > (b.expiresAt ?? 0);
+  if ((a.vaultOrigin === "renewal") !== (b.vaultOrigin === "renewal")) return a.vaultOrigin === "renewal";
   return (chainOf(a) ?? "") > (chainOf(b) ?? "");
 }
 
@@ -60,12 +66,15 @@ async function saveVault(home: string, records: SharedCredential[], platform: No
 
 export async function putVault(
   home: string,
-  record: SharedCredential,
-  options: { platform?: NodeJS.Platform; restrict?: Restrict } = {},
+  record: VaultRecord,
+  options: { platform?: NodeJS.Platform; restrict?: Restrict; replacing?: string | null } = {},
 ) {
   const records = await readVault(home);
   const held = records.find((entry) => entry.identity === record.identity);
-  if (!usable(record) || !supersedes(record, held)) return false;
+  if (!usable(record)) return false;
+  // The successor of the held token is the only living one now, whatever the clocks say.
+  const successor = options.replacing && held && chainOf(held) === options.replacing;
+  if (!successor && !supersedes(record, held)) return false;
   await saveVault(
     home,
     [...records.filter((entry) => entry.identity !== record.identity), record],
@@ -90,10 +99,16 @@ export interface VaultEntryStatus {
   identity: string;
   expiresAt: number;
   chain: string;
+  renewal?: boolean;
 }
 /** Digests and times only: this travels over status calls. */
-export const vaultStatus = (records: readonly SharedCredential[]): VaultEntryStatus[] =>
-  records.map((record) => ({ identity: record.identity, expiresAt: record.expiresAt!, chain: chainOf(record)! }));
+export const vaultStatus = (records: readonly VaultRecord[]): VaultEntryStatus[] =>
+  records.map((record) => ({
+    identity: record.identity,
+    expiresAt: record.expiresAt!,
+    chain: chainOf(record)!,
+    renewal: record.vaultOrigin === "renewal",
+  }));
 
 /** Accounts move over one at a time when this list exists; without it, all of them do. */
 export async function vaultAllows(home: string, identity: string) {
@@ -113,10 +128,12 @@ export async function vaultAllows(home: string, identity: string) {
 }
 
 /** What to do with a refresh token found in a CLI profile. */
-export function absorbDecision(own: SharedCredential, held: SharedCredential | undefined): "absorb" | "drop" {
-  // Older than what the vault holds: it already died, and must not reach a CLI's next refresh.
-  if (held && chainOf(held) === chainOf(own)) return "drop";
-  return supersedes(own, held) ? "absorb" : "drop";
+export function absorbDecision(own: SharedCredential, held: VaultRecord | undefined): "absorb" | "drop" | "skip" {
+  if (!held) return typeof own.expiresAt === "number" ? "absorb" : "skip";
+  if (chainOf(held) === chainOf(own)) return "drop";
+  // Only a login newer than the vault is new. Otherwise it already died, a tie included, since
+  // relayed tokens give dead refresh tokens the same expiry, and must not reach a CLI's next refresh.
+  return typeof own.expiresAt === "number" && own.expiresAt > (held.expiresAt ?? 0) ? "absorb" : "drop";
 }
 
 export type RenewalOutcome = "renewed" | "recovered" | "unchanged" | "rejected";
@@ -134,7 +151,7 @@ function renewedRecord(record: SharedCredential, credential: Record<string, unkn
   if (typeof oauth?.accessToken !== "string" || !oauth.accessToken) return null;
   if (typeof oauth.refreshToken !== "string" || !oauth.refreshToken) return null;
   if (typeof oauth.expiresAt !== "number") return null;
-  return { ...record, credential: credential!, expiresAt: oauth.expiresAt, updatedAt: now };
+  return { ...record, credential: credential!, expiresAt: oauth.expiresAt, updatedAt: now, vaultOrigin: "renewal" as const };
 }
 
 /**
@@ -149,7 +166,7 @@ export async function recoverRenewal(
   const directory = renewDirectory(home, record.identity);
   const found = renewedRecord(record, await readCredentials(directory), options.now ?? Date.now());
   const rotated = found && chainOf(found) !== chainOf(record) && (found.expiresAt ?? 0) > (record.expiresAt ?? 0);
-  if (rotated) await putVault(home, found, options);
+  if (rotated) await putVault(home, found, { ...options, replacing: chainOf(record) });
   await rm(directory, { recursive: true, force: true });
   return rotated ? found : null;
 }
@@ -192,7 +209,7 @@ export async function renewVaultRecord(
     await rm(directory, { recursive: true, force: true });
     return { outcome: "unchanged", record, failure };
   }
-  await putVault(home, renewed, options);
+  await putVault(home, renewed, { ...options, replacing: chainOf(record) });
   await rm(directory, { recursive: true, force: true });
   return { outcome: "renewed", record: renewed, failure };
 }
@@ -203,14 +220,20 @@ export interface VaultPeerStatus {
   vault: VaultEntryStatus[];
   accounts: string[];
   declined: string[];
+  renewing?: string | null;
 }
+/** Same order as supersedes, so a host never refuses what it was chosen to receive. */
+const beats = (entry: VaultEntryStatus, best: VaultEntryStatus) => {
+  if (entry.expiresAt !== best.expiresAt) return entry.expiresAt > best.expiresAt;
+  if (Boolean(entry.renewal) !== Boolean(best.renewal)) return Boolean(entry.renewal);
+  return entry.chain > best.chain;
+};
 const newestOf = (peers: readonly VaultPeerStatus[], identity: string) => {
   let best: (VaultEntryStatus & { serverId: string }) | null = null;
   for (const peer of peers) {
     const entry = peer.vault.find((item) => item.identity === identity);
     if (!entry) continue;
-    if (!best || entry.expiresAt > best.expiresAt || (entry.expiresAt === best.expiresAt && entry.chain > best.chain))
-      best = { ...entry, serverId: peer.serverId };
+    if (!best || beats(entry, best)) best = { ...entry, serverId: peer.serverId };
   }
   return best;
 };
@@ -240,19 +263,25 @@ export function planRenewals(
   order: readonly string[],
   now: number,
   aloneMs: number | null,
+  failed: (identity: string, chain: string, serverId: string) => boolean = () => false,
 ) {
   return identitiesOf(peers).flatMap((identity) => {
     const best = newestOf(peers, identity)!;
     if (best.expiresAt > now + renewBeforeExpiryMs) return [];
     if (aloneMs !== null && aloneMs < aloneGraceMs && best.expiresAt <= now) return [];
+    if (peers.some((peer) => peer.renewing === identity)) return [];
     const holders = peers.filter(
       (peer) =>
         peer.accounts.includes(identity) &&
         !peer.declined.includes(identity) &&
         peer.vault.some((entry) => entry.identity === identity && entry.chain === best.chain),
     );
-    const chosen = [...holders].sort((a, b) => order.indexOf(a.serverId) - order.indexOf(b.serverId))[0];
-    return chosen ? [{ identity, serverId: chosen.serverId }] : [];
+    if (!holders.length) return [];
+    // A host that could not run the CLI should not leave every other host's token to expire.
+    const chosen = holders
+      .filter((peer) => !failed(identity, best.chain, peer.serverId))
+      .sort((a, b) => order.indexOf(a.serverId) - order.indexOf(b.serverId))[0];
+    return [{ identity, chain: best.chain, serverId: chosen?.serverId ?? null }];
   });
 }
 
@@ -270,6 +299,7 @@ const call = (peer: RelayPeer, method: string, input: unknown, ms = 15_000) =>
 
 export interface VaultSyncState {
   retryAt: Map<string, number>;
+  failed: Map<string, Set<string>>;
   aloneSince: number | null;
 }
 const renewRetryMs = 10 * 60_000;
@@ -283,6 +313,7 @@ async function loadStatuses(ready: readonly RelayPeer[]) {
         vault?: VaultEntryStatus[];
         accounts?: { identity: string }[];
         declined?: string[];
+        renewing?: string | null;
       } | null;
       if (!status?.publicKey || !Array.isArray(status.vault)) return [];
       return [
@@ -292,6 +323,7 @@ async function loadStatuses(ready: readonly RelayPeer[]) {
           vault: status.vault,
           accounts: (status.accounts ?? []).map((account) => account.identity),
           declined: status.declined ?? [],
+          renewing: status.renewing ?? null,
         } satisfies VaultPeerStatus,
       ];
     }),
@@ -332,22 +364,36 @@ export async function syncVaults(
   const alone = context.known > 1 && ready.length <= 1;
   state.aloneSince = alone ? (state.aloneSince ?? now) : null;
   let renewed = 0;
-  for (const item of planRenewals(peers, context.order, now, state.aloneSince === null ? null : now - state.aloneSince)) {
-    if (now < (state.retryAt.get(item.identity) ?? 0)) continue;
+  const isFailed = (identity: string, chain: string, serverId: string) =>
+    state.failed.get(`${identity}:${chain}`)?.has(serverId) === true;
+  for (const item of planRenewals(peers, context.order, now, state.aloneSince === null ? null : now - state.aloneSince, isFailed)) {
+    // By token, not account: a new login must not sit out the wait of the one it replaced.
+    const key = `${item.identity}:${item.chain}`;
+    if (now < (state.retryAt.get(key) ?? 0)) continue;
+    if (!item.serverId) {
+      state.failed.delete(key);
+      state.retryAt.set(key, now + renewRetryMs);
+      continue;
+    }
+    const markFailed = () => state.failed.set(key, new Set([...(state.failed.get(key) ?? []), item.serverId!]));
     const peer = ready.find((entry) => entry.serverId === item.serverId)!;
     try {
-      const result = (await call(peer, "vault.renew", { identity: item.identity }, 120_000)) as { status?: string; failure?: string | null };
+      const result = (await call(peer, "vault.renew", { identity: item.identity }, 180_000)) as { status?: string; failure?: string | null };
       if (result?.status === "renewed" || result?.status === "recovered") {
         renewed++;
-        state.retryAt.delete(item.identity);
+        state.retryAt.delete(key);
+        state.failed.delete(key);
         log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 완료 (${item.serverId.slice(0, 12)})`);
+      } else if (result?.status === "rejected") {
+        state.retryAt.set(key, now + rejectedRetryMs);
+        log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰이 거부되었습니다. 다시 로그인이 필요합니다.`);
       } else if (result?.status !== "not-due") {
-        state.retryAt.set(item.identity, now + (result?.status === "rejected" ? rejectedRetryMs : renewRetryMs));
-        log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 실패: ${result?.status ?? "unknown"} ${result?.failure ?? ""}`.trim());
+        markFailed();
+        log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 실패 (${item.serverId.slice(0, 12)}): ${result?.status ?? "unknown"} ${result?.failure ?? ""}`.trim());
       }
     } catch (error) {
-      state.retryAt.set(item.identity, now + renewRetryMs);
-      log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 요청 실패: ${error instanceof Error ? error.name : "unknown"}`);
+      markFailed();
+      log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 요청 실패 (${item.serverId.slice(0, 12)}): ${error instanceof Error ? error.name : "unknown"}`);
     }
   }
   if (renewed) moved += await transfer(ready, await loadStatuses(ready), log);
