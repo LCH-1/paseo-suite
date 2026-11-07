@@ -340,6 +340,26 @@ export function expiredAccounts(
 }
 
 /** Partial quota responses are not scores; the official CLI must check the missing limit. */
+/** When a fully used limit lifts: the latest reset among exhausted windows, or null if none is exhausted. */
+export function exhaustedUntil(
+  account: Account,
+  reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
+) {
+  const resets = matchingReports(account, reports)
+    .filter((entry) => !deniesUsage(entry))
+    .flatMap((entry) => entry.report.windows ?? [])
+    .filter(
+      (window) =>
+        ["five_hour", "weekly"].includes(window.id) &&
+        window.usedPct !== null &&
+        window.usedPct >= 100,
+    )
+    .map((window) => (window.resetsAt === null ? NaN : Date.parse(window.resetsAt)))
+    .filter((at) => at > now);
+  return resets.length ? Math.max(...resets) : null;
+}
+
 export function bootstrapAccounts(
   accounts: Account[],
   reports: z.infer<typeof reportsSchema>,

@@ -5,6 +5,7 @@ import type {
 import {
   accountSecureDirectory,
   bootstrapAccounts,
+  exhaustedUntil,
   hasPreviousAccount,
   needsLogin,
   discoverAccounts,
@@ -162,6 +163,7 @@ export default function contribute(server: PluginServerContext) {
           );
           return accounts.map((account) => {
             const loginLost = needsLogin(account, reports);
+            const resumesAt = exhaustedUntil(account, reports);
             const subscribed = eligible.some(
               (entry) => entry.id === account.id,
             );
@@ -180,7 +182,9 @@ export default function contribute(server: PluginServerContext) {
                     ? "로그인 풀림 · 다시 로그인 필요"
                     : startable.has(account.id)
                       ? "사용 가능 · 첫 사용 후 사용량 표시"
-                      : "구독·잔여 한도 확인 필요 · 자동 선택 보류",
+                      : resumesAt
+                        ? `한도 소진 · ${new Date(resumesAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} 이후 자동 복귀`
+                        : "구독·잔여 한도 확인 필요 · 자동 선택 보류",
             };
           });
         };
