@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: LCH-1/paseo
-          ref: suite-core-v1.0.4
+          ref: suite-core-v1.0.6
           path: paseo-core
       - uses: actions/setup-node@v4
         with:
