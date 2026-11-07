@@ -301,18 +301,21 @@ async function loadStatuses(ready: readonly RelayPeer[]) {
 
 async function transfer(ready: readonly RelayPeer[], peers: readonly VaultPeerStatus[], log: (message: string) => void) {
   const byId = new Map(ready.map((peer) => [peer.serverId, peer]));
-  let moved = 0;
-  for (const item of planTransfers(peers)) {
-    const target = peers.find((peer) => peer.serverId === item.to)!;
-    try {
-      const envelope = await call(byId.get(item.from)!, "vault.export", { publicKey: target.publicKey, identity: item.identity });
-      const result = (await call(byId.get(item.to)!, "vault.receive", envelope, 30_000)) as { changed?: boolean };
-      if (result?.changed) moved++;
-    } catch (error) {
-      log(`[settings-sync] 토큰 복제 실패 ${item.to.slice(0, 12)}: ${error instanceof Error ? error.name : "unknown"}`);
-    }
-  }
-  return moved;
+  // All at once: the hosts still waiting hold an access token that no longer works.
+  const results = await Promise.all(
+    planTransfers(peers).map(async (item) => {
+      const target = peers.find((peer) => peer.serverId === item.to)!;
+      try {
+        const envelope = await call(byId.get(item.from)!, "vault.export", { publicKey: target.publicKey, identity: item.identity });
+        const result = (await call(byId.get(item.to)!, "vault.receive", envelope, 60_000)) as { changed?: boolean };
+        return result?.changed ? 1 : 0;
+      } catch (error) {
+        log(`[settings-sync] 토큰 복제 실패 ${item.to.slice(0, 12)}: ${error instanceof Error ? error.name : "unknown"}`);
+        return 0;
+      }
+    }),
+  );
+  return results.reduce<number>((sum, value) => sum + value, 0);
 }
 
 /** One daemon's pass: bring every host up to the newest token, renew what is due, and hand it round. */
