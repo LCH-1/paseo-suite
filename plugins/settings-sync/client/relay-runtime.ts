@@ -1,6 +1,8 @@
 import { peerConnectionsOf, startCredentialRelay } from "./credential-relay";
 
-interface RelayLease { owners: Set<symbol>; dispose(): void; }
+// Plugins are replaced one host at a time, so a shared loop must also yield to newer code.
+const relayCodeVersion = 2;
+interface RelayLease { owners: Set<symbol>; dispose(): void; version?: number; }
 export function contributeRelay() {
   const runtime = globalThis as typeof globalThis & {
     __r?: (id: number) => any;
@@ -8,11 +10,16 @@ export function contributeRelay() {
   };
   if (typeof document === "undefined" || !runtime.__r) return () => {};
   const owner = Symbol();
+  const running = runtime.__PASEO_SYNC_CREDENTIAL_RELAY__;
+  if (running && (running.version ?? 0) < relayCodeVersion) {
+    running.dispose();
+    delete runtime.__PASEO_SYNC_CREDENTIAL_RELAY__;
+  }
   if (!runtime.__PASEO_SYNC_CREDENTIAL_RELAY__) {
     const request = new AbortController();
     let relay: ReturnType<typeof startCredentialRelay> | undefined;
     const lease: RelayLease = {
-      owners: new Set(), dispose() { request.abort(); relay?.dispose(); },
+      owners: new Set(), version: relayCodeVersion, dispose() { request.abort(); relay?.dispose(); },
     };
     runtime.__PASEO_SYNC_CREDENTIAL_RELAY__ = lease;
     const scripts = [...new Set(Array.from(document.scripts, (script) => script.src)
@@ -50,7 +57,7 @@ export function contributeRelay() {
       if (!request.signal.aborted) console.error("[settings-sync] 인증 전달을 시작하지 못했습니다.", error);
     });
   }
-  const lease = runtime.__PASEO_SYNC_CREDENTIAL_RELAY__;
+  const lease = runtime.__PASEO_SYNC_CREDENTIAL_RELAY__!;
   lease.owners.add(owner);
   return () => {
     if (!lease.owners.delete(owner) || lease.owners.size) return;

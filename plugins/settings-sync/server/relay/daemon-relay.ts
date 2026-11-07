@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { relayCredentials, type RelayClient, type RelayPeer } from "../../client/credential-relay";
@@ -43,10 +44,26 @@ export function mergePeers(current: readonly PeerConnection[], incoming: readonl
   return [...merged.values()].sort((a, b) => a.serverId.localeCompare(b.serverId));
 }
 
-export async function savePeers(home: string, incoming: readonly PeerConnection[]) {
+/** A Windows profile grants inherited read access to other groups, which mode bits cannot remove. */
+export function ownerOnlyArguments(file: string, user: string) {
+  return [file, "/inheritance:r", "/grant:r", `${user}:F`, "SYSTEM:F"];
+}
+function restrictToOwner(file: string, platform: NodeJS.Platform, user = process.env.USERNAME) {
+  if (platform !== "win32" || !user) return Promise.resolve(platform !== "win32");
+  return new Promise<boolean>((resolve) => {
+    execFile("icacls", ownerOnlyArguments(file, user), { windowsHide: true, timeout: 15_000 }, (error) => resolve(!error));
+  });
+}
+
+export async function savePeers(home: string, incoming: readonly PeerConnection[], platform = process.platform) {
   const current = await readPeers(home);
   const next = mergePeers(current, incoming);
   if (JSON.stringify(next) !== JSON.stringify(current)) await atomicWrite(peersFile(home), JSON.stringify(next));
+  // Rather have no list than one other accounts can read.
+  if (!(await restrictToOwner(peersFile(home), platform))) {
+    await rm(peersFile(home), { force: true });
+    throw new Error("Settings Sync: 호스트 접속 정보 파일의 권한을 제한하지 못했습니다.");
+  }
   return next.length;
 }
 
