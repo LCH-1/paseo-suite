@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DaemonRelay, mergePeers, rankPeers, readPeers, savePeers, type PeerClient, type PeerConnection } from "./daemon-relay";
+import { DaemonRelay, mergePeers, ownerOnlyArguments, rankPeers, readPeers, savePeers, type PeerClient, type PeerConnection } from "./daemon-relay";
 
 const peer = (serverId: string, platform?: string): PeerConnection => ({
   serverId,
@@ -187,4 +187,14 @@ test("같은 시각의 중복 실행은 하나로 합친다", async () => {
   const r = relay(root, f.connect);
   await Promise.all([r.instance.tick(), r.instance.tick()]);
   assert.equal(r.delivered.length, 1);
+});
+
+test("Windows에서는 상속 권한을 끊고 소유자와 SYSTEM만 남긴다", () => {
+  assert.deepEqual(ownerOnlyArguments("C:\\p\\relay-peers.json", "ckdgh"), [
+    "C:\\p\\relay-peers.json",
+    "/inheritance:r",
+    "/grant:r",
+    "ckdgh:F",
+    "SYSTEM:F",
+  ]);
 });
