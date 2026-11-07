@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { peerConnectionsOf, relayCredentials, startCredentialRelay, type RelayPeer } from "./credential-relay";
+import { peerConnectionsOf, relayCredentials, startCredentialRelay, trackRemovedHosts, type RelayPeer } from "./credential-relay";
 const id = "a".repeat(64),
   key = "-----BEGIN PUBLIC KEY-----\nfixture\n-----END PUBLIC KEY-----";
 function peer(
@@ -180,7 +180,7 @@ test("dispose releases a cycle waiting for a nonresponsive status without forwar
     abort.signal,
   );
   abort.abort();
-  assert.deepEqual(await task, { peers: 0, changed: 0 });
+  assert.deepEqual(await task, { peers: 0, changed: 0, reached: [] });
 });
 
 function fuller(serverId: string, accounts: { identity: string; expiresAt: number | null }[], received: unknown[], extra: Record<string, unknown> = {}): RelayPeer {
@@ -295,13 +295,18 @@ const connection = (serverId: string) => ({ serverId, relayEndpoint: "relay.exam
 
 test("데몬 리더가 정상이고 같은 범위에 닿으면 창은 전달을 양보한다", async () => {
   const calls: string[] = [];
-  const leader = { role: "leader", activeAt: 1000, reachable: 2 };
+  const leader = { role: "leader", ageMs: 1000, reached: ["a", "b", "c"] };
   await relayCredentials([daemonPeer("a", leader, calls), daemonPeer("b", { role: "standby" }, calls)], 2000, undefined, { deferToDaemon: true });
   assert.ok(calls.every((call) => call.includes("status")));
 });
 
-test("리더가 오래됐거나 더 적은 호스트에만 닿으면 창이 전달을 계속한다", async () => {
-  for (const leader of [{ role: "leader", activeAt: 0, reachable: 2 }, { role: "leader", activeAt: 999_990, reachable: 1 }]) {
+test("리더가 오래됐거나 창이 닿는 호스트 중 하나라도 빠지면 창이 전달을 계속한다", async () => {
+  for (const leader of [
+    { role: "leader", ageMs: 10 * 60_000, reached: ["a", "b"] },
+    { role: "leader", ageMs: null, reached: ["a", "b"] },
+    // The same number of hosts, but not the same hosts.
+    { role: "leader", ageMs: 1000, reached: ["a", "x"] },
+  ]) {
     const calls: string[] = [];
     const other = { ...peer("b", 9_000_000, []) };
     await relayCredentials([daemonPeer("a", leader, calls), other], 1_000_000, undefined, { deferToDaemon: true });
@@ -319,11 +324,11 @@ test("창은 호스트 접속 정보를 플랫폼과 함께 한 번만 전달한
     return invoke(plugin, method, input);
   };
   const shared = new Map<string, string>();
-  const options = { connections: [connection("a"), connection("b")], shared, deferToDaemon: true };
-  await relayCredentials([target], 2000, undefined, options);
+  const options = { connections: { peers: [connection("a"), connection("b")], removed: ["gone"] }, shared, deferToDaemon: true };
   await relayCredentials([target], 2000, undefined, options);
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].peers.map((p: any) => p.serverId), ["a", "b"]);
+  assert.deepEqual(sent[0].removed, ["gone"]);
 });
 
 test("저장된 호스트에서 릴레이 접속 정보만 뽑고 형식이 다르면 빈 목록이다", () => {
@@ -334,4 +339,41 @@ test("저장된 호스트에서 릴레이 접속 정보만 뽑고 형식이 다�
   ]);
   assert.deepEqual(list, [{ serverId: "a", relayEndpoint: "r:443", useTls: true, daemonPublicKeyB64: "k", password: "synthetic" }]);
   assert.deepEqual(peerConnectionsOf("x"), []);
+});
+
+test("이미 받은 호스트에는 다시 보내지 않고 목록을 잃은 호스트에는 다시 보낸다", async () => {
+  const calls: string[] = [];
+  const shared = new Map<string, string>();
+  const options = { connections: { peers: [connection("a")], removed: [] }, shared };
+  await relayCredentials([daemonPeer("a", { capable: true }, calls)], 2000, undefined, options);
+  await relayCredentials([daemonPeer("a", { capable: true }, calls)], 2000, undefined, options);
+  assert.equal(calls.filter((call) => call.includes("peers")).length, 1);
+  await relayCredentials([daemonPeer("a", { capable: false }, calls)], 2000, undefined, options);
+  assert.equal(calls.filter((call) => call.includes("peers")).length, 2);
+});
+
+test("전달 결과에 실제로 응답한 호스트를 알려 준다", async () => {
+  const calls: string[] = [];
+  const dead: RelayPeer = { serverId: "z", client: { invokePluginRpc: async () => { throw new Error("offline"); } } };
+  const result = await relayCredentials([daemonPeer("a", {}, calls), dead], 2000);
+  assert.deepEqual(result.reached, ["a"]);
+});
+
+test("저장된 호스트의 TLS 값이 없으면 앱과 같은 기준을 쓰고 갱신 시각을 함께 넘긴다", () => {
+  const entry = (relayEndpoint: string, extra = {}) => ({ serverId: "a", updatedAt: "2026-11-07T00:00:00Z", connections: [{ type: "relay", relayEndpoint, daemonPublicKeyB64: "k", ...extra }] });
+  assert.equal(peerConnectionsOf([entry("relay.example.invalid:443")])[0].useTls, true);
+  assert.equal(peerConnectionsOf([entry("relay.example.invalid:8080")])[0].useTls, false);
+  assert.equal(peerConnectionsOf([entry("relay.example.invalid:8080", { useTls: true })])[0].useTls, true);
+  assert.equal(peerConnectionsOf([entry("r:443")])[0].updatedAt, "2026-11-07T00:00:00Z");
+});
+
+test("지운 호스트를 기억해 전달하고 다시 추가하면 잊는다", () => {
+  const memory = new Map<string, string>();
+  const storage = { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => void memory.set(key, value) };
+  assert.deepEqual(trackRemovedHosts(storage, ["a", "b"]), []);
+  assert.deepEqual(trackRemovedHosts(storage, ["a"]), ["b"]);
+  assert.deepEqual(trackRemovedHosts(storage, ["a"]), ["b"]);
+  assert.deepEqual(trackRemovedHosts(storage, ["a", "b"]), []);
+  memory.set("@paseo:settings-sync-relay-hosts", "{broken");
+  assert.deepEqual(trackRemovedHosts(storage, ["a"]), []);
 });

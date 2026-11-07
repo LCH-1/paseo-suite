@@ -21,7 +21,7 @@ interface Status {
   borrow?: boolean;
   platform?: string;
   declined?: string[];
-  daemonRelay?: { capable?: boolean; role?: string; activeAt?: number | null; reachable?: number };
+  daemonRelay?: { capable?: boolean; role?: string; ageMs?: number | null; reached?: string[] };
 }
 /** What a daemon needs to reach another host; the app already holds it for every saved host. */
 export interface PeerConnection {
@@ -31,6 +31,11 @@ export interface PeerConnection {
   daemonPublicKeyB64: string;
   password?: string;
   platform?: string;
+  updatedAt?: string;
+}
+export interface PeerList {
+  peers: PeerConnection[];
+  removed: string[];
 }
 export function peerConnectionsOf(registry: unknown): PeerConnection[] {
   if (!Array.isArray(registry)) return [];
@@ -41,12 +46,31 @@ export function peerConnectionsOf(registry: unknown): PeerConnection[] {
       {
         serverId: host.serverId,
         relayEndpoint: String(relay.relayEndpoint),
-        useTls: relay.useTls ?? true,
+        // Same fallback the app uses for entries saved before the field existed.
+        useTls: relay.useTls ?? String(relay.relayEndpoint).endsWith(":443"),
         daemonPublicKeyB64: String(relay.daemonPublicKeyB64),
         ...(typeof host.password === "string" && host.password ? { password: host.password } : {}),
+        ...(typeof host.updatedAt === "string" ? { updatedAt: host.updatedAt.slice(0, 40) } : {}),
       },
     ];
   });
+}
+const knownHostsKey = "@paseo:settings-sync-relay-hosts";
+/** Daemons only learn a host was deleted if a window says so; merging lists can never remove one. */
+export function trackRemovedHosts(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  current: readonly string[],
+): string[] {
+  let saved: { known?: unknown; removed?: unknown } = {};
+  try {
+    saved = JSON.parse(storage.getItem(knownHostsKey) ?? "{}") ?? {};
+  } catch {
+    /* Starts over: nothing is treated as removed. */
+  }
+  const list = (value: unknown) => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : []);
+  const removed = [...new Set([...list(saved.removed), ...list(saved.known)])].filter((id) => !current.includes(id)).slice(-64);
+  storage.setItem(knownHostsKey, JSON.stringify({ known: current, removed }));
+  return removed;
 }
 /** A running daemon relay does this work; a window only steps in where it can reach more hosts. */
 const daemonRelayFreshMs = 3 * 60_000;
@@ -91,12 +115,12 @@ export async function relayCredentials(
   signal?: AbortSignal,
   options: {
     rpcTimeoutMs?: number;
-    connections?: readonly PeerConnection[];
+    connections?: PeerList;
     shared?: Map<string, string>;
     deferToDaemon?: boolean;
   } = {},
 ) {
-  if (signal?.aborted) return { peers: 0, changed: 0 };
+  if (signal?.aborted) return { peers: 0, changed: 0, reached: [] as string[] };
   const timeout = options.rpcTimeoutMs ?? 15000;
   if (!Number.isFinite(timeout) || timeout <= 0) throw Error("Invalid Claude relay deadline");
   const invoke = (peer: RelayPeer, method: string, input: unknown) =>
@@ -141,15 +165,19 @@ export async function relayCredentials(
     }),
   );
   const ready = loaded.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
-  if (options.connections?.length) {
-    const connections = options.connections.map((connection) => {
+  const reached = ready.map((peer) => peer.serverId);
+  if (options.connections?.peers.length) {
+    const connections = options.connections.peers.map((connection) => {
       const platform = ready.find((peer) => peer.serverId === connection.serverId)?.status.platform;
       return platform ? { ...connection, platform } : connection;
     });
-    const revision = JSON.stringify(connections);
+    const { removed } = options.connections;
+    const revision = JSON.stringify({ connections, removed });
     for (const peer of ready) {
-      if (!peer.status.daemonRelay || peer.endpoint !== "sync" || options.shared?.get(peer.serverId) === revision) continue;
-      await invoke(peer, "aster.credentials.peers", { peers: connections }).then(
+      if (!peer.status.daemonRelay || peer.endpoint !== "sync") continue;
+      // A host that lost its list says so, and gets it again without a window reload.
+      if (peer.status.daemonRelay.capable && options.shared?.get(peer.serverId) === revision) continue;
+      await invoke(peer, "aster.credentials.peers", { peers: connections, removed }).then(
         () => options.shared?.set(peer.serverId, revision),
         () => {},
       );
@@ -159,10 +187,11 @@ export async function relayCredentials(
     options.deferToDaemon &&
     ready.some(({ status: { daemonRelay } }) =>
       daemonRelay?.role === "leader" &&
-      now - (daemonRelay.activeAt ?? 0) < daemonRelayFreshMs &&
-      (daemonRelay.reachable ?? 0) >= ready.length)
+      typeof daemonRelay.ageMs === "number" &&
+      daemonRelay.ageMs < daemonRelayFreshMs &&
+      reached.every((serverId) => daemonRelay.reached?.includes(serverId)))
   )
-    return { peers: ready.length, changed: 0 };
+    return { peers: ready.length, changed: 0, reached };
   let changed = 0;
   const usableAfter = now + usableMarginMs;
   const known = [...new Set(ready.flatMap((peer) => peer.status.accounts.map((a) => a.identity)))];
@@ -198,13 +227,13 @@ export async function relayCredentials(
             a.source.serverId.localeCompare(b.source.serverId),
         );
       for (const { source } of sources) {
-        if (signal?.aborted) return { peers: ready.length, changed };
+        if (signal?.aborted) return { peers: ready.length, changed, reached };
         try {
           const envelope = await invoke(source, "aster.credentials.export", {
             publicKey: target.status.publicKey,
             identities: [account.identity],
           });
-          if (signal?.aborted) return { peers: ready.length, changed };
+          if (signal?.aborted) return { peers: ready.length, changed, reached };
           const result = (await invoke(target, "aster.credentials.receive", envelope)) as {
             changed?: unknown;
           };
@@ -246,9 +275,9 @@ export async function relayCredentials(
       await invoke(peer, "aster.credentials.release", { identity, chain }).catch(() => {});
     }
   }
-  return { peers: ready.length, changed };
+  return { peers: ready.length, changed, reached };
 }
-export function startCredentialRelay(peers: () => RelayPeer[], connections?: () => PeerConnection[]) {
+export function startCredentialRelay(peers: () => RelayPeer[], connections?: () => PeerList) {
   const abort = new AbortController();
   const shared = new Map<string, string>();
   let pending: Promise<unknown> | null = null;
@@ -268,10 +297,10 @@ export function startCredentialRelay(peers: () => RelayPeer[], connections?: () 
           deferToDaemon: true,
         }),
       )
-      .then((result) => {
+      .then(({ peers, changed }) => {
         if (!abort.signal.aborted)
-          Object.assign(state, result, {
-            lastSuccessAt: result.peers > 0 ? Date.now() : state.lastSuccessAt,
+          Object.assign(state, { peers, changed }, {
+            lastSuccessAt: peers > 0 ? Date.now() : state.lastSuccessAt,
           });
       })
       .catch(() => {})
