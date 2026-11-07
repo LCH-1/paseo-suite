@@ -144,6 +144,7 @@ const offlineRetryMs = 5 * 60_000;
 const tickMs = 60_000;
 const firstTickMs = 20_000;
 const leaderFreshMs = 3 * 60_000;
+const receiveTimeoutMs = 60_000;
 
 /**
  * Standing by is only safe behind a daemon proven to be delivering to this host. Anything less,
@@ -303,7 +304,7 @@ export class DaemonRelay {
       }),
     );
     if (this.stopped) return;
-    const result = await (this.options.relay ?? relayCredentials)(ready, this.now);
+    const result = await (this.options.relay ?? relayCredentials)(ready, this.now, undefined, { receiveTimeoutMs });
     for (const [serverId, { client }] of this.clients) if (!client.isConnected) this.close(serverId);
     if (!result.peers) return this.idle();
     this.setRole("leader");

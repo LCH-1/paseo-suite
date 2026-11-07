@@ -115,6 +115,8 @@ export async function relayCredentials(
   signal?: AbortSignal,
   options: {
     rpcTimeoutMs?: number;
+    /** Saving a login takes well over ten seconds on Windows. */
+    receiveTimeoutMs?: number;
     connections?: PeerList;
     shared?: Map<string, string>;
     deferToDaemon?: boolean;
@@ -123,7 +125,7 @@ export async function relayCredentials(
   if (signal?.aborted) return { peers: 0, changed: 0, reached: [] as string[] };
   const timeout = options.rpcTimeoutMs ?? 15000;
   if (!Number.isFinite(timeout) || timeout <= 0) throw Error("Invalid Claude relay deadline");
-  const invoke = (peer: RelayPeer, method: string, input: unknown) =>
+  const invoke = (peer: RelayPeer, method: string, input: unknown, deadline = timeout) =>
     new Promise<unknown>((resolve, reject) => {
       let settled = false;
       const finish = (value: unknown, error = false) => {
@@ -137,7 +139,7 @@ export async function relayCredentials(
       const onAbort = () => finish(new Error("Claude relay disposed"), true);
       const timer = setTimeout(
         () => finish(new Error("Claude relay RPC timed out"), true),
-        timeout,
+        deadline,
       );
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
@@ -234,7 +236,7 @@ export async function relayCredentials(
             identities: [account.identity],
           });
           if (signal?.aborted) return { peers: ready.length, changed, reached };
-          const result = (await invoke(target, "aster.credentials.receive", envelope)) as {
+          const result = (await invoke(target, "aster.credentials.receive", envelope, options.receiveTimeoutMs)) as {
             changed?: unknown;
           };
           if (
