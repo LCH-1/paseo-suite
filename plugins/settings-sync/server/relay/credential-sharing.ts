@@ -16,6 +16,8 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { parseBundle } from "./credential-runtime.js";
 import { credentialStore } from "./credential-store";
+import { DaemonRelay, peerConnections, savePeers } from "./daemon-relay";
+import { connectPeer } from "./peer-connection";
 import type {
   CredentialEnvelope,
   CredentialShareStatus,
@@ -254,14 +256,22 @@ export function registerCredentialSharing(
   const renewTimer = setInterval(() => void renew(), 60_000);
   renewFirst.unref?.();
   renewTimer.unref?.();
+  // Delivery must not depend on an open app window, only on a daemon being alive.
+  const daemonRelay = new DaemonRelay({ home, enabled, connect: connectPeer });
+  daemonRelay.start();
   const registrations: unknown[] = [
     server.handle(rpc("aster.credentials.status", z.object({})), async (_, { paseo }) =>
       serial(async () => {
         renewApi = paseo;
-        return (
-        share.status(await store.read((await paseo.config.get()).config.providers ?? {}))
-        );
+        return {
+          ...share.status(await store.read((await paseo.config.get()).config.providers ?? {})),
+          daemonRelay: await daemonRelay.snapshot(),
+        };
       }),
+    ),
+    server.handle(
+      rpc("aster.credentials.peers", z.object({ peers: peerConnections }).strict()),
+      async (input) => serial(async () => ({ peers: await savePeers(home, input.peers) })),
     ),
     server.handle(
       rpc(
@@ -386,6 +396,7 @@ export function registerCredentialSharing(
   return [
     () => {
       active = false;
+      daemonRelay.dispose();
       clearTimeout(renewFirst);
       clearInterval(renewTimer);
     },

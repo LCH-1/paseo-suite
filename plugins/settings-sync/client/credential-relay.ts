@@ -21,7 +21,35 @@ interface Status {
   borrow?: boolean;
   platform?: string;
   declined?: string[];
+  daemonRelay?: { capable?: boolean; role?: string; activeAt?: number | null; reachable?: number };
 }
+/** What a daemon needs to reach another host; the app already holds it for every saved host. */
+export interface PeerConnection {
+  serverId: string;
+  relayEndpoint: string;
+  useTls: boolean;
+  daemonPublicKeyB64: string;
+  password?: string;
+  platform?: string;
+}
+export function peerConnectionsOf(registry: unknown): PeerConnection[] {
+  if (!Array.isArray(registry)) return [];
+  return registry.flatMap((host: any) => {
+    const relay = Array.isArray(host?.connections) ? host.connections.find((c: any) => c?.type === "relay") : null;
+    if (typeof host?.serverId !== "string" || !relay?.relayEndpoint || !relay.daemonPublicKeyB64) return [];
+    return [
+      {
+        serverId: host.serverId,
+        relayEndpoint: String(relay.relayEndpoint),
+        useTls: relay.useTls ?? true,
+        daemonPublicKeyB64: String(relay.daemonPublicKeyB64),
+        ...(typeof host.password === "string" && host.password ? { password: host.password } : {}),
+      },
+    ];
+  });
+}
+/** A running daemon relay does this work; a window only steps in where it can reach more hosts. */
+const daemonRelayFreshMs = 3 * 60_000;
 /** Keep a host's own login until it is this close to expiring; only then look elsewhere. */
 const usableMarginMs = 10 * 60_000;
 function status(value: unknown): Status {
@@ -61,7 +89,12 @@ export async function relayCredentials(
   peers: readonly RelayPeer[],
   now = Date.now(),
   signal?: AbortSignal,
-  options: { rpcTimeoutMs?: number } = {},
+  options: {
+    rpcTimeoutMs?: number;
+    connections?: readonly PeerConnection[];
+    shared?: Map<string, string>;
+    deferToDaemon?: boolean;
+  } = {},
 ) {
   if (signal?.aborted) return { peers: 0, changed: 0 };
   const timeout = options.rpcTimeoutMs ?? 15000;
@@ -108,6 +141,28 @@ export async function relayCredentials(
     }),
   );
   const ready = loaded.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  if (options.connections?.length) {
+    const connections = options.connections.map((connection) => {
+      const platform = ready.find((peer) => peer.serverId === connection.serverId)?.status.platform;
+      return platform ? { ...connection, platform } : connection;
+    });
+    const revision = JSON.stringify(connections);
+    for (const peer of ready) {
+      if (!peer.status.daemonRelay || peer.endpoint !== "sync" || options.shared?.get(peer.serverId) === revision) continue;
+      await invoke(peer, "aster.credentials.peers", { peers: connections }).then(
+        () => options.shared?.set(peer.serverId, revision),
+        () => {},
+      );
+    }
+  }
+  if (
+    options.deferToDaemon &&
+    ready.some(({ status: { daemonRelay } }) =>
+      daemonRelay?.role === "leader" &&
+      now - (daemonRelay.activeAt ?? 0) < daemonRelayFreshMs &&
+      (daemonRelay.reachable ?? 0) >= ready.length)
+  )
+    return { peers: ready.length, changed: 0 };
   let changed = 0;
   const usableAfter = now + usableMarginMs;
   const known = [...new Set(ready.flatMap((peer) => peer.status.accounts.map((a) => a.identity)))];
@@ -193,8 +248,9 @@ export async function relayCredentials(
   }
   return { peers: ready.length, changed };
 }
-export function startCredentialRelay(peers: () => RelayPeer[]) {
+export function startCredentialRelay(peers: () => RelayPeer[], connections?: () => PeerConnection[]) {
   const abort = new AbortController();
+  const shared = new Map<string, string>();
   let pending: Promise<unknown> | null = null;
   const state: { lastSuccessAt: number | null; peers: number; changed: number } = {
     lastSuccessAt: null,
@@ -205,7 +261,13 @@ export function startCredentialRelay(peers: () => RelayPeer[]) {
     if (abort.signal.aborted) return Promise.resolve();
     if (pending) return pending;
     pending = Promise.resolve()
-      .then(() => relayCredentials(peers(), Date.now(), abort.signal))
+      .then(() =>
+        relayCredentials(peers(), Date.now(), abort.signal, {
+          connections: connections?.(),
+          shared,
+          deferToDaemon: true,
+        }),
+      )
       .then((result) => {
         if (!abort.signal.aborted)
           Object.assign(state, result, {

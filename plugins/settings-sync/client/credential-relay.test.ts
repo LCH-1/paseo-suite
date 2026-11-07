@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { relayCredentials, startCredentialRelay, type RelayPeer } from "./credential-relay";
+import { peerConnectionsOf, relayCredentials, startCredentialRelay, type RelayPeer } from "./credential-relay";
 const id = "a".repeat(64),
   key = "-----BEGIN PUBLIC KEY-----\nfixture\n-----END PUBLIC KEY-----";
 function peer(
@@ -274,4 +274,64 @@ test("a refresh token held by two hosts stays on one, preferring a Linux host", 
     ["c-linux", { identity: id, chain: "c1" }],
     ["a-windows", { identity: id, chain: "c1" }],
   ]);
+});
+
+const relayStatus = (daemonRelay: object) => ({ version: 1, publicKey: key, accounts: [{ identity: id, expiresAt: 1, revision: null }], daemonRelay });
+function daemonPeer(serverId: string, daemonRelay: object, calls: string[]): RelayPeer {
+  return {
+    serverId,
+    endpoint: "sync",
+    client: {
+      async invokePluginRpc(_, method, input) {
+        calls.push(method + ":" + serverId);
+        if (method.includes("status")) return relayStatus(daemonRelay);
+        if (method.includes("peers")) return { peers: (input as any).peers.length };
+        throw new Error("no credentials here");
+      },
+    },
+  };
+}
+const connection = (serverId: string) => ({ serverId, relayEndpoint: "relay.example.invalid:443", useTls: true, daemonPublicKeyB64: "synthetic" });
+
+test("데몬 리더가 정상이고 같은 범위에 닿으면 창은 전달을 양보한다", async () => {
+  const calls: string[] = [];
+  const leader = { role: "leader", activeAt: 1000, reachable: 2 };
+  await relayCredentials([daemonPeer("a", leader, calls), daemonPeer("b", { role: "standby" }, calls)], 2000, undefined, { deferToDaemon: true });
+  assert.ok(calls.every((call) => call.includes("status")));
+});
+
+test("리더가 오래됐거나 더 적은 호스트에만 닿으면 창이 전달을 계속한다", async () => {
+  for (const leader of [{ role: "leader", activeAt: 0, reachable: 2 }, { role: "leader", activeAt: 999_990, reachable: 1 }]) {
+    const calls: string[] = [];
+    const other = { ...peer("b", 9_000_000, []) };
+    await relayCredentials([daemonPeer("a", leader, calls), other], 1_000_000, undefined, { deferToDaemon: true });
+    assert.ok(calls.some((call) => call.includes("receive")));
+  }
+});
+
+test("창은 호스트 접속 정보를 플랫폼과 함께 한 번만 전달한다", async () => {
+  const calls: string[] = [];
+  const sent: any[] = [];
+  const target = daemonPeer("a", { role: "idle" }, calls);
+  const invoke = target.client.invokePluginRpc;
+  target.client.invokePluginRpc = async (plugin, method, input) => {
+    if (method.includes("peers")) sent.push(input);
+    return invoke(plugin, method, input);
+  };
+  const shared = new Map<string, string>();
+  const options = { connections: [connection("a"), connection("b")], shared, deferToDaemon: true };
+  await relayCredentials([target], 2000, undefined, options);
+  await relayCredentials([target], 2000, undefined, options);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].peers.map((p: any) => p.serverId), ["a", "b"]);
+});
+
+test("저장된 호스트에서 릴레이 접속 정보만 뽑고 형식이 다르면 빈 목록이다", () => {
+  const list = peerConnectionsOf([
+    { serverId: "a", password: "synthetic", connections: [{ type: "directTcp" }, { type: "relay", relayEndpoint: "r:443", daemonPublicKeyB64: "k" }] },
+    { serverId: "b", connections: [{ type: "directTcp" }] },
+    { nope: true },
+  ]);
+  assert.deepEqual(list, [{ serverId: "a", relayEndpoint: "r:443", useTls: true, daemonPublicKeyB64: "k", password: "synthetic" }]);
+  assert.deepEqual(peerConnectionsOf("x"), []);
 });
