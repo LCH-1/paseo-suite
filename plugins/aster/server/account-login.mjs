@@ -33,11 +33,18 @@ if (options.base === "codex") {
     ...(options.email ? ["--email", options.email] : []),
   ];
 }
-const child = spawn(command, args, {
-  stdio: "inherit",
-  env,
-  windowsHide: true,
-});
+// npm installs a .cmd shim on Windows, which Node refuses to start without a shell.
+const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+const quote = (value) => `"${String(value).replace(/"/g, '""')}"`;
+let child;
+let startError = null;
+try {
+  child = needsShell
+    ? spawn([quote(command), ...args.map(quote)].join(" "), { stdio: "inherit", env, windowsHide: true, shell: true })
+    : spawn(command, args, { stdio: "inherit", env, windowsHide: true });
+} catch (error) {
+  startError = error;
+}
 let finished = false;
 async function finish(code) {
   if (finished) return;
@@ -54,10 +61,14 @@ async function finish(code) {
   );
   process.exitCode = code ?? 1;
 }
-child.on("error", () => {
+if (startError) {
+  console.error("공식 CLI를 실행하지 못했습니다. 설치 경로를 확인하세요.", startError.code ?? "");
+  void finish(1);
+}
+child?.on("error", () => {
   console.error("공식 CLI를 실행하지 못했습니다. 설치 경로를 확인하세요.");
   void finish(1);
 });
-child.on("exit", (code) => {
+child?.on("exit", (code) => {
   void finish(code);
 });
