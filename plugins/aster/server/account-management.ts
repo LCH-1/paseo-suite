@@ -225,6 +225,8 @@ export function registerAccountManagement(
   async function finish(paseo: PaseoApi) {
     for (const flow of await flows()) {
       lifetime.signal.throwIfAborted();
+      // One bad attempt must not take the whole account screen down with it.
+      try {
       if (flow.status !== "pending") {
         if ((flow.expiresAt ?? 0) <= Date.now()) await removeFlow(flow.id);
         continue;
@@ -348,6 +350,14 @@ export function registerAccountManagement(
         "등록 완료 · 구독과 한도에 따라 자동 분배",
         successNoticeMs,
       );
+      } catch (error) {
+        lifetime.signal.throwIfAborted();
+        console.warn(
+          "[aster] 로그인 결과를 확인하지 못했습니다.",
+          error instanceof Error ? error.message : String(error),
+        );
+        await closeFlow(flow, "로그인 결과를 확인하지 못했습니다 · 다시 시도하세요", failureNoticeMs);
+      }
     }
   }
   async function pluginPath() {
