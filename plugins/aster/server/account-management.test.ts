@@ -149,6 +149,7 @@ test("두 공식 로그인 흐름은 기존 계정·대화 폴더를 유지하�
 });
 
 async function reloginFixture() {
+  const killed: string[] = [];
   const root = await realpath(await mkdtemp(join(tmpdir(), "aster-relogin-")));
   const handlers = new Map<string, any>(),
     terminals: any[] = [],
@@ -202,8 +203,9 @@ async function reloginFixture() {
     terminals: {
       create: async (input: any) => {
         terminals.push(input);
-        return { id: "terminal" };
+        return { id: `terminal-${terminals.length}` };
       },
+      ref: (id: string) => ({ kill: async () => void killed.push(id) }),
     },
   };
   const dispose = registerAccountManagement(
@@ -248,6 +250,7 @@ async function reloginFixture() {
     paseo,
     profile,
     terminals,
+    killed,
     refreshed,
     registry,
     call,
@@ -538,6 +541,31 @@ test("계정 정보 없이 끝난 로그인은 실패로 표시되고 화면 전
     const state = await f.call(accountsRpc.status);
     assert.ok(state.accounts.length > 0);
     assert.match(state.flows.at(-1).status, /확인하지 못했습니다/);
+  } finally {
+    await f.cleanup?.();
+  }
+});
+
+test("다시 누르면 이전 로그인 터미널을 닫는다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    assert.deepEqual(f.killed, ["terminal-1"]);
+  } finally {
+    await f.cleanup?.();
+  }
+});
+
+test("한 시간이 지나 내려간 로그인은 터미널도 닫아 늦은 성공이 유실되지 않게 한다", async () => {
+  const f = await reloginFixture();
+  try {
+    await f.call(accountsRpc.relogin, { accountId: "profile" });
+    const done: string = JSON.parse(f.terminals.at(-1).args[1]).done;
+    const past = new Date(Date.now() - 2 * 60 * 60_000);
+    await utimes(done.replace(/\.done$/, ".json"), past, past);
+    await f.call(accountsRpc.status);
+    assert.deepEqual(f.killed, ["terminal-1"]);
   } finally {
     await f.cleanup?.();
   }

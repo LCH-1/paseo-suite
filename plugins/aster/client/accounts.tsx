@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   useRpc,
   type PluginClientContext,
+  type PluginSettingsScreenContribution,
   type PluginSurfaceProps,
 } from "@getpaseo/plugin/client";
 import {
@@ -134,10 +135,12 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
 }
 
 export function contributeAccounts(client: PluginClientContext) {
-  return client.addSettingsScreen({
+  const screen: PluginSettingsScreenContribution & { showInSettingsSidebar: boolean } = {
     id: "accounts",
     title: "AI 계정 자동 분배",
     icon: "Users",
+    showInSettingsSidebar: true,
     Component: (props) => <Accounts key={props.host.id} {...props} />,
-  });
+  };
+  return client.addSettingsScreen(screen);
 }

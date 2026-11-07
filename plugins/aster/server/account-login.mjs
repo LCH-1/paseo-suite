@@ -33,6 +33,15 @@ if (options.base === "codex") {
     ...(options.email ? ["--email", options.email] : []),
   ];
 }
+if (options.base !== "codex")
+  console.log(
+    [
+      "브라우저에서 로그인을 끝내면 이 창은 자동으로 완료됩니다.",
+      "브라우저가 코드를 보여주면 아래에 붙여넣고(Ctrl+V) Enter를 누르세요.",
+      "붙여넣은 코드는 화면에 표시되지 않습니다. 꼭 이 창에 나온 주소로 받은 코드를 쓰세요.",
+      "",
+    ].join("\n"),
+  );
 // npm installs a .cmd shim on Windows, which Node refuses to start without a shell.
 const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
 const quote = (value) => `"${String(value).replace(/"/g, '""')}"`;

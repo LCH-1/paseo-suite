@@ -147,10 +147,25 @@ export function registerAccountManagement(
     await rm(join(flowsDirectory, `${id}.done`), { force: true });
     await rm(flowFile(id), { force: true });
   }
+  /** A login left open keeps its own one-time code, so old terminals only cause wrong-code errors. */
+  async function closeLoginTerminal(paseo: PaseoApi, flow: Flow) {
+    if (!flow.terminalId) return;
+    try {
+      await paseo.terminals.ref(flow.terminalId).kill();
+    } catch (error) {
+      console.warn(
+        "[aster] 이전 로그인 터미널을 닫지 못했습니다.",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
   /** Pressing the button again replaces the waiting attempt instead of stacking another. */
-  async function supersede(matches: (flow: Flow) => boolean) {
+  async function supersede(paseo: PaseoApi, matches: (flow: Flow) => boolean) {
     for (const flow of await flows())
-      if (flow.status === "pending" && matches(flow)) await removeFlow(flow.id);
+      if (flow.status === "pending" && matches(flow)) {
+        await closeLoginTerminal(paseo, flow);
+        await removeFlow(flow.id);
+      }
   }
   async function registeredClaudeAccounts() {
     const registry = registeredAccountsSchema.parse(
@@ -160,7 +175,7 @@ export function registerAccountManagement(
     );
     return registry.accounts.filter((account) => account.base === "claude");
   }
-  async function finishRelogin(flow: Flow) {
+  async function finishRelogin(paseo: PaseoApi, flow: Flow) {
     const profile = z
       .object({ oauthAccount: z.object({ emailAddress: z.string() }) })
       .safeParse(
@@ -171,7 +186,13 @@ export function registerAccountManagement(
       : null;
     const matches =
       !flow.email || email?.toLowerCase() === flow.email.toLowerCase();
-    if (matches) options.onRelogin?.();
+    if (matches) {
+      options.onRelogin?.();
+      await supersede(
+        paseo,
+        (other) => other.id !== flow.id && other.accountId === flow.accountId,
+      );
+    }
     await closeFlow(
       flow,
       matches
@@ -227,6 +248,8 @@ export function registerAccountManagement(
       lifetime.signal.throwIfAborted();
       // One bad attempt must not take the whole account screen down with it.
       try {
+      // An earlier flow in this pass may have replaced this one.
+      if (!existsSync(flowFile(flow.id))) continue;
       if (flow.status !== "pending") {
         if ((flow.expiresAt ?? 0) <= Date.now()) await removeFlow(flow.id);
         continue;
@@ -236,12 +259,15 @@ export function registerAccountManagement(
         .nullable()
         .parse(await json(join(flowsDirectory, `${flow.id}.done`), null));
       if (!result) {
-        if (Date.now() - (await lstat(flowFile(flow.id))).mtimeMs >= pendingLimitMs)
+        if (Date.now() - (await lstat(flowFile(flow.id))).mtimeMs >= pendingLimitMs) {
+          // Close it too: a login finished after this point would never be picked up.
+          await closeLoginTerminal(paseo, flow);
           await closeFlow(
             flow,
             "로그인이 완료되지 않았습니다 · 필요하면 다시 시도하세요",
             failureNoticeMs,
           );
+        }
         continue;
       }
       if (!result.success) {
@@ -255,7 +281,7 @@ export function registerAccountManagement(
         continue;
       }
       if (flow.accountId) {
-        await finishRelogin(flow);
+        await finishRelogin(paseo, flow);
         continue;
       }
       let email: string | null = null,
@@ -378,7 +404,7 @@ export function registerAccountManagement(
     serialize(async () => {
       api = paseo;
       const workspace = await loginWorkspace(paseo);
-      await supersede((flow) => flow.base === input.base && !flow.accountId);
+      await supersede(paseo, (flow) => flow.base === input.base && !flow.accountId);
       const { config } = await paseo.config.get(),
         providers = providersSchema.parse(config.providers ?? {});
       const id = randomUUID(),
@@ -432,7 +458,7 @@ export function registerAccountManagement(
     serialize(async () => {
       api = paseo;
       const workspace = await loginWorkspace(paseo);
-      await supersede((flow) => flow.accountId === input.accountId);
+      await supersede(paseo, (flow) => flow.accountId === input.accountId);
       // The folder comes from the registry so the client can only name a known account.
       const account = (await registeredClaudeAccounts()).find(
         (entry) => entry.id === input.accountId,
