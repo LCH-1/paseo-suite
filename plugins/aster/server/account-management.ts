@@ -128,13 +128,23 @@ export function registerAccountManagement(
         throw error;
       },
     );
-    return Promise.all(
+    const loaded = await Promise.all(
       names
         .filter((name) => /^[\da-f-]{36}\.json$/.test(name))
-        .map(async (name) =>
-          flowSchema.parse(await json(join(flowsDirectory, name), null)),
-        ),
+        .map(async (name) => {
+          // One damaged file must not take the account screen and the login buttons with it.
+          const flow = flowSchema.safeParse(
+            await json(join(flowsDirectory, name), null).catch(() => null),
+          );
+          if (!flow.success)
+            console.warn(
+              "[aster] 읽을 수 없는 로그인 항목을 건너뜁니다.",
+              name,
+            );
+          return flow.success ? [flow.data] : [];
+        }),
     );
+    return loaded.flat();
   }
   function closeFlow(flow: Flow, status: string, noticeMs: number) {
     return writeJson(flowFile(flow.id), {
@@ -248,141 +258,157 @@ export function registerAccountManagement(
       lifetime.signal.throwIfAborted();
       // One bad attempt must not take the whole account screen down with it.
       try {
-      // An earlier flow in this pass may have replaced this one.
-      if (!existsSync(flowFile(flow.id))) continue;
-      if (flow.status !== "pending") {
-        if ((flow.expiresAt ?? 0) <= Date.now()) await removeFlow(flow.id);
-        continue;
-      }
-      const result = z
-        .object({ success: z.boolean() })
-        .nullable()
-        .parse(await json(join(flowsDirectory, `${flow.id}.done`), null));
-      if (!result) {
-        if (Date.now() - (await lstat(flowFile(flow.id))).mtimeMs >= pendingLimitMs) {
-          // Close it too: a login finished after this point would never be picked up.
-          await closeLoginTerminal(paseo, flow);
+        // An earlier flow in this pass may have replaced this one.
+        if (!existsSync(flowFile(flow.id))) continue;
+        if (flow.status !== "pending") {
+          if ((flow.expiresAt ?? 0) <= Date.now()) await removeFlow(flow.id);
+          continue;
+        }
+        const result = z
+          .object({ success: z.boolean() })
+          .nullable()
+          .parse(await json(join(flowsDirectory, `${flow.id}.done`), null));
+        if (!result) {
+          if (
+            Date.now() - (await lstat(flowFile(flow.id))).mtimeMs >=
+            pendingLimitMs
+          ) {
+            // Close it too: a login finished after this point would never be picked up.
+            await closeLoginTerminal(paseo, flow);
+            await closeFlow(
+              flow,
+              "로그인이 완료되지 않았습니다 · 필요하면 다시 시도하세요",
+              failureNoticeMs,
+            );
+          }
+          continue;
+        }
+        if (!result.success) {
           await closeFlow(
             flow,
-            "로그인이 완료되지 않았습니다 · 필요하면 다시 시도하세요",
+            flow.accountId
+              ? "재로그인 실패 · 다시 시도하세요"
+              : "로그인 실패 · 다시 추가하세요",
             failureNoticeMs,
           );
+          continue;
         }
-        continue;
-      }
-      if (!result.success) {
+        if (flow.accountId) {
+          await finishRelogin(paseo, flow);
+          continue;
+        }
+        let email: string | null = null,
+          identity: string;
+        if (flow.base === "codex")
+          identity = (await codexTokens(flow.home)).chatgptAccountId;
+        else {
+          const profile = z
+            .object({
+              oauthAccount: z.object({
+                emailAddress: z.string(),
+                accountUuid: z.string(),
+                organizationUuid: z.string(),
+              }),
+            })
+            .parse(await json(join(flow.home, ".claude.json"), null));
+          email = profile.oauthAccount.emailAddress;
+          identity = `${profile.oauthAccount.organizationUuid}|${profile.oauthAccount.accountUuid}`;
+        }
+        const directory = join(paseoHome, "paseo-accounts"),
+          file = join(directory, "accounts.json");
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const schema = z
+          .object({
+            accounts: z.array(
+              z
+                .object({
+                  id: z.string(),
+                  base: z.string(),
+                  identity: z.string().nullable().optional(),
+                })
+                .passthrough(),
+            ),
+          })
+          .passthrough();
+        const before = await readFile(file, "utf8").catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return '{"version":1,"accounts":[]}';
+            throw error;
+          },
+        );
+        const registry = schema.parse(JSON.parse(before));
+        const existing = registry.accounts.find(
+          (account) =>
+            account.base === flow.base && account.identity === identity,
+        );
+        const id = existing?.id ?? `${flow.base}-${flow.id.slice(0, 12)}`;
+        const env =
+          flow.base === "codex"
+            ? { CODEX_HOME: flow.home }
+            : {
+                CLAUDE_CONFIG_DIR: flow.home,
+                CLAUDE_SECURESTORAGE_CONFIG_DIR: flow.home,
+                ...(process.platform === "win32"
+                  ? { CLAUDE_CODE_FORCE_WINDOWS_CREDMAN: "1" }
+                  : {}),
+              };
+        lifetime.signal.throwIfAborted();
+        await paseo.config.patch({
+          providers: {
+            [id]: {
+              ...(id !== flow.base
+                ? { extends: flow.base, label: `${flow.base} · ${email ?? id}` }
+                : {}),
+              enabled: true,
+              selectable: id === flow.base,
+              env,
+            },
+          },
+        });
+        // Read once more after the config RPC; preserve registry updates from other account writers.
+        const current = schema.parse(await json(file, registry));
+        lifetime.signal.throwIfAborted();
+        const account = {
+          ...current.accounts.find((entry) => entry.id === id),
+          id,
+          base: flow.base,
+          home: flow.home,
+          email,
+          identity,
+          signedIn: true,
+        };
+        await writeJson(file, {
+          ...current,
+          accounts: [
+            ...current.accounts.filter((entry) => entry.id !== id),
+            account,
+          ],
+        });
         await closeFlow(
           flow,
-          flow.accountId
-            ? "재로그인 실패 · 다시 시도하세요"
-            : "로그인 실패 · 다시 추가하세요",
-          failureNoticeMs,
+          "등록 완료 · 구독과 한도에 따라 자동 분배",
+          successNoticeMs,
         );
-        continue;
-      }
-      if (flow.accountId) {
-        await finishRelogin(paseo, flow);
-        continue;
-      }
-      let email: string | null = null,
-        identity: string;
-      if (flow.base === "codex")
-        identity = (await codexTokens(flow.home)).chatgptAccountId;
-      else {
-        const profile = z
-          .object({
-            oauthAccount: z.object({
-              emailAddress: z.string(),
-              accountUuid: z.string(),
-              organizationUuid: z.string(),
-            }),
-          })
-          .parse(await json(join(flow.home, ".claude.json"), null));
-        email = profile.oauthAccount.emailAddress;
-        identity = `${profile.oauthAccount.organizationUuid}|${profile.oauthAccount.accountUuid}`;
-      }
-      const directory = join(paseoHome, "paseo-accounts"),
-        file = join(directory, "accounts.json");
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      const schema = z
-        .object({
-          accounts: z.array(
-            z
-              .object({
-                id: z.string(),
-                base: z.string(),
-                identity: z.string().nullable().optional(),
-              })
-              .passthrough(),
-          ),
-        })
-        .passthrough();
-      const before = await readFile(file, "utf8").catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return '{"version":1,"accounts":[]}';
-          throw error;
-        },
-      );
-      const registry = schema.parse(JSON.parse(before));
-      const existing = registry.accounts.find(
-        (account) =>
-          account.base === flow.base && account.identity === identity,
-      );
-      const id = existing?.id ?? `${flow.base}-${flow.id.slice(0, 12)}`;
-      const env =
-        flow.base === "codex"
-          ? { CODEX_HOME: flow.home }
-          : {
-              CLAUDE_CONFIG_DIR: flow.home,
-              CLAUDE_SECURESTORAGE_CONFIG_DIR: flow.home,
-              ...(process.platform === "win32"
-                ? { CLAUDE_CODE_FORCE_WINDOWS_CREDMAN: "1" }
-                : {}),
-            };
-      lifetime.signal.throwIfAborted();
-      await paseo.config.patch({
-        providers: {
-          [id]: {
-            ...(id !== flow.base
-              ? { extends: flow.base, label: `${flow.base} · ${email ?? id}` }
-              : {}),
-            enabled: true,
-            selectable: id === flow.base,
-            env,
-          },
-        },
-      });
-      // Read once more after the config RPC; preserve registry updates from other account writers.
-      const current = schema.parse(await json(file, registry));
-      lifetime.signal.throwIfAborted();
-      const account = {
-        ...current.accounts.find((entry) => entry.id === id),
-        id,
-        base: flow.base,
-        home: flow.home,
-        email,
-        identity,
-        signedIn: true,
-      };
-      await writeJson(file, {
-        ...current,
-        accounts: [
-          ...current.accounts.filter((entry) => entry.id !== id),
-          account,
-        ],
-      });
-      await closeFlow(
-        flow,
-        "등록 완료 · 구독과 한도에 따라 자동 분배",
-        successNoticeMs,
-      );
       } catch (error) {
         lifetime.signal.throwIfAborted();
         console.warn(
           "[aster] 로그인 결과를 확인하지 못했습니다.",
           error instanceof Error ? error.message : String(error),
         );
-        await closeFlow(flow, "로그인 결과를 확인하지 못했습니다 · 다시 시도하세요", failureNoticeMs);
+        // A dropped connection or busy file clears up by itself, and the login did succeed.
+        const started = await lstat(flowFile(flow.id)).then(
+          (entry) => entry.mtimeMs,
+          () => 0,
+        );
+        if (
+          error instanceof z.ZodError ||
+          Date.now() - started >= pendingLimitMs
+        )
+          await closeFlow(
+            flow,
+            "로그인 결과를 확인하지 못했습니다 · 다시 시도하세요",
+            failureNoticeMs,
+          );
       }
     }
   }
@@ -404,9 +430,19 @@ export function registerAccountManagement(
     serialize(async () => {
       api = paseo;
       const workspace = await loginWorkspace(paseo);
-      await supersede(paseo, (flow) => flow.base === input.base && !flow.accountId);
       const { config } = await paseo.config.get(),
         providers = providersSchema.parse(config.providers ?? {});
+      const command =
+        input.base === "codex"
+          ? codexOriginalCommand(providers.codex?.command)
+          : await loginCommand(paseo);
+      const launcher = await loginLauncher();
+      // A login that just finished is picked up first, and the old terminal stays until a new one can start.
+      await finish(paseo);
+      await supersede(
+        paseo,
+        (flow) => flow.base === input.base && !flow.accountId,
+      );
       const id = randomUUID(),
         home = join(
           paseoHome,
@@ -425,11 +461,6 @@ export function registerAccountManagement(
           process.platform === "win32" ? "junction" : "dir",
         );
       }
-      const command =
-        input.base === "codex"
-          ? codexOriginalCommand(providers.codex?.command)
-          : await loginCommand(paseo);
-      const launcher = await loginLauncher();
       const flow: Flow = {
         id,
         base: input.base,
@@ -458,7 +489,6 @@ export function registerAccountManagement(
     serialize(async () => {
       api = paseo;
       const workspace = await loginWorkspace(paseo);
-      await supersede(paseo, (flow) => flow.accountId === input.accountId);
       // The folder comes from the registry so the client can only name a known account.
       const account = (await registeredClaudeAccounts()).find(
         (entry) => entry.id === input.accountId,
@@ -467,6 +497,8 @@ export function registerAccountManagement(
       const home = account.home ?? join(userHome, ".claude");
       const command = await loginCommand(paseo);
       const launcher = await loginLauncher();
+      await finish(paseo);
+      await supersede(paseo, (flow) => flow.accountId === input.accountId);
       await mkdir(flowsDirectory, { recursive: true, mode: 0o700 });
       const id = randomUUID();
       const flow: Flow = {
