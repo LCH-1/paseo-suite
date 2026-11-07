@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DaemonRelay, leadsFor, mergePeers, ownerOnlyArguments, rankPeers, readPeers, savePeers, type PeerClient, type PeerConnection } from "./daemon-relay";
+import { DaemonRelay, leadsFor, mergePeers, rankPeers, readPeers, savePeers, type PeerClient, type PeerConnection } from "./daemon-relay";
+import { ownerOnlyArguments } from "./secure-file";
 
 const peer = (serverId: string, platform?: string, updatedAt?: string): PeerConnection => ({
   serverId,
@@ -48,6 +49,7 @@ function relay(root: string, connect: (target: PeerConnection, selfId: string) =
     enabled: async () => true,
     connect,
     log: (message) => logs.push(message),
+    syncVaults: (async () => ({ moved: 0, renewed: 0 })) as never,
     relay: (async (peers: { serverId: string }[]) => {
       delivered.push(peers.map((entry) => entry.serverId).sort());
       return { peers: peers.length, changed: 1, reached: peers.map((entry) => entry.serverId) };
@@ -273,4 +275,18 @@ test("같은 시각의 중복 실행은 하나로 합친다", async () => {
   const r = relay(root, f.connect);
   await Promise.all([r.instance.tick(), r.instance.tick()]);
   assert.equal(r.delivered.length, 1);
+});
+
+test("폴더 권한은 안쪽 파일까지 상속되게 건다", () => {
+  assert.deepEqual(ownerOnlyArguments("C:\\d", "S-1-5-21-1", true).slice(3), ["*S-1-5-21-1:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"]);
+});
+
+test("토큰 복제가 실패해도 액세스 토큰 전달은 계속한다", async () => {
+  const root = await home("a", [peer("a", "linux")]);
+  const f = fleet({ a: {} });
+  const r = relay(root, f.connect, { syncVaults: async () => { throw new Error("vault down"); } });
+  await r.instance.tick();
+  assert.equal(r.delivered.length, 1);
+  assert.ok(r.logs.some((line) => line.includes("토큰 복제 확인 실패")));
+  assert.ok(!r.logs.join().includes("vault down"));
 });
