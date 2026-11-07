@@ -1,4 +1,4 @@
-import { startCredentialRelay } from "./credential-relay";
+import { peerConnectionsOf, startCredentialRelay } from "./credential-relay";
 
 interface RelayLease { owners: Set<symbol>; dispose(): void; }
 export function contributeRelay() {
@@ -41,7 +41,11 @@ export function contributeRelay() {
       relay = startCredentialRelay(() => Object.entries(sessions.getState().sessions)
         .flatMap(([serverId, session]: [string, any]) => session.client && registry.getSnapshot()
           .some((plugin: any) => plugin.serverId === serverId && ["aster", "settings-sync"].includes(plugin.id) && !plugin.lifetime.signal.aborted)
-          ? [{ serverId, client: session.client }] : []));
+          ? [{ serverId, client: session.client }] : []),
+        () => {
+          try { return peerConnectionsOf(JSON.parse(localStorage.getItem("@paseo:daemon-registry") ?? "[]")); }
+          catch { return []; }
+        });
     })().catch((error) => {
       if (!request.signal.aborted) console.error("[settings-sync] 인증 전달을 시작하지 못했습니다.", error);
     });
