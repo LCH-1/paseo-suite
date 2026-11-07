@@ -498,3 +498,33 @@ test("조치가 필요한 안내는 성공 안내보다 오래 남고 진행 중
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test("Windows의 .cmd CLI도 실행하고 시작 실패는 완료 기록으로 남긴다", { skip: process.platform !== "win32" }, async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "aster-login-cmd-")));
+  try {
+    const script = join(root, "fake cli.cmd"), captured = join(root, "captured.txt"), done = join(root, "done.json");
+    await writeFile(script, `@echo off\r\necho %* > "${captured}"\r\n`);
+    const launcher = join(import.meta.dirname, "account-login.mjs");
+    await promisify(execFile)(process.execPath, [launcher, JSON.stringify({ base: "claude", home: "profile-home", email: "second@example.invalid", command: [script], done })]);
+    assert.match(await readFile(captured, "utf8"), /auth.*login.*--email.*second@example\.invalid/);
+    assert.deepEqual(JSON.parse(await readFile(done, "utf8")), { success: true });
+    const missing = join(root, "missing.json");
+    await promisify(execFile)(process.execPath, [launcher, JSON.stringify({ base: "claude", home: "profile-home", command: [join(root, "absent.exe")], done: missing })]).catch(() => {});
+    assert.deepEqual(JSON.parse(await readFile(missing, "utf8")), { success: false });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("같은 계정의 로그인을 다시 시작하면 대기 항목이 쌓이지 않고 터미널을 돌려준다", async () => {
+  const f = await reloginFixture();
+  try {
+    const first = await f.call(accountsRpc.relogin, { accountId: "profile" });
+    const second = await f.call(accountsRpc.relogin, { accountId: "profile" });
+    assert.ok(second.terminalId);
+    assert.notEqual(first.id, second.id);
+    assert.equal((await f.call(accountsRpc.status)).flows.length, 1);
+  } finally {
+    await f.cleanup?.();
+  }
+});

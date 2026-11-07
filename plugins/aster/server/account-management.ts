@@ -147,6 +147,11 @@ export function registerAccountManagement(
     await rm(join(flowsDirectory, `${id}.done`), { force: true });
     await rm(flowFile(id), { force: true });
   }
+  /** Pressing the button again replaces the waiting attempt instead of stacking another. */
+  async function supersede(matches: (flow: Flow) => boolean) {
+    for (const flow of await flows())
+      if (flow.status === "pending" && matches(flow)) await removeFlow(flow.id);
+  }
   async function registeredClaudeAccounts() {
     const registry = registeredAccountsSchema.parse(
       await json(join(paseoHome, "paseo-accounts", "accounts.json"), {
@@ -363,6 +368,7 @@ export function registerAccountManagement(
     serialize(async () => {
       api = paseo;
       const workspace = await loginWorkspace(paseo);
+      await supersede((flow) => flow.base === input.base && !flow.accountId);
       const { config } = await paseo.config.get(),
         providers = providersSchema.parse(config.providers ?? {});
       const id = randomUUID(),
@@ -409,13 +415,14 @@ export function registerAccountManagement(
         },
       );
       await writeJson(flowFile(id), { ...flow, terminalId: terminal.id });
-      return { id, workspaceId: workspace.id };
+      return { id, workspaceId: workspace.id, terminalId: terminal.id };
     }),
   );
   server.handle(accountsRpc.relogin, async (input, { paseo }) =>
     serialize(async () => {
       api = paseo;
       const workspace = await loginWorkspace(paseo);
+      await supersede((flow) => flow.accountId === input.accountId);
       // The folder comes from the registry so the client can only name a known account.
       const account = (await registeredClaudeAccounts()).find(
         (entry) => entry.id === input.accountId,
@@ -456,7 +463,7 @@ export function registerAccountManagement(
         },
       );
       await writeJson(flowFile(id), { ...flow, terminalId: terminal.id });
-      return { id, workspaceId: workspace.id };
+      return { id, workspaceId: workspace.id, terminalId: terminal.id };
     }),
   );
   server.handle(accountsRpc.status, async (_, { paseo }) => {

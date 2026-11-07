@@ -31,12 +31,12 @@ export const accountsRpc = {
   add: defineRpc({
     name: "aster.accounts.add.request",
     input: z.object({ base: family }),
-    output: z.object({ id: z.string(), workspaceId: z.string() }),
+    output: z.object({ id: z.string(), workspaceId: z.string(), terminalId: z.string().optional() }),
   }),
   relogin: defineRpc({
     name: "aster.accounts.relogin.request",
     input: z.object({ accountId: z.string().min(1) }),
-    output: z.object({ id: z.string(), workspaceId: z.string() }),
+    output: z.object({ id: z.string(), workspaceId: z.string(), terminalId: z.string().optional() }),
   }),
   policy: defineRpc({
     name: "aster.providers.configure.request",

@@ -53,14 +53,18 @@ function Accounts({ host, navigation }: PluginSurfaceProps) {
       clearInterval(timer);
     };
   }, [status, host.id]);
-  const openLogin = async (start: () => Promise<{ workspaceId: string }>) => {
+  const openLogin = async (
+    start: () => Promise<{ workspaceId: string; terminalId?: string }>,
+  ) => {
     setBusy(true);
     try {
       const flow = await start();
-      navigation?.openWorkspace({
+      const destination = {
         workspaceId: flow.workspaceId,
         serverId: host.id,
-      });
+        terminalId: flow.terminalId,
+      };
+      navigation?.openWorkspace(destination);
     } catch (error) {
       setError(
         error instanceof Error
