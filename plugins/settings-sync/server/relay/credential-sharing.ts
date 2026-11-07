@@ -309,14 +309,9 @@ export function registerCredentialSharing(
       for (const record of await readVault(home, () => {})) await recoverRenewal(home, record);
       for (const record of await readVault(home, () => {})) {
         const own = state.accounts.find((account) => account.identity === record.identity);
-        if (
-          renewApi &&
-          own &&
-          !refreshTokenOf(own.record) &&
-          (own.record?.expiresAt ?? 0) <= share.keepUsableUntil() &&
-          (record.expiresAt ?? 0) > Math.max(own.record?.expiresAt ?? 0, Date.now() + 60_000)
-        ) {
-          await store.write(providers, [withoutRefreshToken(record)], patcher(renewApi, providers), async () => {}, share.keepUsableUntil());
+        // Renewing revokes the previous access token at once, so a newer one never waits.
+        if (renewApi && own && !refreshTokenOf(own.record) && (record.expiresAt ?? 0) > (own.record?.expiresAt ?? 0)) {
+          await store.write(providers, [withoutRefreshToken(record)], patcher(renewApi, providers));
           await onChanged();
         }
       }
@@ -376,13 +371,24 @@ export function registerCredentialSharing(
           return share.exportVaultRecord(record, input.publicKey);
         }),
     ),
-    server.handle(rpc("aster.credentials.vault.receive", envelope), async (input) =>
+    server.handle(rpc("aster.credentials.vault.receive", envelope), async (input, { paseo }) =>
       serial(async () => {
+        renewApi = paseo as typeof renewApi;
         const record = share.openVaultRecord(input);
+        const providers = (await paseo.config.get()).config.providers ?? {};
+        const state = await store.read(providers);
         // A host signed out of this account does not keep its token.
-        const state = await store.read(await renewalProviders(home, renewApi));
         if (state.declined?.includes(record.identity)) return { changed: false };
-        return { changed: await putVault(home, record) };
+        const changed = await putVault(home, record);
+        // The access token this host holds stopped working when this one was issued.
+        const own = state.accounts.find((account) => account.identity === record.identity);
+        if (changed && own && !refreshTokenOf(own.record)) {
+          await store
+            .write(providers, [withoutRefreshToken(record)], patcher(paseo as NonNullable<typeof renewApi>, providers))
+            .then(() => onChanged())
+            .catch((error) => console.warn("[settings-sync] 새 토큰을 프로필에 쓰지 못했습니다. 다음 확인에서 다시 시도합니다.", error instanceof Error ? error.name : ""));
+        }
+        return { changed };
       }),
     ),
     server.handle(

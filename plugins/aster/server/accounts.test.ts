@@ -638,3 +638,17 @@ test("소진된 한도의 복귀 시각을 알려 준다", () => {
   assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 40, resetsAt: reset }]), 2000), null);
   assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 100, resetsAt: reset }]), 9000), null);
 });
+
+test("확인된 계정이 있으면 만료된 계정으로 세션을 보내지 않는다", () => {
+  const now = Date.parse("2026-11-07T10:00:00Z");
+  const account = (id: string, email: string) => ({ id, base: "claude", home: "/" + id, email, identity: id + "-org|" + id, signedIn: true }) as any;
+  const reportFor = (email: string, value: object) => ({ id: "claude:" + email + "." + email.split("@")[0] + "-org", sourceId: "claude", sourceLabel: "Claude", fetchedAt: "2026-11-07T09:59:00Z", account: { label: email }, report: value }) as any;
+  const healthy = account("main", "main@example.invalid");
+  const lapsed = account("second", "second@example.invalid");
+  const reports = [
+    reportFor("main@example.invalid", { status: "available", windows: [{ id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" }] }),
+    reportFor("second@example.invalid", { status: "unavailable", problem: { kind: "expired", expiresAt: "2026-11-07T09:30:00Z" } }),
+  ];
+  assert.deepEqual(bootstrapAccounts([lapsed, healthy], reports, now).map((entry: any) => entry.id), ["main"]);
+  assert.deepEqual(bootstrapAccounts([lapsed], reports, now).map((entry: any) => entry.id), ["second"]);
+});

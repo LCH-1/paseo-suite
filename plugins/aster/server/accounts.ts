@@ -367,7 +367,7 @@ export function bootstrapAccounts(
 ) {
   const expired = new Set(expiredAccounts(accounts, reports, now));
   const seen = new Set<string>();
-  return accounts.filter((account) => {
+  const startable = accounts.filter((account) => {
     const identity =
       account.identity ?? account.email?.toLowerCase() ?? account.home;
     if (seen.has(identity)) return false;
@@ -421,6 +421,9 @@ export function bootstrapAccounts(
     seen.add(identity);
     return true;
   });
+  // A session sent to an expired login fails, so that is only worth trying with nothing better.
+  const verified = startable.filter((account) => !expired.has(account));
+  return verified.length ? verified : startable;
 }
 
 export class UsageReader {
