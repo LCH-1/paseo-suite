@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: LCH-1/paseo
-          ref: 80927c616dc346eece671131414d964f97a46904
+          ref: a9996862f5e8fcbe4115aa557fcad1b986c9b221
           path: paseo-core
       - uses: actions/setup-node@v4
         with:
