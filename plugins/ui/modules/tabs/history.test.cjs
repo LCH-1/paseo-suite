@@ -13,6 +13,7 @@ function fixture() {
     recordClosedTab(key, entry) {
       state.closedTabsByWorkspace[key] = [...(state.closedTabsByWorkspace[key] || []), { ...entry, sequence: ++state.sequence }];
     },
+    takeLastClosedTab(key) { return state.closedTabsByWorkspace[key]?.pop() ?? null; },
   };
   const model = {
     entries: () => entries,
@@ -35,6 +36,24 @@ test("global tab restore retains its original index and workspace outside the cu
   assert.deepEqual(f.calls[1], ["reopen", "host:b"]);
   assert.deepEqual(f.calls[2][1].target, { kind: "agent", agentId: "two" });
   assert.equal(f.history.restore(), false);
+});
+
+test("보관된 대화의 닫은 탭 복원은 레이아웃 재열기와 화면 이동을 실행하지 않는다",()=>{
+  const f=fixture();
+  f.model.close("second");
+  f.model.retainAt=()=>null;
+  assert.equal(f.history.restore(),false);
+  assert.deepEqual(f.calls,[]);
+});
+
+test("보관된 대화의 닫은 기록을 건너뛰고 직전의 일반 대화를 복원한다",()=>{
+  const f=fixture(), retain=f.model.retainAt;
+  f.model.close("first"); f.model.close("second");
+  f.model.retainAt=(serverId,workspaceId,tab,index)=>tab.target.agentId==="two"?null:retain(serverId,workspaceId,tab,index);
+  assert.equal(f.history.restore(),true);
+  assert.deepEqual(f.calls.map(call=>call[0]),["retain","reopen","navigate"]);
+  assert.equal(f.calls[0][3],"one");
+  assert.equal(f.state.closedTabsByWorkspace["host:b"].length,0);
 });
 test("a more recently closed native tab keeps the native restore handler first", () => {
   const f = fixture();

@@ -18,6 +18,71 @@ function row(id, active = true) {
     isActive: active, isCloseHovered: false, isClosingTab: false };
 }
 
+test("보관 대화는 모델·저장 목록에서 제거되고 고정·미리보기·다른 창 재열기로 복원되지 않는다", () => {
+  const saved = storage();
+  let sessions = {host: {agents: new Map([["agent-a", {workspaceId:"w", archivedAt:null, updatedAt:10}]])}};
+  const first = createModel(saved, () => sessions);
+  first.retainAt("host", "w", row("a").tab);
+  first.retainAt("host", "w", row("b").tab);
+  const stale = createModel(saved, () => ({host:{agents:new Map([["agent-a",{workspaceId:"w",archivedAt:null,updatedAt:10}]])}}));
+  sessions = {host: {agents: sessions.host.agents, agentDetails: new Map([["agent-a", {workspaceId:"w", archivedAt:20, updatedAt:20}]])}};
+  first.reconcile(sessions);
+  assert.deepEqual(first.entries().map(entry => entry.agentId), ["agent-b"]);
+  assert.equal(first.retainAt("host", "w", row("a").tab), null);
+  first.ingest("host", "w", [row("a")]);
+  assert.equal(first.entries().some(entry => entry.agentId === "agent-a"), false);
+  assert.equal(stale.retainAt("host", "w", row("a").tab), null);
+  stale.synchronize();
+  assert.equal(stale.entries().some(entry => entry.agentId === "agent-a"), false);
+  assert.equal(createModel(saved).entries().some(entry => entry.agentId === "agent-a"), false);
+  assert.equal(JSON.parse(saved.getItem(STORAGE_KEY)).entries.some(entry => entry.agentId === "agent-a"), false);
+  sessions = {host:{agents:new Map([["agent-a",{workspaceId:"w",archivedAt:null,updatedAt:30}]])}};
+  first.reconcile(sessions);
+  assert.ok(first.retainAt("host", "w", row("a").tab));
+});
+
+test("시작 시 알려진 보관 대화와 공유 저장소의 오래된 탭을 즉시 정리한다", () => {
+  const saved=storage(), original=createModel(saved);
+  original.retainAt("host", "w", row("a").tab);
+  original.retainAt("other", "w", row("a").tab);
+  const stalePresence = saved.getItem(STORAGE_KEY+":shared:presence:"+JSON.stringify(["host","agent-a"]));
+  const model=createModel(saved,()=>({host:{agents:new Map([["agent-a",{archivedAt:20,updatedAt:20}]])}}));
+  assert.deepEqual(model.entries().map(entry=>entry.serverId),["other"]);
+  saved.setItem(STORAGE_KEY+":shared:presence:"+JSON.stringify(["host","agent-a"]),stalePresence);
+  model.synchronize();
+  assert.deepEqual(model.entries().map(entry=>entry.serverId),["other"]);
+  assert.deepEqual(createModel(saved).entries().map(entry=>entry.serverId),["other"]);
+});
+
+test("워크스페이스 보관 성공 후 다른 탭을 거쳐도 캐시된 대화를 다시 추가하지 않는다",()=>{
+  const saved=storage(), model=createModel(saved);
+  model.retainAt("host","archived",row("a").tab);
+  model.closeWorkspace("host","archived");
+  model.ingest("host","other",[row("b")]);
+  model.ingest("host","archived",[row("a")]);
+  assert.equal(model.entries().some(entry=>entry.agentId==="agent-a"),false);
+  assert.equal(model.retainAt("host","archived",row("a").tab),null);
+});
+
+test("이미 닫은 대화도 보관 관측 뒤 상세 캐시가 사라지면 재진입을 차단한다",()=>{
+  let sessions={host:{agents:new Map()}};
+  const model=createModel(storage(),()=>sessions);
+  const entry=model.retainAt("host","w",row("a").tab);
+  model.close(entry.key);
+  sessions.host.agents.set("agent-a",{archivedAt:20,updatedAt:20});
+  model.reconcile(sessions);
+  sessions={}; model.reconcile(sessions);
+  assert.equal(model.retainAt("host","w",row("a").tab),null);
+});
+
+test("워크스페이스 보관은 이미 닫아 둔 대화의 복원도 차단한다",()=>{
+  const model=createModel(storage());
+  const entry=model.retainAt("host","w",row("a").tab);
+  model.close(entry.key);
+  model.closeWorkspace("host","w");
+  assert.equal(model.retainAt("host","w",row("a").tab),null);
+});
+
 test("보관 성공은 해당 호스트 워크스페이스의 고정·미리보기 탭을 닫고 재실행에도 반영된다", () => {
   const saved = storage(), model = createModel(saved);
   model.retainAt("host", "archived", row("a").tab);
@@ -993,15 +1058,14 @@ test("새 대화 작성 pane·읽기전용 입력은 고정하지 않으며 disp
   assert.equal(app.model.preview().agentId, "agent-a");
 });
 
-test("공식 metadata로 재소속한 보관 대화는 표시에서만 제외한다", () => {
+test("공식 metadata로 재소속한 보관 대화는 저장된 탭에서도 제거한다", () => {
   const app = harness();
   app.render(app.props("a", [row("a")]));
   app.model.pin(app.model.preview().key);
   app.session.agents.set("agent-a", { id: "agent-a", workspaceId: "b", archivedAt: "now" });
   app.render(app.props("a", [row("a")]));
   const output = app.render(app.props("a", [row("a")]));
-  assert.equal(app.model.entries().length, 1);
-  assert.equal(app.model.entries()[0].workspaceId, "b");
+  assert.equal(app.model.entries().length, 0);
   assert.equal(output.tabs.length, 0);
   assert.equal(app.calls.filter(([kind]) => kind === "close-native").length, 0);
 });
@@ -1659,14 +1723,13 @@ test("한 snapshot의 여러 완료는 작성 슬롯 순서를 보존하고 다�
   assert.deepEqual(Array.from(after.tabs, (item) => item.tab.target.agentId || item.tab.tabId), ["agent-a", "one", "two", draftIdOf(three), "agent-b"]);
 });
 
-test("생성 완료 위치는 숨겨진 archived 탭이 앞에 있어도 보이는 순서를 보존한다", () => {
+test("생성 완료 위치는 앞의 보관 탭이 제거되어도 보이는 순서를 보존한다", () => {
   const app = harness(null, true); pinned(app, ["archived", "a", "b"]);
   app.session.agents.set("agent-archived", { archivedAt: "now" });
   const id = app.bridge.open();
   const bar = app.renderDraft();
   bar.onReorderTabs([bar.tabs[0].tab, bar.tabs[2].tab, bar.tabs[1].tab]);
-  const archived = app.model.entries().find((entry) => entry.agentId === "agent-archived");
-  app.model.reorder([archived.key, ...app.model.entries().filter((entry) => entry !== archived).map((entry) => entry.key)]);
+  assert.equal(app.model.entries().some((entry) => entry.agentId === "agent-archived"),false);
   completeDraft(app, id, { kind: "agent", agentId: "created" }, "created-tab");
   const visible = app.render(app.props("a", [row("a")]));
   assert.deepEqual(Array.from(visible.tabs, (item) => item.tab.target.agentId), ["agent-a", "created", "agent-b"]);

@@ -197,9 +197,7 @@
   function visibleEntries(state) {
     return model.entries().filter((entry) => {
       if(groupModule&&!groupModule.isTabGroupKeyVisible(syntheticId(entry)))return false;
-      const session = state[entry.serverId];
-      const agent = session?.agents.get(entry.agentId) || session?.agentDetails.get(entry.agentId);
-      return !agent?.archivedAt;
+      return !model.isArchived(entry.serverId, entry.agentId);
     });
   }
   function globalItems(state, snapshot = bridgeState) {

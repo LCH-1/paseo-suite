@@ -382,7 +382,7 @@ test("rebuild with changed module ids keeps the running app map and adds a bundl
     lines.push(`__d(function(g,r,i,a,m,e,d){e.${symbol}=function(){}},${ids[name]},[]);`);
   });
   ids.tabPresence = 41000; ids.tabGroups = 41001;
-  lines.push('__d(function(g,r,i,a,m,e,d){e.agentTabPresenceBridge={}},41000,[]);');
+  lines.push('__d(function(g,r,i,a,module,exports,d){const api={agentTabPresenceBridge:()=>({})};module.exports=api},41000,[]);');
   lines.push('__d(function(g,r,i,a,m,e,d){e.isTabGroupKeyVisible=function(){}},41001,[]);');
   const mapsPath = path.join(__dirname, "module-maps.json");
   const running = { ...ids, rows: 39999 };
