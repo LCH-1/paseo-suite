@@ -43,6 +43,7 @@ jobs:
         working-directory: paseo-core
         run: |
           npm run build:main --workspace=@getpaseo/desktop
+          npm exec --workspace=@getpaseo/desktop -- vitest run src/features/auto-updater.test.ts --bail=1
           git restore -- packages/cli/bin/paseo
           git diff --exit-code
       - name: Suite verification and package
@@ -53,6 +54,7 @@ jobs:
           npm run lint
           npm run build
           npm test
+          npx tsx --test plugins/aster/server/codex.test.ts plugins/aster/server/subscription.test.ts
           npm run package:win
           npm run smoke
       - name: Upload private build artifacts
