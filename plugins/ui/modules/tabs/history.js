@@ -28,23 +28,31 @@
     model.close = closeWithHistory;
     function restore() {
       if (stopped) return false;
-      const route = pathname().match(/^\/h\/([^/]+)\/workspace\/([^/]+)/);
-      let workspaceKey = route ? decodeURIComponent(route[1]) + ":" + decodeURIComponent(route[2]) : null;
-      const histories = layouts.getState().closedTabsByWorkspace;
-      let selected = workspaceKey ? histories[workspaceKey]?.at(-1) : null;
-      for (const [key, entries] of Object.entries(histories)) {
-        const candidate = entries.at(-1);
-        if (candidate?.origin === origin && (!selected || (candidate.sequence ?? 0) > (selected.sequence ?? 0))) {
-          workspaceKey = key; selected = candidate;
+      while (!stopped) {
+        const route = pathname().match(/^\/h\/([^/]+)\/workspace\/([^/]+)/);
+        let workspaceKey = route ? decodeURIComponent(route[1]) + ":" + decodeURIComponent(route[2]) : null;
+        const histories = layouts.getState().closedTabsByWorkspace;
+        let selected = workspaceKey ? histories[workspaceKey]?.at(-1) : null;
+        for (const [key, entries] of Object.entries(histories)) {
+          const candidate = entries.at(-1);
+          if (candidate?.origin === origin && (!selected || (candidate.sequence ?? 0) > (selected.sequence ?? 0))) {
+            workspaceKey = key; selected = candidate;
+          }
         }
+        if (!workspaceKey || selected?.origin !== origin || selected.tab.target.kind !== "agent") return false;
+        const boundary = workspaceKey.lastIndexOf(":");
+        const serverId = workspaceKey.slice(0, boundary), workspaceId = workspaceKey.slice(boundary + 1);
+        if (model.retainAt(serverId, workspaceId, selected.tab, selected.position) === null) {
+          const state = layouts.getState();
+          if (typeof state.takeLastClosedTab !== "function" || state.closedTabsByWorkspace[workspaceKey]?.at(-1) !== selected) return false;
+          state.takeLastClosedTab(workspaceKey);
+          continue;
+        }
+        reopen({ workspaceKey, createTerminal: terminal });
+        navigate({ serverId, workspaceId, target: selected.tab.target, placement: { mode: "focused" } });
+        return true;
       }
-      if (!workspaceKey || selected?.origin !== origin || selected.tab.target.kind !== "agent") return false;
-      const boundary = workspaceKey.lastIndexOf(":");
-      const serverId = workspaceKey.slice(0, boundary), workspaceId = workspaceKey.slice(boundary + 1);
-      model.retainAt(serverId, workspaceId, selected.tab, selected.position);
-      reopen({ workspaceKey, createTerminal: terminal });
-      navigate({ serverId, workspaceId, target: selected.tab.target, placement: { mode: "focused" } });
-      return true;
+      return false;
     }
     function onKey(event) {
       if (event.defaultPrevented || event.repeat || event.isComposing || event.ctrlKey === event.metaKey || !event.shiftKey || event.altKey || event.code !== "KeyT") return;

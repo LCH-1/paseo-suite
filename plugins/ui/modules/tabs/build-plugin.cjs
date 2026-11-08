@@ -13,7 +13,8 @@ for (const root of roots) {
   const modules = bundle.split("\n");
   function hasExport(line, symbol) {
     return line.includes("." + symbol + "=")
-      || new RegExp("Object\\.defineProperty\\([^,]+,[\"']" + symbol + "[\"'],").test(line);
+      || new RegExp("Object\\.defineProperty\\([^,]+,[\"']" + symbol + "[\"'],").test(line)
+      || line.includes("module.exports=") && new RegExp("[,{]" + symbol + ":\\(\\)=>").test(line);
   }
   function moduleId(symbol) {
     const candidates = modules.filter((line) => hasExport(line, symbol));

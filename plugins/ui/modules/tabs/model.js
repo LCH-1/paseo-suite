@@ -47,6 +47,7 @@
     const known = new Set([...openAgents, ...closedAt.keys()]);
     const pendingWrites = new Map();
     const identity = (entry) => agentKey(entry.serverId, entry.agentId);
+    let prunedArchived = false;
     function read(key) {
       try { return pendingWrites.has(key) ? pendingWrites.get(key) : JSON.parse(storage.getItem(key) || "null"); }
       catch { storageFailed = true; return null; }
@@ -54,6 +55,53 @@
     function write(key, value) {
       try { storage.setItem(key, JSON.stringify(value)); pendingWrites.delete(key); }
       catch { storageFailed = true; pendingWrites.set(key, value); }
+    }
+    // Keep archive state separate from tab presence so a stale window cannot
+    // reopen a conversation another window has archived.
+    function archiveState(entry) {
+      const key = SHARED_PREFIX + "archive:" + identity(entry);
+      let record = read(key);
+      const snapshots = snapshotsFor(entry).filter(snapshot => (!snapshot.id || snapshot.id === entry.agentId)
+        && Object.hasOwn(snapshot, "archivedAt"));
+      const latest = snapshots.reduce((previous, snapshot) => {
+        const version = snapshotVersion(snapshot) ?? -Infinity;
+        const previousVersion = previous ? snapshotVersion(previous) ?? -Infinity : -Infinity;
+        return !previous || version > previousVersion || version === previousVersion && snapshot.archivedAt ? snapshot : previous;
+      }, null);
+      if (latest) {
+        const version = snapshotVersion(latest);
+        const archived = Boolean(latest.archivedAt);
+        const newer = !record || version !== null && (record.observedAt === null || version > record.observedAt);
+        const equalArchive = archived && version === record?.observedAt && !record?.archived;
+        if ((newer || equalArchive) && (archived || record)) {
+          record = { archived, observedAt: version };
+          write(key, record);
+        }
+      }
+      return record?.archived === true;
+    }
+    function removeArchived(next) {
+      return next.filter(entry => {
+        if (!archiveState(entry)) return true;
+        const key = identity(entry);
+        const presenceKey = SHARED_PREFIX + "presence:" + key;
+        const presence = read(presenceKey);
+        const lastClosedAt = Math.max(closedAt.get(key) ?? 0, presence?.lastClosedAt ?? 0) || Date.now();
+        closedAt.set(key, lastClosedAt);
+        dismissed.add(entry.key);
+        if (active === key) dismissedActive = key;
+        if (presence?.entry) write(presenceKey, { entry: null, lastClosedAt });
+        prunedArchived = true;
+        return false;
+      });
+    }
+    function trackedAgents() {
+      return [...known].flatMap(key => {
+        let parts;
+        try { parts = JSON.parse(key); } catch { return []; }
+        return Array.isArray(parts) && parts.length === 2 && parts.every(part => typeof part === "string")
+          ? [{serverId:parts[0], agentId:parts[1]}] : [];
+      });
     }
     function records() {
       try {
@@ -124,8 +172,8 @@
       }
       const order = read(SHARED_PREFIX + "order");
       const keys = [...new Set([...(Array.isArray(order) ? order : []), ...entries.map(identity), ...shared.keys()])];
-      entries = keys.flatMap(key => shared.has(key) ? [shared.get(key)]
-        : local.has(key) && (!local.get(key).pinned || !found.has(key)) ? [local.get(key)] : []);
+      entries = removeArchived(keys.flatMap(key => shared.has(key) ? [shared.get(key)]
+        : local.has(key) && (!local.get(key).pinned || !found.has(key)) ? [local.get(key)] : []));
       openAgents = new Set(entries.map(identity));
     }
     merge();
@@ -170,9 +218,10 @@
       persist();
       listeners.forEach((listener) => listener());
     }
-    if (saved && saved.schemaVersion !== 2) persist();
+    if (saved && (saved.schemaVersion !== 2 || prunedArchived)) persist();
     return {
       entries: () => entries,
+      isArchived: (serverId, agentId) => archiveState({serverId, agentId}),
       tabPresence(serverId, agentId) {
         const key = agentKey(serverId, agentId);
         return { isOpen: openAgents.has(key), lastClosedAt: closedAt.get(key) ?? null };
@@ -181,6 +230,7 @@
       isPinned: (key) => Boolean(entries.find((entry) => entry.key === key)?.pinned),
       pin(key) {
         const entry = entries.find((entry) => entry.key === key);
+        if (entry && archiveState(entry)) { entries = removeArchived(entries); notify(); return false; }
         if (!entry || entry.pinned) return false;
         entries = entries.map((item) => item === entry ? { ...item, pinned: true } : item);
         notify(true);
@@ -195,6 +245,7 @@
         previous = entries;
         if (before === JSON.stringify([entries, [...closedAt]])) return;
         revision++;
+        persist();
         listeners.forEach((listener) => listener());
       },
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -202,6 +253,11 @@
         if (![serverId, workspaceId, tab?.tabId, tab?.target?.agentId].every((value) => typeof value === "string" && value.length)
           || tab.target.kind !== "agent") return null;
         const identity = agentKey(serverId, tab.target.agentId);
+        if (archiveState({serverId, agentId:tab.target.agentId})) {
+          const next = removeArchived(entries);
+          if (next.length !== entries.length) { entries = next; notify(); }
+          return null;
+        }
         const previous = entries.find((entry) => agentKey(entry.serverId, entry.agentId) === identity);
         const key = keyOf(serverId, workspaceId, tab.tabId);
         const entry = { ...previous, key, serverId, workspaceId, tabId: tab.tabId, agentId: tab.target.agentId, pinned: true };
@@ -228,10 +284,12 @@
       },
       reconcile(sessionMap) {
         observedSessions = sessionMap;
+        for (const entry of trackedAgents()) if (!openAgents.has(identity(entry))) archiveState(entry);
         let changed = false;
         const seen = new Map();
         const next = [];
         for (const entry of entries) {
+          if (archiveState(entry)) { changed = true; continue; }
           const session = sessionMap?.[entry.serverId];
           const candidates = [session?.agents?.get(entry.agentId), session?.agentDetails?.get(entry.agentId)];
           const identity = agentKey(entry.serverId, entry.agentId);
@@ -289,8 +347,11 @@
         if (changed) notify();
       },
       ingest(serverId, workspaceId, rows) {
-        let changed = false;
-        const selected = rows.find((row) => row.isActive && row.tab.target.kind === "agent");
+        const next = removeArchived(entries);
+        let changed = next.length !== entries.length;
+        entries = next;
+        const selected = rows.find((row) => row.isActive && row.tab.target.kind === "agent"
+          && !archiveState({serverId, agentId:row.tab.target.agentId}));
         if (selected) workspaceId = ownership.get(agentKey(serverId, selected.tab.target.agentId)) || workspaceId;
         const selectedKey = selected ? keyOf(serverId, workspaceId, selected.tab.tabId) : null;
         const selectedIdentity = selected ? agentKey(serverId, selected.tab.target.agentId) : null;
@@ -319,6 +380,16 @@
       },
       closeWorkspace(serverId, workspaceId) {
         const closing = entries.filter(entry => entry.serverId === serverId && entry.workspaceId === workspaceId);
+        const affected = new Map(closing.map(entry => [identity(entry),entry]));
+        for (const entry of trackedAgents()) {
+          if (entry.serverId === serverId && (ownership.get(identity(entry)) === workspaceId
+            || snapshotsFor(entry).some(snapshot => snapshot.workspaceId === workspaceId))) affected.set(identity(entry),entry);
+        }
+        for (const entry of affected.values()) {
+          const versions = snapshotsFor(entry).map(snapshotVersion).filter(version => version !== null);
+          write(SHARED_PREFIX + "archive:" + identity(entry), { archived:true,
+            observedAt:versions.length ? Math.max(...versions) : null });
+        }
         if (!closing.length) return;
         for (const entry of closing) {
           dismissed.add(entry.key);
