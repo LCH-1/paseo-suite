@@ -8,6 +8,65 @@ import { promisify } from "node:util";
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file: string) => readFile(path.join(root, file), "utf8");
 
+test(
+  "Windows 빌드의 중간 명령 실패는 뒤의 성공 명령으로 가려지지 않는다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const workflow = await read(".github/workflows/windows-release.yml");
+    const execute = promisify(execFile);
+    for (const name of [
+      "Core dependencies and patched runtime",
+      "Desktop main",
+      "Suite verification and package",
+    ]) {
+      const step = workflow
+        .split("      - name: ")
+        .find(
+          (section) =>
+            section.startsWith(name + "\n") ||
+            section.startsWith(name + "\r\n"),
+        );
+      assert.ok(step, `Missing Windows build step: ${name}`);
+      const body = step.match(
+        /        run: \|\r?\n((?:          .*\r?\n)+)/,
+      )?.[1];
+      assert.ok(body, `Missing build script: ${name}`);
+      const lines = body.split(/\r?\n/).map((line) => line.trim());
+      const firstCommand = lines.findIndex((line) =>
+        /^(?:npm|npx|git)\b/.test(line),
+      );
+      assert.ok(firstCommand >= 0, `Missing native command: ${name}`);
+      const script = [
+        "$ErrorActionPreference = 'Stop'",
+        ...lines.slice(0, firstCommand),
+        '& node -e "process.exit(17)"',
+        "Write-Output 'CONTINUED_AFTER_FAILURE'",
+        '& node -e "process.exit(0)"',
+        "exit $LASTEXITCODE",
+      ].join("\n");
+      await assert.rejects(
+        execute(
+          "pwsh",
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            Buffer.from(script, "utf16le").toString("base64"),
+          ],
+          { windowsHide: true, timeout: 10000 },
+        ),
+        (error: unknown) => {
+          const failure = error as Error & { code: unknown; stdout: string };
+          assert.equal(failure.code, 1, name);
+          assert.doesNotMatch(failure.stdout, /CONTINUED_AFTER_FAILURE/, name);
+          return true;
+        },
+      );
+    }
+  },
+);
+
 test("Windows 설치본은 검증된 Core의 보관 탭 연동과 사이드바 아이콘을 포함한다", async () => {
   const workflow = await read(".github/workflows/windows-release.yml");
   const ref = workflow.match(
