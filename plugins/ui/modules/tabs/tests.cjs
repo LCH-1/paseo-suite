@@ -18,6 +18,22 @@ function row(id, active = true) {
     isActive: active, isCloseHovered: false, isClosingTab: false };
 }
 
+test("보관 성공은 해당 호스트 워크스페이스의 고정·미리보기 탭을 닫고 재실행에도 반영된다", () => {
+  const saved = storage(), model = createModel(saved);
+  model.retainAt("host", "archived", row("a").tab);
+  model.retainAt("host", "other", row("b").tab);
+  model.retainAt("other-host", "archived", row("c").tab);
+  model.ingest("host", "archived", [row("d")]);
+  const closedBefore = Date.now();
+  model.closeWorkspace("host", "archived");
+  assert.deepEqual(model.entries().map(entry => entry.agentId), ["agent-b", "agent-c"]);
+  assert.ok(model.tabPresence("host", "agent-a").lastClosedAt >= closedBefore);
+  assert.equal(model.tabPresence("host", "agent-d").isOpen, false);
+  model.ingest("host", "archived", [row("d")]);
+  assert.equal(model.entries().length, 2);
+  assert.deepEqual(createModel(saved).entries().map(entry => entry.agentId), ["agent-b", "agent-c"]);
+});
+
 test("두 창의 동시 고정·다른 항목 변경은 합쳐지고 닫힘과 재열기가 전파된다", () => {
   const saved = storage(), first = createModel(saved), second = createModel(saved);
   first.retainAt("host", "w", row("a").tab);

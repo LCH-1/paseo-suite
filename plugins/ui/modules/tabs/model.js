@@ -317,6 +317,16 @@
         entries = entries.filter((item) => item.key !== key);
         notify(false, entry ? identity(entry) : null);
       },
+      closeWorkspace(serverId, workspaceId) {
+        const closing = entries.filter(entry => entry.serverId === serverId && entry.workspaceId === workspaceId);
+        if (!closing.length) return;
+        for (const entry of closing) {
+          dismissed.add(entry.key);
+          if (identity(entry) === active) dismissedActive = active;
+        }
+        entries = entries.filter(entry => entry.serverId !== serverId || entry.workspaceId !== workspaceId);
+        notify();
+      },
       reorder(keys) {
         const rank = new Map(keys.map((key, index) => [key, index]));
         entries = [...entries].sort((a, b) => (rank.get(a.key) ?? keys.length) - (rank.get(b.key) ?? keys.length));
