@@ -48,7 +48,7 @@ export default function contribute(client) {
   }
   if (!modules) throw new Error("Global Workspace Tabs: unsupported Paseo module exports");
   const leaseKey = "__PASEO_GLOBAL_TABS_LEASE__";
-  const revision = "b3718beba6067ee97b1cf0e1ed9908a62502fe1fe0014e53a4de728a3f770ced";
+  const revision = "2ee93958c2998462fad75e2fe8ee995331b1078200655f10921cde31beda582f";
   let lease = globalThis[leaseKey];
   function retain(current) {
     const owner = Symbol();
@@ -382,6 +382,16 @@ export default function contribute(client) {
         dismissed.add(key);
         entries = entries.filter((item) => item.key !== key);
         notify(false, entry ? identity(entry) : null);
+      },
+      closeWorkspace(serverId, workspaceId) {
+        const closing = entries.filter(entry => entry.serverId === serverId && entry.workspaceId === workspaceId);
+        if (!closing.length) return;
+        for (const entry of closing) {
+          dismissed.add(entry.key);
+          if (identity(entry) === active) dismissedActive = active;
+        }
+        entries = entries.filter(entry => entry.serverId !== serverId || entry.workspaceId !== workspaceId);
+        notify();
       },
       reorder(keys) {
         const rank = new Map(keys.map((key, index) => [key, index]));
@@ -1434,6 +1444,7 @@ export default function contribute(client) {
   if (initialPreviewDraft) replacePreview(initialPreviewDraft.draftId);
   const releaseBar = draftBridge ? draftBridge.registerTabBar(NewWorkspaceTabsBar) : () => {};
   const releasePresence = presenceBridge ? presenceBridge.register({read: model.tabPresence, subscribe: model.subscribe,
+    closeWorkspace: ({serverId, workspaceId}) => model.closeWorkspace(serverId, workspaceId),
     retain: ({serverId, workspaceId, agentId, tabId}) => {
       const entries = model.entries();
       const index = entries.findIndex(entry => entry.serverId === serverId && entry.agentId === agentId);

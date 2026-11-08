@@ -876,6 +876,7 @@
   if (initialPreviewDraft) replacePreview(initialPreviewDraft.draftId);
   const releaseBar = draftBridge ? draftBridge.registerTabBar(NewWorkspaceTabsBar) : () => {};
   const releasePresence = presenceBridge ? presenceBridge.register({read: model.tabPresence, subscribe: model.subscribe,
+    closeWorkspace: ({serverId, workspaceId}) => model.closeWorkspace(serverId, workspaceId),
     retain: ({serverId, workspaceId, agentId, tabId}) => {
       const entries = model.entries();
       const index = entries.findIndex(entry => entry.serverId === serverId && entry.agentId === agentId);

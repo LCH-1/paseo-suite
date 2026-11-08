@@ -1,6 +1,56 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { withLiveTestSession } from "../tools/live-test-session";
+
+test("live test failure removes its agent, workspace and new project but preserves existing projects", async () => {
+  for (const existing of [true, false]) {
+    const calls: string[] = [];
+    let created = false,
+      archived = false;
+    const client = {
+      fetchWorkspaces: async () => ({
+        entries:
+          created && !archived
+            ? [{ id: "test-workspace", projectId: "project" }]
+            : [],
+      }),
+      listProjects: async () => ({
+        projects: existing ? [{ projectId: "project" }] : [],
+      }),
+      createAgent: async () => {
+        created = true;
+        return { id: "test-agent", workspaceId: "test-workspace" };
+      },
+      deleteAgent: async (id: string) => {
+        calls.push(`agent:${id}`);
+      },
+      archiveWorkspace: async (id: string) => {
+        archived = true;
+        calls.push(`workspace:${id}`);
+        return { error: null };
+      },
+      removeProject: async (id: string) => {
+        calls.push(`project:${id}`);
+      },
+    };
+    await assert.rejects(
+      withLiveTestSession(
+        client as unknown as Parameters<typeof withLiveTestSession>[0],
+        { provider: "claude", cwd: "/tmp" },
+        async () => {
+          throw new Error("test failed");
+        },
+      ),
+      /test failed/,
+    );
+    assert.deepEqual(calls, [
+      "agent:test-agent",
+      "workspace:test-workspace",
+      ...(existing ? [] : ["project:project"]),
+    ]);
+  }
+});
 import {
   localWebsocketTarget,
   registerLegacyCredentialRpc,
