@@ -60,7 +60,9 @@ async function authenticate() {
   initializing = true;
   timer = setTimeout(fail, 20000);
   try {
-    const tokens = await codexTokens(accountHome, expected);
+    let tokens = await codexTokens(accountHome, expected);
+    if (tokens.expiresAt !== null && tokens.expiresAt < Date.now() + 90000)
+      tokens = await refreshCodexTokens(command, accountHome, expected);
     write({
       id: loginId,
       method: "account/login/start",
@@ -82,6 +84,14 @@ input.on("line", (line) => {
     message = JSON.parse(line);
   } catch {
     fail();
+    return;
+  }
+  if (managed && ready && message.method === "turn/start") {
+    // The account file can be renewed by another session while this process is idle.
+    // Reapply its current token before starting a turn, without changing the account.
+    ready = false;
+    queued.push(message);
+    void authenticate();
     return;
   }
   if (!managed || ready) {
@@ -119,6 +129,7 @@ output.on("line", (line) => {
       return;
     }
     clearTimeout(timer);
+    initializing = false;
     ready = true;
     for (const pending of queued.splice(0)) write(pending);
     return;
