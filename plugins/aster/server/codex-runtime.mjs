@@ -4,6 +4,24 @@ import { lstat, readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { dirname, isAbsolute, join, resolve, delimiter } from "node:path";
 
+// windowsHide is not inherited by a CLI's own child processes. The official
+// Windows Node launcher spawns codex.exe again, so apply it inside that launcher
+// as well. A process-local preload preserves the CLI's package-manager setup and
+// does not add NODE_OPTIONS to model tools or modify the global Codex install.
+const hiddenWindowsChildren =
+  "data:text/javascript;base64," +
+  Buffer.from(
+    `
+import childProcess from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+const spawn = childProcess.spawn;
+childProcess.spawn = (file, args, options) => Array.isArray(args)
+  ? spawn(file, args, {...options, windowsHide: true})
+  : spawn(file, {...args, windowsHide: true});
+syncBuiltinESMExports();
+`,
+  ).toString("base64");
+
 export function codexCommand(command, args = [], platform = process.platform) {
   if (
     !Array.isArray(command) ||
@@ -28,7 +46,10 @@ export function codexCommand(command, args = [], platform = process.platform) {
       !/^codex\.(cmd|ps1)$/i.test(file.split(/[\\/]/).at(-1))
     )
       throw Error("Codex 공식 CLI 실행 경로를 확인하세요.");
-    return [process.execPath, [script, ...prefix, ...args]];
+    return [
+      process.execPath,
+      ["--import", hiddenWindowsChildren, script, ...prefix, ...args],
+    ];
   }
   return [file, [...prefix, ...args]];
 }
