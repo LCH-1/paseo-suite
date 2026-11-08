@@ -10,7 +10,11 @@ import {
   hasCodexSubscription,
   type CodexReading,
 } from "./codex-policy";
-import { codexTokens, inspectCodexAccount } from "./codex-runtime.mjs";
+import {
+  codexCommand,
+  codexTokens,
+  inspectCodexAccount,
+} from "./codex-runtime.mjs";
 import {
   codexNodeLauncher,
   codexOriginalCommand,
@@ -295,6 +299,66 @@ async function tokenFile(home: string, identity: string) {
   );
   return access;
 }
+
+test("Windows 공식 Codex 실행기의 하위 프로세스도 창을 숨기고 인자·환경을 보존한다", async () =>
+  fixture(async (home) => {
+    const bin = join(home, "node_modules/@openai/codex/bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(home, "node_modules/@openai/codex/package.json"),
+      '{"type":"module"}',
+    );
+    const script = join(bin, "codex.js"),
+      shim = join(home, "codex.cmd");
+    await writeFile(shim, "@echo off\r\n");
+    await writeFile(
+      script,
+      `import {spawn,ChildProcess} from 'node:child_process';
+ChildProcess.prototype.spawn=function(options){console.log(JSON.stringify({windowsHide:options.windowsHide,args:process.argv.slice(2),environment:process.env.ASTER_WINDOW_FIXTURE,stdio:options.stdio}));return this;};
+spawn('owned-fixture-does-not-exist',[],{stdio:['pipe','pipe','pipe'],windowsHide:false});`,
+    );
+    const [command, args] = codexCommand(
+      [shim, "prefix with spaces"],
+      ["app-server"],
+      "win32",
+    );
+    const child = spawn(command, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        ASTER_WINDOW_FIXTURE: "preserved",
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+    });
+    let output = "",
+      errors = "";
+    child.stdout.on("data", (value) => (output += value));
+    child.stderr.on("data", (value) => (errors += value));
+    const code = await new Promise<number | null>((resolveExit, reject) => {
+      child.on("error", reject);
+      child.on("close", resolveExit);
+    });
+    assert.equal(code, 0, errors);
+    assert.deepEqual(JSON.parse(output), {
+      windowsHide: true,
+      args: ["prefix with spaces", "app-server"],
+      environment: "preserved",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    assert.deepEqual(
+      codexCommand(
+        [process.execPath, "custom-wrapper.js"],
+        ["app-server"],
+        "win32",
+      ),
+      [process.execPath, ["custom-wrapper.js", "app-server"]],
+    );
+    assert.deepEqual(codexCommand([shim], ["app-server"], "linux"), [
+      shim,
+      ["app-server"],
+    ]);
+  }));
 
 test("다중 계정은 인증 폴더별로 발견하고 같은 실제 계정 별칭은 하나로 합친다", async () =>
   fixture(async (home) => {
