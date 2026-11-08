@@ -30,6 +30,7 @@ jobs:
       - name: Core dependencies and patched runtime
         working-directory: paseo-core
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           npm ci --ignore-scripts
           npm run postinstall
           npm run build:server
@@ -42,6 +43,7 @@ jobs:
       - name: Desktop main
         working-directory: paseo-core
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           npm run build:main --workspace=@getpaseo/desktop
           npm exec --workspace=@getpaseo/desktop -- vitest run src/features/auto-updater.test.ts --bail=1
           git restore -- packages/cli/bin/paseo
@@ -49,6 +51,7 @@ jobs:
       - name: Suite verification and package
         working-directory: paseo-suite
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           npm ci --ignore-scripts
           npm run typecheck
           npm run lint
