@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { exhaustedUntil,
+import {
+  exhaustedUntil,
   accountSecureDirectory,
   bootstrapAccounts,
   expiredAccounts,
@@ -184,6 +185,162 @@ function report(label = "a@example.test", id = "claude:account.org-a") {
     },
   };
 }
+
+test("사용량 API의 일시적 조회 제한은 공식 CLI 확인을 통한 새 세션 시작을 막지 않는다", () => {
+  const limited = reportsSchema.parse([
+    {
+      ...report(),
+      report: {
+        status: "error",
+        error: "Rate limited by Claude. Try again in 5m.",
+      },
+    },
+  ]);
+  assert.deepEqual(mapReports(accounts, limited, {}, now), []);
+  assert.deepEqual(bootstrapAccounts(accounts, limited, now), accounts);
+});
+
+test("조회 제한으로 확인하지 못한 계정보다 한도 여유가 확인된 계정을 먼저 쓴다", () => {
+  const other: Account = {
+    id: "b",
+    home: "/fixture/b",
+    email: "b@example.test",
+    identity: "org-b|b@example.test",
+  };
+  const partial = report(other.email!, "claude:account.org-b");
+  partial.report.windows = partial.report.windows.filter(
+    (window) => window.id === "weekly",
+  );
+  const limited = reportsSchema.parse([
+    {
+      ...report(),
+      report: {
+        status: "error",
+        error: "Rate limited by Claude. Try again later.",
+      },
+    },
+    partial,
+  ]);
+  assert.deepEqual(bootstrapAccounts([...accounts, other], limited, now), [
+    other,
+  ]);
+});
+
+test("조회 제한이 있어도 확인된 무료·인증거부·한도 소진과 실행 차단은 우회하지 않는다", () => {
+  const limited = {
+    ...report(),
+    report: {
+      status: "error",
+      error: "Rate limited by Claude. Try again in 1h.",
+    },
+  };
+  const older = { ...report(), fetchedAt: new Date(now - 1000).toISOString() };
+  for (const denial of [
+    { ...older, report: { status: "available", planLabel: "Free" } },
+    {
+      ...older,
+      report: { status: "unavailable", problem: { kind: "rejected" } },
+    },
+    {
+      ...older,
+      report: {
+        status: "unavailable",
+        problem: { kind: "subscription_expired" },
+      },
+    },
+    {
+      ...older,
+      report: {
+        status: "available",
+        windows: [
+          {
+            id: "weekly",
+            usedPct: 100,
+            resetsAt: new Date(now + 1000).toISOString(),
+          },
+        ],
+      },
+    },
+    {
+      ...older,
+      report: {
+        status: "available",
+        windows: [{ id: "five_hour", usedPct: 100, resetsAt: null }],
+      },
+    },
+  ]) {
+    assert.deepEqual(
+      bootstrapAccounts(accounts, reportsSchema.parse([denial, limited]), now),
+      [],
+    );
+  }
+  assert.deepEqual(
+    bootstrapAccounts(
+      accounts,
+      reportsSchema.parse([limited]),
+      now,
+      () => true,
+    ),
+    [],
+  );
+});
+
+test("오래되거나 미래인 조회 제한과 다른 로그인 오류를 새 시작 후보로 추정하지 않는다", () => {
+  const limited = {
+    ...report(),
+    report: {
+      status: "error",
+      error: "Rate limited by Claude. Try again in 5m.",
+    },
+  };
+  for (const fetchedAt of [
+    new Date(now - 7 * 60000).toISOString(),
+    new Date(now + 1000).toISOString(),
+  ]) {
+    assert.deepEqual(
+      bootstrapAccounts(
+        accounts,
+        reportsSchema.parse([{ ...limited, fetchedAt }]),
+        now,
+      ),
+      [],
+    );
+  }
+  for (const error of [
+    "Claude login store no longer exists",
+    "Authentication rate limited",
+    "Claude usage API returned 500",
+  ]) {
+    assert.deepEqual(
+      bootstrapAccounts(
+        accounts,
+        reportsSchema.parse([
+          { ...report(), report: { status: "error", error } },
+        ]),
+        now,
+      ),
+      [],
+    );
+  }
+  const reset = {
+    ...report(),
+    fetchedAt: new Date(now - 1000).toISOString(),
+    report: {
+      status: "available",
+      windows: [
+        {
+          id: "weekly",
+          usedPct: 100,
+          resetsAt: new Date(now - 1).toISOString(),
+        },
+      ],
+    },
+  };
+  assert.deepEqual(
+    bootstrapAccounts(accounts, reportsSchema.parse([reset, limited]), now),
+    accounts,
+  );
+});
 
 test("Paseo 내장 보고서를 로컬 계정에 매칭한다", () => {
   const readings = mapReports(accounts, [report()], {});
@@ -631,36 +788,136 @@ test("계정 기록이 없는 기본 Claude 세션만 유지할 이전 계정이
 });
 
 test("소진된 한도의 복귀 시각을 알려 준다", () => {
-  const account = { id: "a", base: "claude", home: "h", email: "a@example.invalid", identity: null } as any;
-  const report = (windows: any[]) => [{ id: "claude:a", sourceId: "claude", fetchedAt: new Date(1000).toISOString(), account: { label: "a@example.invalid" }, report: { status: "available", windows } }] as any;
+  const account = {
+    id: "a",
+    base: "claude",
+    home: "h",
+    email: "a@example.invalid",
+    identity: null,
+  } as any;
+  const report = (windows: any[]) =>
+    [
+      {
+        id: "claude:a",
+        sourceId: "claude",
+        fetchedAt: new Date(1000).toISOString(),
+        account: { label: "a@example.invalid" },
+        report: { status: "available", windows },
+      },
+    ] as any;
   const reset = new Date(5000).toISOString();
-  assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 100, resetsAt: reset }]), 2000), 5000);
-  assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 40, resetsAt: reset }]), 2000), null);
-  assert.equal(exhaustedUntil(account, report([{ id: "weekly", usedPct: 100, resetsAt: reset }]), 9000), null);
+  assert.equal(
+    exhaustedUntil(
+      account,
+      report([{ id: "weekly", usedPct: 100, resetsAt: reset }]),
+      2000,
+    ),
+    5000,
+  );
+  assert.equal(
+    exhaustedUntil(
+      account,
+      report([{ id: "weekly", usedPct: 40, resetsAt: reset }]),
+      2000,
+    ),
+    null,
+  );
+  assert.equal(
+    exhaustedUntil(
+      account,
+      report([{ id: "weekly", usedPct: 100, resetsAt: reset }]),
+      9000,
+    ),
+    null,
+  );
 });
 
 test("확인된 계정이 있으면 만료된 계정으로 세션을 보내지 않는다", () => {
   const now = Date.parse("2026-11-07T10:00:00Z");
-  const account = (id: string, email: string) => ({ id, base: "claude", home: "/" + id, email, identity: id + "-org|" + id, signedIn: true }) as any;
-  const reportFor = (email: string, value: object) => ({ id: "claude:" + email + "." + email.split("@")[0] + "-org", sourceId: "claude", sourceLabel: "Claude", fetchedAt: "2026-11-07T09:59:00Z", account: { label: email }, report: value }) as any;
+  const account = (id: string, email: string) =>
+    ({
+      id,
+      base: "claude",
+      home: "/" + id,
+      email,
+      identity: id + "-org|" + id,
+      signedIn: true,
+    }) as any;
+  const reportFor = (email: string, value: object) =>
+    ({
+      id: "claude:" + email + "." + email.split("@")[0] + "-org",
+      sourceId: "claude",
+      sourceLabel: "Claude",
+      fetchedAt: "2026-11-07T09:59:00Z",
+      account: { label: email },
+      report: value,
+    }) as any;
   const healthy = account("main", "main@example.invalid");
   const lapsed = account("second", "second@example.invalid");
   const reports = [
-    reportFor("main@example.invalid", { status: "available", windows: [{ id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" }] }),
-    reportFor("second@example.invalid", { status: "unavailable", problem: { kind: "expired", expiresAt: "2026-11-07T09:30:00Z" } }),
+    reportFor("main@example.invalid", {
+      status: "available",
+      windows: [
+        { id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" },
+      ],
+    }),
+    reportFor("second@example.invalid", {
+      status: "unavailable",
+      problem: { kind: "expired", expiresAt: "2026-11-07T09:30:00Z" },
+    }),
   ];
-  assert.deepEqual(bootstrapAccounts([lapsed, healthy], reports, now).map((entry: any) => entry.id), ["main"]);
-  assert.deepEqual(bootstrapAccounts([lapsed], reports, now).map((entry: any) => entry.id), ["second"]);
+  assert.deepEqual(
+    bootstrapAccounts([lapsed, healthy], reports, now).map(
+      (entry: any) => entry.id,
+    ),
+    ["main"],
+  );
+  assert.deepEqual(
+    bootstrapAccounts([lapsed], reports, now).map((entry: any) => entry.id),
+    ["second"],
+  );
 });
 
 test("확인된 계정이 잠시 막혀 있으면 만료된 계정을 대안으로 남긴다", () => {
   const now = Date.parse("2026-11-07T10:00:00Z");
-  const account = (id: string, email: string) => ({ id, base: "claude", home: "/" + id, email, identity: id + "-org|" + id, signedIn: true }) as any;
-  const reportFor = (email: string, value: object) => ({ id: "claude:" + email + "." + email.split("@")[0] + "-org", sourceId: "claude", sourceLabel: "Claude", fetchedAt: "2026-11-07T09:59:00Z", account: { label: email }, report: value }) as any;
+  const account = (id: string, email: string) =>
+    ({
+      id,
+      base: "claude",
+      home: "/" + id,
+      email,
+      identity: id + "-org|" + id,
+      signedIn: true,
+    }) as any;
+  const reportFor = (email: string, value: object) =>
+    ({
+      id: "claude:" + email + "." + email.split("@")[0] + "-org",
+      sourceId: "claude",
+      sourceLabel: "Claude",
+      fetchedAt: "2026-11-07T09:59:00Z",
+      account: { label: email },
+      report: value,
+    }) as any;
   const reports = [
-    reportFor("main@example.invalid", { status: "available", windows: [{ id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" }] }),
-    reportFor("second@example.invalid", { status: "unavailable", problem: { kind: "expired", expiresAt: "2026-11-07T09:30:00Z" } }),
+    reportFor("main@example.invalid", {
+      status: "available",
+      windows: [
+        { id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" },
+      ],
+    }),
+    reportFor("second@example.invalid", {
+      status: "unavailable",
+      problem: { kind: "expired", expiresAt: "2026-11-07T09:30:00Z" },
+    }),
   ];
-  const all = [account("main", "main@example.invalid"), account("second", "second@example.invalid")];
-  assert.deepEqual(bootstrapAccounts(all, reports, now, (id) => id === "main").map((entry: any) => entry.id).sort(), ["main", "second"]);
+  const all = [
+    account("main", "main@example.invalid"),
+    account("second", "second@example.invalid"),
+  ];
+  assert.deepEqual(
+    bootstrapAccounts(all, reports, now, (id) => id === "main")
+      .map((entry: any) => entry.id)
+      .sort(),
+    ["main", "second"],
+  );
 });

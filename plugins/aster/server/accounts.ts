@@ -355,7 +355,9 @@ export function exhaustedUntil(
         window.usedPct !== null &&
         window.usedPct >= 100,
     )
-    .map((window) => (window.resetsAt === null ? NaN : Date.parse(window.resetsAt)))
+    .map((window) =>
+      window.resetsAt === null ? NaN : Date.parse(window.resetsAt),
+    )
     .filter((at) => at > now);
   return resets.length ? Math.max(...resets) : null;
 }
@@ -368,6 +370,7 @@ export function bootstrapAccounts(
 ) {
   const expired = new Set(expiredAccounts(accounts, reports, now));
   const seen = new Set<string>();
+  const throttled = new Set<Account>();
   const startable = accounts.filter((account) => {
     const identity =
       account.identity ?? account.email?.toLowerCase() ?? account.home;
@@ -418,13 +421,48 @@ export function bootstrapAccounts(
             ),
           ),
       );
-    if (!expired.has(account) && !partial) return false;
+    // The usage endpoint's throttling is not a quota or authentication rejection.
+    // Let the official CLI check it, without inventing a usage score or bypassing known limits.
+    const rateLimited =
+      latest?.report.status === "error" &&
+      /^Rate limited by Claude\. Try again (?:later|in \d+[mh])\.$/.test(
+        latest.report.error ?? "",
+      ) &&
+      now - Date.parse(latest.fetchedAt) <= policy.maxAge &&
+      !matching.some(
+        (entry) =>
+          Date.parse(entry.fetchedAt) <= now &&
+          now - Date.parse(entry.fetchedAt) <= policy.maxAge &&
+          deniesUsage(entry) &&
+          entry.report.problem?.kind !== "expired",
+      ) &&
+      !matching.some((entry) =>
+        (entry.report.windows ?? []).some(
+          (window) =>
+            limits.includes(window.id) &&
+            window.usedPct !== null &&
+            window.usedPct >= 100 &&
+            (window.resetsAt === null ||
+              !Number.isFinite(Date.parse(window.resetsAt)) ||
+              Date.parse(window.resetsAt) > now),
+        ),
+      );
+    if (!expired.has(account) && !partial && !rateLimited) return false;
+    if (rateLimited) throttled.add(account);
     seen.add(identity);
     return true;
   });
   // A session sent to an expired login fails, so that is only worth trying with nothing better.
-  const verified = startable.filter((account) => !expired.has(account) && !isBlocked(account.id));
-  return verified.length ? verified : startable;
+  const open = (account: Account) =>
+    !expired.has(account) && !isBlocked(account.id);
+  const verified = startable.filter(
+    (account) => open(account) && !throttled.has(account),
+  );
+  if (verified.length) return verified;
+  const unverified = startable.filter(open);
+  return unverified.length
+    ? unverified
+    : startable.filter((account) => !throttled.has(account));
 }
 
 export class UsageReader {
