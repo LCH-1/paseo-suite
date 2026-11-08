@@ -91,12 +91,32 @@ test("Codex 실행 모듈 재시도는 해제 후 멈추고 소진되면 실패�
 test("한도가 없어도 기존 대화는 열리지만 새 세션과 사전 점검은 막힌다", () => {
   const bound = { id: "second", home: "/second", identity: "b" };
   const first = { id: "codex", home: "/codex", identity: "a" };
-  assert.equal(resumableCodexAccount({ reason: "resume" }, bound, [first]), bound);
-  assert.equal(resumableCodexAccount({ reason: "refresh" }, undefined, [first]), first);
-  assert.equal(resumableCodexAccount({ reason: "resume" }, undefined, []), null);
-  assert.equal(resumableCodexAccount({ reason: "create" }, bound, [first]), null);
-  assert.equal(resumableCodexAccount({ reason: "import" }, bound, [first]), null);
-  assert.equal(resumableCodexAccount({ reason: "resume", preflight: true }, bound, [first]), null);
+  assert.equal(
+    resumableCodexAccount({ reason: "resume" }, bound, [first]),
+    bound,
+  );
+  assert.equal(
+    resumableCodexAccount({ reason: "refresh" }, undefined, [first]),
+    first,
+  );
+  assert.equal(
+    resumableCodexAccount({ reason: "resume" }, undefined, []),
+    null,
+  );
+  assert.equal(
+    resumableCodexAccount({ reason: "create" }, bound, [first]),
+    null,
+  );
+  assert.equal(
+    resumableCodexAccount({ reason: "import" }, bound, [first]),
+    null,
+  );
+  assert.equal(
+    resumableCodexAccount({ reason: "resume", preflight: true }, bound, [
+      first,
+    ]),
+    null,
+  );
 });
 
 const now = 1800000000000;
@@ -319,13 +339,14 @@ test("같은 Codex 계정에 다시 로그인하면 오래된 기본 인증보�
   }));
 
 const fakeServer = `
-const readline=require('node:readline');let loggedIn=false,refreshRequest;
+const readline=require('node:readline'),fs=require('node:fs'),path=require('node:path');let loggedIn=false,refreshRequest;
 readline.createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;let result={};
+const stateFile=path.join(process.env.CODEX_HOME,'fixture-state.json');const state=fs.existsSync(stateFile)?JSON.parse(fs.readFileSync(stateFile,'utf8')):{};
 if(m.method==='fixture/refresh'){refreshRequest=m.id;process.stdout.write(JSON.stringify({id:'fixture-private-refresh',method:'account/chatgptAuthTokens/refresh',params:{previousAccountId:m.params.account}})+'\\n');return;}
 if(m.id==='fixture-private-refresh'){process.stdout.write(JSON.stringify({id:refreshRequest,result:{accepted:!m.error,identity:m.result?.chatgptAccountId}})+'\\n');return;}
 if(m.method==='account/login/start'){loggedIn=m.params.type==='chatgptAuthTokens';result={type:'chatgptAuthTokens'};}
-if(m.method==='account/read')result={account:{type:'chatgpt',planType:'pro'}};
-if(m.method==='account/rateLimits/read')result={accountId:'account-a',rateLimits:{planType:'pro',primary:{usedPercent:23,windowDurationMins:300,resetsAt:Math.floor(Date.now()/1000)+3600}},ordinaryUsageAllowed:true};
+if(m.method==='account/read')result={account:{type:'chatgpt',planType:state.plan??'pro'}};
+if(m.method==='account/rateLimits/read')result={accountId:state.identity??'account-a',rateLimits:{planType:state.plan??'pro',primary:{usedPercent:state.used??23,windowDurationMins:300,resetsAt:Math.floor(Date.now()/1000)+3600}},ordinaryUsageAllowed:state.allowed??true};
 if(m.method==='thread/resume')result={thread:m.params.threadId,home:process.env.CODEX_HOME,loggedIn,ephemeral:process.argv.includes('cli_auth_credentials_store="ephemeral"')};
 process.stdout.write(JSON.stringify({id:m.id,result})+'\\n');});`;
 
@@ -386,6 +407,104 @@ test("공식 app-server 계정 조회는 모델 요청 없이 현재 플랜·한
     assert.equal(value.plan, "pro");
     assert.equal(value.allowed, true);
     assert.equal(value.windows[0].usedPercent, 23);
+  }));
+
+test("두 Codex 인증 폴더의 공식 RPC 결과로 부하 분산·구독 종료 제외·재구독 복귀를 이어서 처리", async () =>
+  fixture(async (home) => {
+    const first = join(home, "first"),
+      second = join(home, "second");
+    const script = join(home, "fake.cjs");
+    await writeFile(script, fakeServer);
+    await tokenFile(first, "account-a");
+    await tokenFile(second, "account-b");
+    const state = async (
+      directory: string,
+      identity: string,
+      plan: string,
+      used: number,
+      allowed = true,
+    ) =>
+      writeFile(
+        join(directory, "fixture-state.json"),
+        JSON.stringify({ identity, plan, used, allowed }),
+      );
+    await state(first, "account-a", "pro", 80);
+    await state(second, "account-b", "pro", 10);
+    const accounts = await discoverCodexAccounts(
+      {
+        codex: { env: { CODEX_HOME: first } },
+        "codex-second": { extends: "codex", env: { CODEX_HOME: second } },
+      },
+      join(home, "paseo"),
+      home,
+    );
+    assert.equal(accounts.length, 2);
+    const instant = Date.now();
+    const read = async (at: number): Promise<CodexReading[]> =>
+      Promise.all(
+        accounts.map(async (account) => {
+          const value = await inspectCodexAccount(
+            [process.execPath, script],
+            account.home,
+            account.identity,
+          );
+          return {
+            id: account.id,
+            identity: account.identity,
+            at,
+            plan: value.plan,
+            allowed: value.allowed,
+            windows: value.windows,
+            blocked: value.blocked,
+          };
+        }),
+      );
+    const initial = await read(instant);
+    assert.equal(
+      chooseCodexAccount({ readings: initial, now: instant, loads: new Map() })
+        ?.identity,
+      "account-b",
+    );
+    assert.equal(
+      chooseCodexAccount({
+        readings: initial,
+        now: instant,
+        loads: new Map([["account-b", 100]]),
+      })?.identity,
+      "account-a",
+    );
+
+    await state(first, "account-a", "free", 0);
+    const lapsed = await read(instant + 1);
+    assert.equal(
+      chooseCodexAccount({
+        readings: lapsed,
+        now: instant + 1,
+        loads: new Map(),
+        current: { identity: "account-a", switchedAt: instant },
+      })?.identity,
+      "account-b",
+    );
+
+    await state(second, "account-b", "pro", 10, false);
+    assert.equal(
+      chooseCodexAccount({
+        readings: await read(instant + 2),
+        now: instant + 2,
+        loads: new Map(),
+      }),
+      null,
+    );
+
+    await state(first, "account-a", "pro", 5);
+    assert.equal(
+      chooseCodexAccount({
+        readings: [...lapsed, ...(await read(instant + 3))],
+        now: instant + 3,
+        loads: new Map(),
+      })?.identity,
+      "account-a",
+    );
   }));
 
 test("Codex 인증 갱신은 같은 계정만 허용하고 토큰과 내부 갱신 RPC를 노출하지 않는다", async () =>
