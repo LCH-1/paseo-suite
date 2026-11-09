@@ -6,6 +6,7 @@ import {
   accountSecureDirectory,
   bootstrapAccounts,
   exhaustedUntil,
+  exhaustedAccountsResetAt,
   hasPreviousAccount,
   needsLogin,
   discoverAccounts,
@@ -18,7 +19,10 @@ import {
 } from "./server/accounts";
 import { join } from "node:path";
 import { accountKey, RoutingCache } from "./server/routing-cache";
-import { needsAuthenticationRecovery, needsLimitRecovery } from "./server/auth-recovery";
+import {
+  needsAuthenticationRecovery,
+  needsLimitRecovery,
+} from "./server/auth-recovery";
 import { Controller } from "./server/controller";
 import { runPaseo } from "./server/paseo";
 import { profileDiscovery } from "./server/profile-discovery";
@@ -282,6 +286,22 @@ export default function contribute(server: PluginServerContext) {
               return preserveAccount();
             }
             const readings = mapReports(eligible, reports, settings.capacities);
+            const unavailableMessage = () => {
+              const resetAt = exhaustedAccountsResetAt(eligible, reports);
+              if (resetAt !== null) {
+                const when = new Date(resetAt).toLocaleString("ko-KR", {
+                  timeZone: "Asia/Seoul",
+                  month: "numeric",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                });
+                return `Aster: 모든 Claude 계정의 사용 한도가 소진되었습니다. 가장 빠른 초기화는 ${when}(한국시간)입니다. 초기화 후 자동으로 다시 선택됩니다.`;
+              }
+              return readings.length === 0
+                ? NO_USAGE_READINGS
+                : NO_SELECTABLE_ACCOUNT;
+            };
             if (preflight) {
               if (
                 controller.choose(request.agentId, readings, Date.now()) ||
@@ -293,11 +313,7 @@ export default function contribute(server: PluginServerContext) {
                 )
               )
                 return;
-              throw new Error(
-                readings.length === 0
-                  ? NO_USAGE_READINGS
-                  : NO_SELECTABLE_ACCOUNT,
-              );
+              throw new Error(unavailableMessage());
             }
             let selectedId =
               controller.choose(request.agentId, readings, Date.now())?.id ??
@@ -333,11 +349,7 @@ export default function contribute(server: PluginServerContext) {
                 );
                 return preserveAccount();
               }
-              throw new Error(
-                readings.length === 0
-                  ? NO_USAGE_READINGS
-                  : NO_SELECTABLE_ACCOUNT,
-              );
+              throw new Error(unavailableMessage());
             }
             const account = accounts.find((entry) => entry.id === selectedId)!;
             controller.bind(request.agentId, account.id, Date.now());

@@ -1,6 +1,6 @@
 {
   "name": "paseo-aster",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "paseoRuntimeAssets": [
     "server/codex-proxy.mjs",
     "server/codex-runtime.mjs",

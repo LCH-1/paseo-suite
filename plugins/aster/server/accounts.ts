@@ -362,6 +362,45 @@ export function exhaustedUntil(
   return resets.length ? Math.max(...resets) : null;
 }
 
+/** A partial report can prove exhaustion even when it cannot produce a routing score. */
+export function exhaustedAccountsResetAt(
+  accounts: Account[],
+  reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
+) {
+  if (!accounts.length) return null;
+  const resets: number[] = [];
+  for (const account of accounts) {
+    const current = matchingReports(account, reports).filter((entry) => {
+      const at = Date.parse(entry.fetchedAt);
+      return Number.isFinite(at) && at <= now && now - at <= policy.maxAge;
+    });
+    const latestAt = Math.max(
+      ...current.map((entry) => Date.parse(entry.fetchedAt)),
+    );
+    const exhausted = current
+      .filter(
+        (entry) =>
+          Date.parse(entry.fetchedAt) === latestAt && !deniesUsage(entry),
+      )
+      .flatMap((entry) =>
+        entry.report.status === "available" ? (entry.report.windows ?? []) : [],
+      )
+      .filter(
+        (window) =>
+          ["five_hour", "weekly"].includes(window.id) && window.usedPct === 100,
+      );
+    if (!exhausted.length) return null;
+    const accountResets = exhausted.map((window) =>
+      Date.parse(window.resetsAt ?? ""),
+    );
+    if (accountResets.some((at) => !Number.isFinite(at) || at <= now))
+      return null;
+    resets.push(Math.max(...accountResets));
+  }
+  return Math.min(...resets);
+}
+
 export function bootstrapAccounts(
   accounts: Account[],
   reports: z.infer<typeof reportsSchema>,
