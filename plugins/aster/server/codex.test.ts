@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { spawnProcess } from "@getpaseo/plugin/server";
 import {
   chooseCodexAccount,
@@ -17,6 +18,7 @@ import {
 } from "./codex-runtime.mjs";
 import {
   codexNodeLauncher,
+  codexLauncherCommand,
   codexOriginalCommand,
   discoverCodexAccounts,
   resumableCodexAccount,
@@ -415,9 +417,15 @@ if(m.method==='thread/resume')result={thread:m.params.threadId,home:process.env.
 process.stdout.write(JSON.stringify({id:m.id,result})+'\\n');});`;
 
 test("Electron 실행 launcher는 환경변수를 직접 설정하고 경로를 이스케이프한다", () => {
-  assert.equal(
-    codexNodeLauncher("C:\\앱 100%\\Paseo.exe", "win32").content,
-    '@echo off\r\nchcp 65001 >nul\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"C:\\앱 100%%\\Paseo.exe" %*\r\nexit /b %errorlevel%\r\n',
+  const launcher = codexNodeLauncher("C:\\앱 100%'\\Paseo.exe", "win32");
+  assert.equal(launcher.file, "codex-node.ps1");
+  assert.ok(
+    launcher.content.includes("$start.FileName = 'C:\\앱 100%''\\Paseo.exe'"),
+  );
+  assert.ok(
+    launcher.content.includes(
+      '$start.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1"',
+    ),
   );
   assert.equal(
     codexNodeLauncher("/opt/it's/Paseo", "linux").content,
@@ -439,22 +447,88 @@ test(
         `process.stdin.once("data",(d)=>{console.log(JSON.stringify({args:process.argv.slice(2),env:process.env.ELECTRON_RUN_AS_NODE,input:String(d).trim()}));process.exit(7)});`,
       );
       const original = JSON.stringify(["C:\\Program Files\\npm\\codex.cmd"]);
+      const extra = [
+        "",
+        "한글 & %PATH% ! ^ | < > ( )",
+        'quote"\\',
+        "trailing\\\\",
+        "line\nnext",
+      ];
       const env = { ...process.env };
       delete env.ELECTRON_RUN_AS_NODE;
-      const child = spawnProcess(file, [script, original, "app-server"], {
-        stdio: "pipe",
-        env,
-      });
+      const [command, ...prefix] = codexLauncherCommand(file);
+      const child = spawnProcess(
+        command,
+        [...prefix, script, original, "app-server", ...extra],
+        {
+          stdio: "pipe",
+          env,
+        },
+      );
       let output = "";
+      let error = "";
       child.stdout.on("data", (data) => (output += data));
+      child.stderr.on("data", (data) => (error += data));
       child.stdin.write("ping\n");
       const code = await new Promise((accept) => child.on("close", accept));
-      assert.equal(code, 7);
+      assert.equal(code, 7, error);
       assert.deepEqual(JSON.parse(output), {
-        args: [original, "app-server"],
+        args: [original, "app-server", ...extra],
         env: "1",
         input: "ping",
       });
+    }),
+);
+
+test("배치 실행기와 PowerShell 실행기 설정에서 원래 Codex 명령을 복원한다", () => {
+  const proxy = "C:\\앱\\server\\codex-proxy.mjs";
+  const original = ["C:\\Program Files\\npm\\codex.cmd"];
+  for (const prefix of [
+    ["C:\\old\\codex-node.cmd"],
+    codexLauncherCommand("C:\\새 폴더\\codex-node.ps1", "win32"),
+  ]) {
+    assert.deepEqual(
+      codexOriginalCommand([...prefix, proxy, JSON.stringify(original)]),
+      original,
+    );
+  }
+});
+
+test(
+  "배치 없는 실행기는 연속 JSON과 EOF·stderr를 보존하고 중단 종료 코드로 즉시 닫힌다",
+  { skip: process.platform !== "win32", timeout: 10000 },
+  async () =>
+    fixture(async (home) => {
+      const directory = join(home, "한글 ' & 100%");
+      await mkdir(directory);
+      const launcher = codexNodeLauncher(process.execPath);
+      const file = join(directory, launcher.file),
+        script = join(directory, "echo.cjs");
+      await writeFile(file, launcher.content);
+      await writeFile(
+        script,
+        `const r=require("node:readline").createInterface({input:process.stdin}); r.on("line", line=>process.stdout.write(line+"\\n")); r.on("close",()=>{process.stderr.write("종료 확인\\n");process.exitCode=130;});`,
+      );
+      const [command, ...prefix] = codexLauncherCommand(file);
+      const child = spawnProcess(command, [...prefix, script], {
+        stdio: "pipe",
+      });
+      const output = createInterface({ input: child.stdout });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const closed = new Promise((resolve) => child.on("close", resolve));
+      const messages = output[Symbol.asyncIterator]();
+      const first = JSON.stringify({ id: 1, text: "한글 λ 🚀" });
+      child.stdin.write(first + "\n");
+      assert.equal((await messages.next()).value, first);
+      const second = JSON.stringify({ id: 2, text: "x".repeat(100000) });
+      child.stdin.end(second + "\n");
+      assert.equal((await messages.next()).value, second);
+      assert.equal(await closed, 130);
+      assert.equal(stderr, "종료 확인\n");
+      assert.equal((await messages.next()).done, true);
     }),
 );
 
