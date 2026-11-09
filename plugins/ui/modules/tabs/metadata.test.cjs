@@ -6,47 +6,117 @@ const { createLoader } = require("./metadata.js");
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
-function harness(refresh, entries = [{ serverId: "host", workspaceId: "workspace", tabId: "tab", agentId: "agent" }]) {
+function harness(
+  refresh,
+  entries = [
+    {
+      serverId: "host",
+      workspaceId: "workspace",
+      tabId: "tab",
+      agentId: "agent",
+    },
+  ],
+) {
   const data = new Map([[STORAGE_KEY, JSON.stringify({ entries })]]);
-  const model = createModel({ getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, value),
-    get length() { return data.size; }, key: index => [...data.keys()][index] ?? null });
+  const model = createModel({
+    getItem: (key) => data.get(key) ?? null,
+    setItem: (key, value) => data.set(key, value),
+    get length() {
+      return data.size;
+    },
+    key: (index) => [...data.keys()][index] ?? null,
+  });
   const listeners = new Set();
   const calls = [];
-  const session = { client: { isConnected: true }, clientGeneration: 1, agents: new Map(), agentDetails: new Map(),
-    workspaces: new Map([["other-workspace", {}]]), hasHydratedAgents: true, hasHydratedWorkspaces: false };
-  const state = { sessions: { host: session }, setAgentDetails(serverId, update) {
-    const target = state.sessions[serverId];
-    target.agentDetails = update(target.agentDetails);
-    emit();
-  } };
-  function emit() { listeners.forEach((listener) => listener(state)); }
-  const sessions = Object.assign(() => {}, { getState: () => state,
-    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } });
-  const loader = createLoader({ model, sessions,
-    getPaseoClient(serverId) { return { agents: { ref(agentId) { return { refresh() {
-      calls.push([serverId, agentId]); return refresh(serverId, agentId);
-    } }; } } }; },
-    normalizeAgentSnapshot: (agent, serverId) => ({ ...agent, serverId, pendingPermissions: [] }),
+  const session = {
+    client: { isConnected: true },
+    clientGeneration: 1,
+    agents: new Map(),
+    agentDetails: new Map(),
+    workspaces: new Map([["other-workspace", {}]]),
+    hasHydratedAgents: true,
+    hasHydratedWorkspaces: false,
+  };
+  const state = {
+    sessions: { host: session },
+    setAgentDetails(serverId, update) {
+      const target = state.sessions[serverId];
+      target.agentDetails = update(target.agentDetails);
+      emit();
+    },
+  };
+  function emit() {
+    listeners.forEach((listener) => listener(state));
+  }
+  const sessions = Object.assign(() => {}, {
+    getState: () => state,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
   });
-  return { model, loader, calls, session, state, emit, listeners, saved: () => JSON.parse(data.get(STORAGE_KEY)) };
+  const loader = createLoader({
+    model,
+    sessions,
+    getPaseoClient(serverId) {
+      return {
+        agents: {
+          ref(agentId) {
+            return {
+              refresh() {
+                calls.push([serverId, agentId]);
+                return refresh(serverId, agentId);
+              },
+            };
+          },
+        },
+      };
+    },
+    normalizeAgentSnapshot: (agent, serverId) => ({
+      ...agent,
+      serverId,
+      pendingPermissions: [],
+    }),
+  });
+  return {
+    model,
+    loader,
+    calls,
+    session,
+    state,
+    emit,
+    listeners,
+    saved: () => JSON.parse(data.get(STORAGE_KEY)),
+  };
 }
-const result = (title = "복원된 대화") => ({ agent: { id: "agent", workspaceId: "workspace", title }, project: { workspaceId: "workspace" } });
+const result = (title = "복원된 대화") => ({
+  agent: { id: "agent", workspaceId: "workspace", title },
+  project: { workspaceId: "workspace" },
+});
 
 test("unrelated session updates do not rewrite unchanged cached titles while renamed titles still update", async () => {
   const app = harness(async () => result());
   await setImmediate();
   const rememberTitle = app.model.rememberTitle;
   let updates = 0;
-  app.model.rememberTitle = (...args) => { updates++; rememberTitle(...args); };
+  app.model.rememberTitle = (...args) => {
+    updates++;
+    rememberTitle(...args);
+  };
   for (let index = 0; index < 20; index++) {
     app.emit();
     await setImmediate();
   }
   assert.equal(updates, 0);
-  app.session.agentDetails.set("agent", { ...app.session.agentDetails.get("agent"), title: "바뀐 제목" });
+  app.session.agentDetails = new Map(app.session.agentDetails).set("agent", {
+    ...app.session.agentDetails.get("agent"),
+    title: "바뀐 제목",
+  });
   app.emit();
   await setImmediate();
   assert.equal(updates, 1);
@@ -70,14 +140,29 @@ test("restored inactive tab fetches metadata without reading history or replacin
 });
 
 test("deduplicates metadata requests for two retained tabs of one agent", async () => {
-  const app = harness(async () => result(), [
-    { serverId: "host", workspaceId: "workspace", tabId: "one", agentId: "agent" },
-    { serverId: "host", workspaceId: "workspace", tabId: "two", agentId: "agent" },
-  ]);
+  const app = harness(
+    async () => result(),
+    [
+      {
+        serverId: "host",
+        workspaceId: "workspace",
+        tabId: "one",
+        agentId: "agent",
+      },
+      {
+        serverId: "host",
+        workspaceId: "workspace",
+        tabId: "two",
+        agentId: "agent",
+      },
+    ],
+  );
   await setImmediate();
   assert.equal(app.calls.length, 1);
   assert.equal(app.saved().entries.length, 1);
-  assert.ok(app.saved().entries.every((entry) => entry.title === "복원된 대화"));
+  assert.ok(
+    app.saved().entries.every((entry) => entry.title === "복원된 대화"),
+  );
   app.loader.dispose();
 });
 
@@ -132,7 +217,10 @@ test("does not overwrite a newer snapshot received while metadata is loading", a
   const pending = deferred();
   const app = harness(() => pending.promise);
   await setImmediate();
-  app.session.agents.set("agent", { id: "agent", title: "실시간 이름" });
+  app.session.agents = new Map(app.session.agents).set("agent", {
+    id: "agent",
+    title: "실시간 이름",
+  });
   app.emit();
   pending.resolve(result("이전 이름"));
   await setImmediate();
@@ -147,7 +235,10 @@ test("authoritative workspace metadata repairs retained ownership without a perm
   const app = harness(async () => mismatch);
   await setImmediate();
   assert.equal(app.loader.state(app.model.entries()[0]).tag, "ready");
-  assert.equal(app.session.agentDetails.get("agent").workspaceId, "other-workspace");
+  assert.equal(
+    app.session.agentDetails.get("agent").workspaceId,
+    "other-workspace",
+  );
   assert.equal(app.model.entries()[0].workspaceId, "other-workspace");
   assert.equal(app.saved().entries.length, 1);
   app.emit();
@@ -172,16 +263,32 @@ test("authoritative archived metadata is retained without reopening its top tab"
   const snapshot = result();
   snapshot.agent.workspaceId = "removed-workspace";
   snapshot.agent.archivedAt = "2026-10-23T00:00:00Z";
-  const app = harness(async () => snapshot, [
-    { serverId: "host", workspaceId: "stale-one", tabId: "one", agentId: "agent" },
-    { serverId: "host", workspaceId: "stale-two", tabId: "two", agentId: "agent" },
-  ]);
+  const app = harness(
+    async () => snapshot,
+    [
+      {
+        serverId: "host",
+        workspaceId: "stale-one",
+        tabId: "one",
+        agentId: "agent",
+      },
+      {
+        serverId: "host",
+        workspaceId: "stale-two",
+        tabId: "two",
+        agentId: "agent",
+      },
+    ],
+  );
   const entry = app.model.entries()[0];
   await setImmediate();
   assert.equal(app.calls.length, 1);
   assert.equal(app.model.entries().length, 0);
   assert.equal(app.saved().entries.length, 0);
-  assert.equal(app.session.agentDetails.get("agent").archivedAt, snapshot.agent.archivedAt);
+  assert.equal(
+    app.session.agentDetails.get("agent").archivedAt,
+    snapshot.agent.archivedAt,
+  );
   assert.equal(app.loader.state(entry).tag, "ready");
   app.loader.dispose();
 });
@@ -189,7 +296,10 @@ test("authoritative archived metadata is retained without reopening its top tab"
 test("metadata failures preserve entries and retry once on a new connection", async (t) => {
   t.mock.method(console, "warn", () => {});
   let count = 0;
-  const app = harness(async () => { if (++count === 1) throw new Error("offline"); return result(); });
+  const app = harness(async () => {
+    if (++count === 1) throw new Error("offline");
+    return result();
+  });
   await setImmediate();
   assert.equal(app.loader.state(app.model.entries()[0]).tag, "error");
   app.emit();
@@ -218,7 +328,12 @@ test("dispose cancels local subscriptions and ignores in-flight metadata", async
 test("bounds parallel metadata work at four requests without polling", async () => {
   const pending = Array.from({ length: 7 }, deferred);
   let count = 0;
-  const entries = pending.map((_item, i) => ({ serverId: "host", workspaceId: "workspace", tabId: "tab-" + i, agentId: "agent-" + i }));
+  const entries = pending.map((_item, i) => ({
+    serverId: "host",
+    workspaceId: "workspace",
+    tabId: "tab-" + i,
+    agentId: "agent-" + i,
+  }));
   const app = harness(() => pending[count++].promise, entries);
   await setImmediate();
   assert.equal(count, 4);
@@ -229,5 +344,33 @@ test("bounds parallel metadata work at four requests without polling", async () 
   await setImmediate();
   assert.equal(app.saved().entries.length, 7);
   assert.equal(count, 7);
+  app.loader.dispose();
+});
+
+test("stream-only updates do not schedule tab metadata reconciliation", async () => {
+  const app = harness(async () => result());
+  await setImmediate();
+  let reconciliations = 0;
+  const reconcile = app.model.reconcile;
+  app.model.reconcile = (...args) => {
+    reconciliations++;
+    return reconcile(...args);
+  };
+  for (let index = 0; index < 100; index++) {
+    app.session.agentStreamTail = new Map([
+      ["agent", [{ text: String(index) }]],
+    ]);
+    app.emit();
+    await setImmediate();
+  }
+  assert.equal(reconciliations, 0);
+  app.session.agentDetails = new Map(app.session.agentDetails).set("agent", {
+    ...app.session.agentDetails.get("agent"),
+    title: "new title",
+  });
+  app.emit();
+  await setImmediate();
+  assert.ok(reconciliations > 0);
+  assert.equal(app.model.entries()[0].title, "new title");
   app.loader.dispose();
 });
