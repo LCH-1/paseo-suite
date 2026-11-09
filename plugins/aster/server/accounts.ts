@@ -11,6 +11,7 @@ import {
 } from "./paseo.ts";
 import { isCurrentUsage, policy, type AccountUsage } from "./scheduler.ts";
 import { hostUsageReader } from "./host-usage";
+import { sharedResult } from "./shared-result";
 
 export const paseoHome = process.env.PASEO_HOME ?? join(homedir(), ".paseo");
 export const stateDirectory = join(paseoHome, "aster");
@@ -505,6 +506,7 @@ export function bootstrapAccounts(
 }
 
 export class UsageReader {
+  private readonly lifetime = new AbortController();
   private cached: {
     at: number;
     reports: z.infer<typeof reportsSchema>;
@@ -527,10 +529,17 @@ export class UsageReader {
     this.forceRefresh = true;
   }
 
+  dispose() {
+    this.lifetime.abort();
+    this.generation++;
+    this.cached = null;
+  }
+
   async read(
     command: Command,
     signal: AbortSignal,
   ): Promise<z.infer<typeof reportsSchema>> {
+    signal = AbortSignal.any([signal, this.lifetime.signal]);
     signal.throwIfAborted();
     if (this.cached && this.now() - this.cached.at < 60_000)
       return this.cached.reports;
@@ -552,7 +561,7 @@ export class UsageReader {
                 paseoHome,
                 ...(this.forceRefresh ? ["--refresh"] : []),
               ],
-              signal,
+              this.lifetime.signal,
             ),
           ),
         );
@@ -566,7 +575,7 @@ export class UsageReader {
       });
       this.pending = request;
     }
-    const reports = await this.pending.task;
+    const reports = await sharedResult(this.pending.task, signal);
     signal.throwIfAborted();
     return generation === this.generation
       ? reports

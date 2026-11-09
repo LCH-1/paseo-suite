@@ -44,7 +44,7 @@ const NO_USAGE_READINGS =
 const NO_SELECTABLE_ACCOUNT =
   "Aster: Claude 계정의 잔여 한도 또는 최신 초기화 정보를 확인하세요. 현재 자동 선택 가능한 계정이 없습니다.";
 
-class NoEligibleSubscription extends Error {}
+class AccountUnavailable extends Error {}
 
 export default function contribute(server: PluginServerContext) {
   const discoverProfiles = profileDiscovery(
@@ -259,7 +259,7 @@ export default function contribute(server: PluginServerContext) {
               signal,
             );
             if (!eligible.length && accounts.length)
-              throw new NoEligibleSubscription(
+              throw new AccountUnavailable(
                 "Aster: 현재 Claude Code 구독을 사용할 수 있는 계정이 없습니다. 기존 대화와 로그인은 유지됩니다.",
               );
             const preserveAccount = () => {
@@ -269,7 +269,7 @@ export default function contribute(server: PluginServerContext) {
                 (request.provider !== "claude" ? request.provider : null);
               const account = eligible.find((entry) => entry.id === id);
               if (!account && id && accounts.some((entry) => entry.id === id))
-                throw new NoEligibleSubscription(
+                throw new AccountUnavailable(
                   "Aster: 기존 계정의 구독을 사용할 수 없고 전환할 계정의 한도를 확인하지 못했습니다. 잠시 후 다시 시도하세요.",
                 );
               return account ? withAccount(request, account) : undefined;
@@ -343,6 +343,8 @@ export default function contribute(server: PluginServerContext) {
             }
             signal.throwIfAborted();
             if (!selectedId) {
+              if (exhaustedAccountsResetAt(eligible, reports) !== null)
+                throw new AccountUnavailable(unavailableMessage());
               if (request.reason !== "create") {
                 console.warn(
                   `[aster] session ${request.agentId}: 선택 가능한 사용량 정보 없음, 기존 환경으로 재개`,
@@ -367,7 +369,7 @@ export default function contribute(server: PluginServerContext) {
           signal.throwIfAborted();
           if (
             request.reason === "create" ||
-            error instanceof NoEligibleSubscription
+            error instanceof AccountUnavailable
           )
             throw error;
           console.warn(
@@ -550,6 +552,7 @@ export default function contribute(server: PluginServerContext) {
     ),
   ];
   return () => {
+    reader.dispose();
     subscriptions.dispose();
     unregister.forEach((remove) => remove());
   };

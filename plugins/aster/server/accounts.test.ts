@@ -644,6 +644,88 @@ test("동일 세대는 조회를 공유하고 실패 뒤 재시도하며 취소�
   });
 });
 
+test("공유 사용량 조회의 첫 대기자 취소는 다른 요청과 캐시를 취소하지 않는다", async () => {
+  let resolve!: (value: string) => void;
+  let sharedSignal!: AbortSignal;
+  let calls = 0;
+  const reader = new UsageReader(async (_command, _args, signal) => {
+    sharedSignal = signal;
+    calls++;
+    return await new Promise<string>((done, reject) => {
+      resolve = done;
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+    });
+  });
+  const first = new AbortController();
+  const command = { file: "fixture-only", args: [] };
+  const abandoned = reader.read(command, first.signal);
+  const canceled = assert.rejects(abandoned, { name: "AbortError" });
+  const active = reader.read(command, new AbortController().signal);
+  first.abort();
+  try {
+    await canceled;
+    assert.equal(sharedSignal.aborted, false);
+    resolve(JSON.stringify([report()]));
+    assert.equal((await active).length, 1);
+    assert.equal(
+      (await reader.read(command, new AbortController().signal)).length,
+      1,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    resolve("[]");
+    await active.catch(() => undefined);
+  }
+});
+
+test("공유 사용량 조회의 추가 대기자는 조회 정산을 기다리지 않고 취소된다", async () => {
+  let resolve!: (value: string) => void;
+  const reader = new UsageReader(
+    async () =>
+      await new Promise<string>((done) => {
+        resolve = done;
+      }),
+  );
+  const command = { file: "fixture-only", args: [] };
+  const active = reader.read(command, new AbortController().signal);
+  const second = new AbortController();
+  const canceled = assert.rejects(reader.read(command, second.signal), {
+    name: "AbortError",
+  });
+  second.abort();
+  try {
+    await canceled;
+  } finally {
+    resolve("[]");
+    await active;
+  }
+});
+
+test("UsageReader 해제는 실제 공유 조회와 모든 대기자를 종료한다", async () => {
+  let sharedSignal!: AbortSignal;
+  const reader = new UsageReader(async (_command, _args, signal) => {
+    sharedSignal = signal;
+    return await new Promise<string>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+    });
+  });
+  const command = { file: "fixture-only", args: [] };
+  const pending = assert.rejects(
+    reader.read(command, new AbortController().signal),
+    { name: "AbortError" },
+  );
+  reader.dispose();
+  await pending;
+  assert.equal(sharedSignal.aborted, true);
+  await assert.rejects(reader.read(command, new AbortController().signal), {
+    name: "AbortError",
+  });
+});
+
 test("만료만 확인된 로그인은 정상 CLI 갱신을 위해 식별하고 거부·오류는 포함하지 않는다", () => {
   const expired = {
     ...report(),

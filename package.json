@@ -12,6 +12,7 @@
     "lint:files": "eslint --no-ignore",
     "format:files": "prettier --write",
     "test": "tsx --test tests/*.test.ts",
+    "test:files": "tsx --test",
     "format": "prettier --write tools tests plugins/ui/index.client.tsx plugins/ui/index.server.ts plugins/ui/shared plugins/ui/client"
   },
   "devDependencies": {

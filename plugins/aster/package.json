@@ -1,6 +1,6 @@
 {
   "name": "paseo-aster",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "paseoRuntimeAssets": [
     "server/codex-proxy.mjs",
     "server/codex-runtime.mjs",
@@ -32,6 +32,7 @@
     "server/legacy-credential-rpc.ts",
     "server/core-profiles.ts",
     "server/host-usage.ts",
+    "server/shared-result.ts",
     "server/codex.ts",
     "server/codex-policy.ts",
     "server/codex-runtime.mjs",
