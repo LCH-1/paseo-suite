@@ -1279,5 +1279,43 @@
     "registry": 3682,
     "newWorkspaceTabs": 5024,
     "tabPresence": 5353
+  },
+  "sidebarActivity@bd6c28576edd": {
+    "react": 37,
+    "rows": 5347,
+    "presentation": 4740,
+    "navigation": 3913,
+    "sessions": 3661,
+    "layouts": 3812,
+    "snapshots": 3853,
+    "hostRoutes": 3917,
+    "tabGroups": 5353,
+    "keyboardActions": 4577,
+    "settings": 887,
+    "reopen": 5327,
+    "shortcuts": 4037,
+    "titles": 4482,
+    "registry": 3682,
+    "newWorkspaceTabs": 5027,
+    "tabPresence": 4137
+  },
+  "sidebarActivity@2039e41bbb8e": {
+    "react": 37,
+    "rows": 5347,
+    "presentation": 4737,
+    "navigation": 3912,
+    "sessions": 3661,
+    "layouts": 3811,
+    "snapshots": 3852,
+    "hostRoutes": 3916,
+    "tabGroups": 5354,
+    "keyboardActions": 4574,
+    "settings": 887,
+    "reopen": 5327,
+    "shortcuts": 4036,
+    "titles": 4478,
+    "registry": 3682,
+    "newWorkspaceTabs": 5024,
+    "tabPresence": 5353
   }
 }
