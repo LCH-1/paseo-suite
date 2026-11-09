@@ -9,14 +9,49 @@
   function keyOf(serverId, workspaceId, tabId) {
     return JSON.stringify([serverId, workspaceId, tabId]);
   }
-  function createModel(storage, getSessionMap) {
+  function windowStorageKey(key, scope) {
+    if (!scope || key.startsWith(SHARED_PREFIX + "archive:")) return key;
+    return "paseo-project-window:" + scope.windowId + ":" + key;
+  }
+  function windowStorage(storage, scope) {
+    if (!scope) return storage;
+    const prefix = "paseo-project-window:" + scope.windowId + ":";
+    function keys() {
+      const result = [];
+      for (let index = 0; index < storage.length; index++) {
+        const key = storage.key(index);
+        if (key?.startsWith(prefix + STORAGE_KEY)) result.push(key.slice(prefix.length));
+        else if (key?.startsWith(SHARED_PREFIX + "archive:")) result.push(key);
+      }
+      return result;
+    }
+    return {
+      getItem: key => storage.getItem(windowStorageKey(key, scope)),
+      setItem: (key, value) => storage.setItem(windowStorageKey(key, scope), value),
+      get length() { return keys().length; },
+      key: index => keys()[index] ?? null,
+    };
+  }
+  function isWindowStorageEvent(key, scope) {
+    if (key === null) return true;
+    if (key.startsWith(SHARED_PREFIX + "archive:")) return true;
+    return key.startsWith(windowStorageKey(STORAGE_KEY, scope));
+  }
+  function createModel(storage, getSessionMap, scope = null) {
+    storage = windowStorage(storage, scope);
+    function accepts(serverId, workspaceId, allowUnresolved = false) {
+      if (!scope) return true;
+      if (scope.serverId !== serverId) return false;
+      const workspace = getSessionMap?.()?.[serverId]?.workspaces?.get(workspaceId);
+      return workspace ? workspace.projectId === scope.projectId : allowUnresolved;
+    }
     let storageFailed = false;
     let saved;
     try { saved = JSON.parse(storage.getItem(STORAGE_KEY) || "null"); }
     catch { saved = null; storageFailed = true; }
     const valid = (item) => item && typeof item.serverId === "string"
       && typeof item.workspaceId === "string" && typeof item.tabId === "string"
-      && typeof item.agentId === "string";
+      && typeof item.agentId === "string" && accepts(item.serverId, item.workspaceId, true);
     let entries = Array.isArray(saved?.entries) ? saved.entries.filter(valid)
       .filter((item) => saved.schemaVersion !== 2 || item.pinned === true)
       .map((item) => ({ ...item, pinned: true, key: keyOf(item.serverId, item.workspaceId, item.tabId) })) : [];
@@ -250,6 +285,7 @@
       },
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
       retainAt(serverId, workspaceId, tab, index = entries.length) {
+        if (!accepts(serverId, workspaceId)) return null;
         if (![serverId, workspaceId, tab?.tabId, tab?.target?.agentId].every((value) => typeof value === "string" && value.length)
           || tab.target.kind !== "agent") return null;
         const identity = agentKey(serverId, tab.target.agentId);
@@ -289,7 +325,7 @@
         const seen = new Map();
         const next = [];
         for (const entry of entries) {
-          if (archiveState(entry)) { changed = true; continue; }
+          if (archiveState(entry) || !accepts(entry.serverId, entry.workspaceId, true)) { changed = true; continue; }
           const session = sessionMap?.[entry.serverId];
           const candidates = [session?.agents?.get(entry.agentId), session?.agentDetails?.get(entry.agentId)];
           const identity = agentKey(entry.serverId, entry.agentId);
@@ -332,7 +368,8 @@
             continue;
           }
           seen.set(identity, next.length);
-          next.push(updated);
+          if (accepts(updated.serverId, updated.workspaceId, true)) next.push(updated);
+          else changed = true;
         }
         if (changed) { entries = next; notify(); }
       },
@@ -347,6 +384,7 @@
         if (changed) notify();
       },
       ingest(serverId, workspaceId, rows) {
+        if (!accepts(serverId, workspaceId)) return;
         const next = removeArchived(entries);
         let changed = next.length !== entries.length;
         entries = next;
@@ -406,5 +444,5 @@
       keyOf,
     };
   }
-  return { createModel, keyOf, STORAGE_KEY, SHARED_PREFIX };
+  return { createModel, keyOf, STORAGE_KEY, SHARED_PREFIX, windowStorageKey, isWindowStorageEvent };
 });

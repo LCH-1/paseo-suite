@@ -1,4 +1,4 @@
 {
-  "name": "paseo-ui", "version": "1.0.12", "private": true, "type": "module",
+  "name": "paseo-ui", "version": "1.0.13", "private": true, "type": "module",
   "files": ["paseo-plugin.json", "index.client.tsx", "index.server.ts", "client/", "shared/", "modules/", "README.md"]
 }
