@@ -22,6 +22,7 @@ import type {
   CredentialProviders,
   CredentialState,
 } from "../../settings-sync/server/relay/credential-types";
+import { sharedResult } from "./shared-result";
 
 const profileSchema = z.object({
   account: z.object({
@@ -117,7 +118,7 @@ function subscriptionMessage(message: string) {
 
 export function needsSubscriptionRecovery(
   outcome: { kind: string; error?: { message: string; code?: string } },
-  timeline: readonly { type: string; text?: string }[] = [],
+  _timeline: readonly { type: string; text?: string }[] = [],
 ) {
   if (outcome.kind === "canceled") return false;
   if (
@@ -129,11 +130,8 @@ export function needsSubscriptionRecovery(
       ))
   )
     return true;
-  for (let index = timeline.length - 1; index >= 0; index--) {
-    if (timeline[index].type === "user_message") return false;
-    if (timeline[index].type === "assistant_message")
-      return subscriptionMessage(timeline[index].text?.trim() ?? "");
-  }
+  // A successful model answer can quote an error or explain subscription requirements.
+  // Only provider failures or official profiles may remove an account from routing.
   return false;
 }
 
@@ -294,8 +292,10 @@ export class SubscriptionGuard {
         }
         this.loaded.add(key);
       }
+    signal.throwIfAborted();
     const due = unique.filter(
       ([key]) =>
+        this.pending.has(key) ||
         !this.checked.has(key) ||
         this.now() - this.checked.get(key)! >= interval ||
         this.now() < this.checked.get(key)!,
@@ -306,93 +306,102 @@ export class SubscriptionGuard {
       .filter((account) => due.some(([key]) => accountKey(account) === key))
       .map((account) => account.id);
     let core: ReturnType<ReadProfiles> | undefined;
-    const coreSnapshot = () => (core ??= this.readProfiles!(requested, signal));
-    await Promise.all(
-      due.map(([key, account]) => {
-        if (this.pending.has(key)) return this.pending.get(key);
-        const at = this.now();
-        this.checked.set(key, at);
-        const task = (async () => {
-          try {
-            if (this.readProfiles) {
-              const profiles = await coreSnapshot();
-              signal.throwIfAborted();
-              if (profiles !== null) {
-                const ids = accounts
-                  .filter((candidate) => accountKey(candidate) === key)
-                  .map((candidate) => candidate.id);
-                const entries = profiles.filter((entry) =>
-                  ids.includes(entry.providerId),
-                );
-                const current = entries.find(
-                  (entry) =>
-                    entry.status === "ready" &&
-                    "profile" in entry &&
-                    matchesAccount(account, entry.profile),
-                );
-                if (current && "profile" in current) {
-                  const allowed = subscriptionAccess(
-                    current.profile,
-                    current.identity,
-                    this.now(),
+    const operationSignal = this.lifetime.signal;
+    const coreSnapshot = () =>
+      (core ??= this.readProfiles!(requested, operationSignal));
+    await sharedResult(
+      Promise.all(
+        due.map(([key, account]) => {
+          if (this.pending.has(key)) return this.pending.get(key);
+          const at = this.now();
+          const task = (async () => {
+            try {
+              if (this.readProfiles) {
+                const profiles = await coreSnapshot();
+                operationSignal.throwIfAborted();
+                if (profiles !== null) {
+                  const ids = accounts
+                    .filter((candidate) => accountKey(candidate) === key)
+                    .map((candidate) => candidate.id);
+                  const entries = profiles.filter((entry) =>
+                    ids.includes(entry.providerId),
                   );
-                  if (allowed !== null) await this.remember(key, !allowed, at);
-                } else if (entries.some((entry) => entry.status === 402))
-                  await this.remember(key, true, at);
+                  const current = entries.find(
+                    (entry) =>
+                      entry.status === "ready" &&
+                      "profile" in entry &&
+                      matchesAccount(account, entry.profile),
+                  );
+                  if (current && "profile" in current) {
+                    const allowed = subscriptionAccess(
+                      current.profile,
+                      current.identity,
+                      this.now(),
+                    );
+                    if (allowed !== null)
+                      await this.remember(key, !allowed, at);
+                  } else if (entries.some((entry) => entry.status === 402))
+                    await this.remember(key, true, at);
+                  return;
+                }
+              }
+              const state = await capture();
+              operationSignal.throwIfAborted();
+              const ids = accounts
+                .filter((candidate) => accountKey(candidate) === key)
+                .map((candidate) => candidate.id);
+              const record = state.accounts
+                .filter((own) => own.providerIds.some((id) => ids.includes(id)))
+                .map((own) => own.record)
+                .filter((record) => record && record.expiresAt! > this.now())
+                .sort((a, b) => b!.expiresAt! - a!.expiresAt!)[0];
+              const oauth = record?.credential.claudeAiOauth;
+              if (
+                !record ||
+                !object(oauth) ||
+                typeof oauth.accessToken !== "string"
+              )
+                return;
+              const response = await this.fetchApi(
+                "https://api.anthropic.com/api/oauth/profile",
+                {
+                  redirect: "error",
+                  headers: {
+                    Authorization: `Bearer ${oauth.accessToken}`,
+                    Accept: "application/json",
+                    "anthropic-beta": "oauth-2025-04-20",
+                  },
+                  signal: AbortSignal.any([
+                    operationSignal,
+                    AbortSignal.timeout(5000),
+                  ]),
+                },
+              );
+              operationSignal.throwIfAborted();
+              if (response.status === 402) {
+                await this.remember(key, true, at);
                 return;
               }
+              if (!response.ok) return;
+              const allowed = subscriptionAccess(
+                await response.json(),
+                record.identity,
+                this.now(),
+              );
+              operationSignal.throwIfAborted();
+              if (allowed !== null) await this.remember(key, !allowed, at);
+            } catch {
+              operationSignal.throwIfAborted(); /* A network/auth error never clears a known denial or affects another account. */
             }
-            const state = await capture();
-            signal.throwIfAborted();
-            const ids = accounts
-              .filter((candidate) => accountKey(candidate) === key)
-              .map((candidate) => candidate.id);
-            const record = state.accounts
-              .filter((own) => own.providerIds.some((id) => ids.includes(id)))
-              .map((own) => own.record)
-              .filter((record) => record && record.expiresAt! > this.now())
-              .sort((a, b) => b!.expiresAt! - a!.expiresAt!)[0];
-            const oauth = record?.credential.claudeAiOauth;
-            if (
-              !record ||
-              !object(oauth) ||
-              typeof oauth.accessToken !== "string"
-            )
-              return;
-            const response = await this.fetchApi(
-              "https://api.anthropic.com/api/oauth/profile",
-              {
-                redirect: "error",
-                headers: {
-                  Authorization: `Bearer ${oauth.accessToken}`,
-                  Accept: "application/json",
-                  "anthropic-beta": "oauth-2025-04-20",
-                },
-                signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
-              },
-            );
-            signal.throwIfAborted();
-            if (response.status === 402) {
-              await this.remember(key, true, at);
-              return;
-            }
-            if (!response.ok) return;
-            const allowed = subscriptionAccess(
-              await response.json(),
-              record.identity,
-              this.now(),
-            );
-            signal.throwIfAborted();
-            if (allowed !== null) await this.remember(key, !allowed, at);
-          } catch {
-            signal.throwIfAborted(); /* A network/auth error never clears a known denial or affects another account. */
-          }
-        })().finally(() => {
-          if (this.pending.get(key) === task) this.pending.delete(key);
-        });
-        this.pending.set(key, task);
-        return task;
-      }),
+          })().finally(() => {
+            if (!operationSignal.aborted) this.checked.set(key, this.now());
+            if (this.pending.get(key) === task) this.pending.delete(key);
+          });
+          this.pending.set(key, task);
+          return task;
+        }),
+      ),
+      signal,
     );
     signal.throwIfAborted();
     return accounts.filter(
