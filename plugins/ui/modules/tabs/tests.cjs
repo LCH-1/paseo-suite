@@ -18,6 +18,36 @@ function row(id, active = true) {
     isActive: active, isCloseHovered: false, isClosingTab: false };
 }
 
+test("영구 삭제한 대화는 독립 창과 저장 복원에서도 다시 열리지 않는다", () => {
+  const saved = storage();
+  const sessions = { host: { workspaces: new Map([["w", {projectId:"p"}]]) } };
+  const scope = { windowId:"one", serverId:"host", projectId:"p" };
+  const first = createModel(saved, () => sessions, scope);
+  const second = createModel(saved, () => sessions, {...scope, windowId:"two"});
+  first.retainAt("host", "w", row("a").tab);
+  second.retainAt("host", "w", row("a").tab);
+  second.retainAt("host", "w", row("b").tab);
+  first.forgetAgent("host", "agent-a");
+  second.synchronize();
+  assert.deepEqual(first.entries(), []);
+  assert.deepEqual(second.entries().map(entry => entry.agentId), ["agent-b"]);
+  assert.equal(second.retainAt("host", "w", row("a").tab), null);
+  second.ingest("host", "w", [row("a")]);
+  assert.deepEqual(second.entries().map(entry => entry.agentId), ["agent-b"]);
+  assert.deepEqual(createModel(saved, () => sessions, scope).entries(), []);
+  const {isWindowStorageEvent, SHARED_PREFIX} = require("./model.js");
+  assert.equal(isWindowStorageEvent(SHARED_PREFIX + 'deleted:["host","agent-a"]', scope), true);
+});
+
+test("실제 대화 삭제 이벤트는 해당 탭만 제거하고 정리 시 수신기도 제거한다", () => {
+  const app = harness();
+  pinned(app, ["a", "b"]);
+  app.windowEvent("paseo:agent-deleted", {detail:{serverId:"host", agentId:"agent-a"}});
+  assert.deepEqual(app.model.entries().map(entry => entry.agentId), ["agent-b"]);
+  app.context.__PASEO_GLOBAL_TABS__.dispose();
+  assert.equal(app.windowListeners.get("paseo:agent-deleted").size, 0);
+});
+
 test("프로젝트 전용 창은 같은 프로젝트라도 열기·닫기·정렬을 공유하지 않고 새로고침 복원한다", () => {
   const saved = storage();
   const sessions = { host: { workspaces: new Map([["w", {projectId:"p"}], ["other", {projectId:"q"}]]) } };

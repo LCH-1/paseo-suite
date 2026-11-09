@@ -168,7 +168,7 @@ test("a different response agent is rejected without changing ownership", async 
   app.loader.dispose();
 });
 
-test("authoritative archived metadata survives workspace correction and deduplication", async () => {
+test("authoritative archived metadata is retained without reopening its top tab", async () => {
   const snapshot = result();
   snapshot.agent.workspaceId = "removed-workspace";
   snapshot.agent.archivedAt = "2026-10-23T00:00:00Z";
@@ -176,12 +176,13 @@ test("authoritative archived metadata survives workspace correction and deduplic
     { serverId: "host", workspaceId: "stale-one", tabId: "one", agentId: "agent" },
     { serverId: "host", workspaceId: "stale-two", tabId: "two", agentId: "agent" },
   ]);
+  const entry = app.model.entries()[0];
   await setImmediate();
   assert.equal(app.calls.length, 1);
-  assert.equal(app.model.entries().length, 1);
-  assert.equal(app.model.entries()[0].workspaceId, "removed-workspace");
+  assert.equal(app.model.entries().length, 0);
+  assert.equal(app.saved().entries.length, 0);
   assert.equal(app.session.agentDetails.get("agent").archivedAt, snapshot.agent.archivedAt);
-  assert.equal(app.loader.state(app.model.entries()[0]).tag, "ready");
+  assert.equal(app.loader.state(entry).tag, "ready");
   app.loader.dispose();
 });
 
