@@ -20,7 +20,8 @@
   const originalPresentation = presentationModule.WorkspaceTabPresentationResolver;
   let storage;
   try { storage = globalThis.localStorage; } catch {}
-  const model = globalThis.PaseoGlobalTabsModel.createModel(storage, () => sessions.getState().sessions);
+  const projectWindow = globalThis.paseoDesktop?.projectWindow || null;
+  const model = globalThis.PaseoGlobalTabsModel.createModel(storage, () => sessions.getState().sessions, projectWindow);
   let storageWarningShown = false;
   function reportStorageStatus() {
     const status = model.storageStatus();
@@ -525,8 +526,7 @@
     ["compositionupdate", onDraftInput], ["compositionend", onDraftInput]];
   if (globalThis.document?.addEventListener) documentEvents.forEach(([name, listener]) => document.addEventListener(name, listener, true));
   function onStorage(event) {
-    const key = globalThis.PaseoGlobalTabsModel.STORAGE_KEY;
-    if (event.key === null || event.key === key || event.key?.startsWith(key + ":shared:")) model.synchronize();
+    if (globalThis.PaseoGlobalTabsModel.isWindowStorageEvent(event.key, projectWindow)) model.synchronize();
   }
   function onGlobalKey(event) {
     history.onKey(event);

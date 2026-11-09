@@ -18,6 +18,55 @@ function row(id, active = true) {
     isActive: active, isCloseHovered: false, isClosingTab: false };
 }
 
+test("프로젝트 전용 창은 같은 프로젝트라도 열기·닫기·정렬을 공유하지 않고 새로고침 복원한다", () => {
+  const saved = storage();
+  const sessions = { host: { workspaces: new Map([["w", {projectId:"p"}], ["other", {projectId:"q"}]]) } };
+  const scope = { windowId:"one", serverId:"host", projectId:"p" };
+  const first = createModel(saved, () => sessions, scope);
+  const second = createModel(saved, () => sessions, {...scope, windowId:"two"});
+  const general = createModel(saved, () => sessions);
+  first.retainAt("host", "w", row("a").tab);
+  second.retainAt("host", "w", row("b").tab);
+  general.retainAt("host", "other", row("c").tab);
+  for (const model of [first, second, general]) model.synchronize();
+  assert.deepEqual(first.entries().map(entry => entry.agentId), ["agent-a"]);
+  assert.deepEqual(second.entries().map(entry => entry.agentId), ["agent-b"]);
+  assert.deepEqual(general.entries().map(entry => entry.agentId), ["agent-c"]);
+  assert.equal(first.retainAt("host", "other", row("c").tab), null);
+  first.ingest("host", "other", [row("c")]);
+  second.close(second.entries()[0].key);
+  first.synchronize();
+  assert.deepEqual(first.entries().map(entry => entry.agentId), ["agent-a"]);
+  assert.deepEqual(createModel(saved, () => sessions, scope).entries().map(entry => entry.agentId), ["agent-a"]);
+  const {isWindowStorageEvent} = require("./model.js");
+  assert.equal(isWindowStorageEvent(STORAGE_KEY, scope), false);
+  assert.equal(isWindowStorageEvent("paseo-project-window:two:"+STORAGE_KEY, scope), false);
+  assert.equal(isWindowStorageEvent("paseo-project-window:one:"+STORAGE_KEY, scope), true);
+  assert.equal(isWindowStorageEvent("paseo-project-window:one:"+STORAGE_KEY, null), false);
+});
+
+test("전용 창에서도 실제 보관·프로젝트 이동은 반영되고 다른 창의 탭 닫기는 전파되지 않는다", () => {
+  const saved = storage();
+  const session = {workspaces:new Map([["w", {projectId:"p"}], ["q", {projectId:"q"}]]), agents:new Map([["agent-a", {workspaceId:"w", archivedAt:null, updatedAt:1}]])};
+  const getSessions = () => ({host:session});
+  const general = createModel(saved, getSessions);
+  const scoped = createModel(saved, getSessions, {windowId:"one", serverId:"host", projectId:"p"});
+  general.retainAt("host", "w", row("a").tab);
+  scoped.retainAt("host", "w", row("a").tab);
+  general.close(general.entries()[0].key);
+  scoped.synchronize();
+  assert.equal(scoped.entries().length, 1);
+  session.agents.set("agent-a", {workspaceId:"w", archivedAt:2, updatedAt:2});
+  general.reconcile(getSessions());
+  scoped.synchronize();
+  assert.equal(scoped.entries().length, 0);
+  session.agents.set("agent-b", {workspaceId:"w", archivedAt:null, updatedAt:3});
+  scoped.retainAt("host", "w", row("b").tab);
+  session.agents.set("agent-b", {workspaceId:"q", archivedAt:null, updatedAt:4});
+  scoped.reconcile(getSessions());
+  assert.equal(scoped.entries().length, 0);
+});
+
 test("보관 대화는 모델·저장 목록에서 제거되고 고정·미리보기·다른 창 재열기로 복원되지 않는다", () => {
   const saved = storage();
   let sessions = {host: {agents: new Map([["agent-a", {workspaceId:"w", archivedAt:null, updatedAt:10}]])}};
@@ -456,7 +505,7 @@ function harness(metadataState, withDraftBridge = false, withTitles = false, wit
     },
     setInterval(callback) { scheduled.push(callback); return scheduled.length; }, clearInterval() {},
     PaseoGlobalTabsHistory: history,
-    PaseoGlobalTabsModel: { createModel, STORAGE_KEY }, PaseoGlobalTabsMetadata: { createLoader: metadataState
+    PaseoGlobalTabsModel: require("./model.js"), PaseoGlobalTabsMetadata: { createLoader: metadataState
       ? () => ({ state: () => metadataState, subscribe: () => () => {}, revision: () => 0, dispose() {} }) : createLoader },
     __PASEO_GLOBAL_TABS_MODULES__: { react: 1, rows: 2, presentation: 3, navigation: 4, sessions: 5, layouts: 6, snapshots: 7, hostRoutes: 8,
       keyboardActions: 10, ...(withDraftBridge ? { newWorkspaceTabs: 9 } : {}), ...(withTitles ? { titles: 11, settings: 12 } : {}),
