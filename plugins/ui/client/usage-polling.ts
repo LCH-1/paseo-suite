@@ -17,7 +17,8 @@ interface UsageQueryClient {
 export function startUsagePolling(
   queryClient: UsageQueryClient,
   canPollHost: (serverId: string) => boolean,
-  shouldRefresh = () => true,
+  shouldRefresh = () =>
+    typeof document === "undefined" || document.visibilityState !== "hidden",
 ) {
   let stopped = false;
   let pending = false;

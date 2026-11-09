@@ -532,7 +532,12 @@
     history.onKey(event);
     if (!event.defaultPrevented) onCycleKey(event);
   }
-  const windowEvents = [["keydown", onGlobalKey], ["pointerdown", resetCycle], ["blur", resetCycle], ["storage", onStorage]];
+  function onAgentDeleted(event) {
+    const { serverId, agentId } = event.detail || {};
+    if (typeof serverId !== "string" || !serverId || typeof agentId !== "string" || !agentId) return;
+    model.forgetAgent(serverId, agentId);
+  }
+  const windowEvents = [["keydown", onGlobalKey], ["pointerdown", resetCycle], ["blur", resetCycle], ["storage", onStorage], ["paseo:agent-deleted", onAgentDeleted]];
   if (globalThis.window?.addEventListener) windowEvents.forEach(([name, listener]) => window.addEventListener(name, listener, true));
   const releaseLayout = typeof layouts.subscribe === "function" ? layouts.subscribe(flushPinIntent) : () => {};
   function activate(entry) {

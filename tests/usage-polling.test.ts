@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { installUsagePolling, startUsagePolling } from "../plugins/ui/client/usage-polling";
+import {
+  installUsagePolling,
+  startUsagePolling,
+} from "../plugins/ui/client/usage-polling";
 
 test("usage compatibility is inert on clients without browser globals", () => {
   assert.doesNotThrow(() => installUsagePolling()());
 });
 
 test("old Core usage refreshes on its timer, skips inactive/native/offline queries and disposes", async (t) => {
+  let visible = true;
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const previousDocument = Object.getOwnPropertyDescriptor(
     globalThis,
@@ -18,7 +22,9 @@ test("old Core usage refreshes on its timer, skips inactive/native/offline queri
   });
   Object.defineProperty(globalThis, "document", {
     configurable: true,
-    value: new EventTarget(),
+    value: Object.defineProperty(new EventTarget(), "visibilityState", {
+      get: () => (visible ? "visible" : "hidden"),
+    }),
   });
   t.after(() => {
     if (previousWindow)
@@ -40,7 +46,6 @@ test("old Core usage refreshes on its timer, skips inactive/native/offline queri
     query("closed", false),
     query("offline"),
   ];
-  let visible = true;
   let runs = 0;
   let pending: (() => void) | undefined;
   const dispose = startUsagePolling(
@@ -59,7 +64,6 @@ test("old Core usage refreshes on its timer, skips inactive/native/offline queri
       },
     },
     (host) => host !== "offline",
-    () => visible,
   );
   t.after(dispose);
   t.mock.timers.tick(59_999);

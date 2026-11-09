@@ -5,12 +5,14 @@
   "use strict";
   const STORAGE_KEY = "paseo-global-workspace-tabs:v1";
   const SHARED_PREFIX = STORAGE_KEY + ":shared:";
+  const isLifecycleKey = key => key.startsWith(SHARED_PREFIX + "archive:")
+    || key.startsWith(SHARED_PREFIX + "deleted:");
   const agentKey = (serverId, agentId) => JSON.stringify([serverId, agentId]);
   function keyOf(serverId, workspaceId, tabId) {
     return JSON.stringify([serverId, workspaceId, tabId]);
   }
   function windowStorageKey(key, scope) {
-    if (!scope || key.startsWith(SHARED_PREFIX + "archive:")) return key;
+    if (!scope || isLifecycleKey(key)) return key;
     return "paseo-project-window:" + scope.windowId + ":" + key;
   }
   function windowStorage(storage, scope) {
@@ -21,7 +23,7 @@
       for (let index = 0; index < storage.length; index++) {
         const key = storage.key(index);
         if (key?.startsWith(prefix + STORAGE_KEY)) result.push(key.slice(prefix.length));
-        else if (key?.startsWith(SHARED_PREFIX + "archive:")) result.push(key);
+        else if (key && isLifecycleKey(key)) result.push(key);
       }
       return result;
     }
@@ -34,7 +36,7 @@
   }
   function isWindowStorageEvent(key, scope) {
     if (key === null) return true;
-    if (key.startsWith(SHARED_PREFIX + "archive:")) return true;
+    if (isLifecycleKey(key)) return true;
     return key.startsWith(windowStorageKey(STORAGE_KEY, scope));
   }
   function createModel(storage, getSessionMap, scope = null) {
@@ -94,6 +96,7 @@
     // Keep archive state separate from tab presence so a stale window cannot
     // reopen a conversation another window has archived.
     function archiveState(entry) {
+      if (read(SHARED_PREFIX + "deleted:" + identity(entry))?.deleted === true) return true;
       const key = SHARED_PREFIX + "archive:" + identity(entry);
       let record = read(key);
       const snapshots = snapshotsFor(entry).filter(snapshot => (!snapshot.id || snapshot.id === entry.agentId)
@@ -415,6 +418,14 @@
         dismissed.add(key);
         entries = entries.filter((item) => item.key !== key);
         notify(false, entry ? identity(entry) : null);
+      },
+      forgetAgent(serverId, agentId) {
+        const key = agentKey(serverId, agentId);
+        write(SHARED_PREFIX + "deleted:" + key, { deleted: true });
+        for (const entry of entries.filter(entry => identity(entry) === key)) dismissed.add(entry.key);
+        if (active === key) dismissedActive = active;
+        entries = entries.filter(entry => identity(entry) !== key);
+        notify();
       },
       closeWorkspace(serverId, workspaceId) {
         const closing = entries.filter(entry => entry.serverId === serverId && entry.workspaceId === workspaceId);
