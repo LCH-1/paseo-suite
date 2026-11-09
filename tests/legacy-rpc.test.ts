@@ -3,6 +3,233 @@ import { test } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { withLiveTestSession } from "../tools/live-test-session";
 
+test("live creation rejection cleans only the new empty project at the exact requested root", async () => {
+  for (const cwd of ["/tmp/owned-check", "C:\\Temp\\owned-check"]) {
+    const removed: string[] = [];
+    let attempted = false;
+    const client = {
+      fetchWorkspaces: async () => ({
+        entries: [],
+        pageInfo: { hasMore: false },
+      }),
+      listProjects: async () => ({
+        projects: [
+          { projectId: "existing", projectRootPath: cwd },
+          ...(attempted
+            ? [
+                {
+                  projectId: "owned",
+                  projectRootPath: cwd.replaceAll("\\", "/"),
+                },
+                { projectId: "unrelated", projectRootPath: cwd + "-other" },
+              ]
+            : []),
+        ],
+      }),
+      createAgent: async () => {
+        attempted = true;
+        throw new Error("quota refused before snapshot");
+      },
+      removeProject: async (id: string) => {
+        removed.push(id);
+      },
+    };
+    await assert.rejects(
+      withLiveTestSession(
+        client as unknown as Parameters<typeof withLiveTestSession>[0],
+        { provider: "claude", cwd },
+        async () => assert.fail("Must not start"),
+      ),
+      /quota refused before snapshot/,
+    );
+    assert.deepEqual(removed, ["owned"]);
+  }
+});
+
+test("live creation rejection preserves a new matching project that has a workspace", async () => {
+  let attempted = false;
+  const removed: string[] = [];
+  const client = {
+    fetchWorkspaces: async () => ({
+      entries: attempted
+        ? [{ id: "user-workspace", projectId: "new-project" }]
+        : [],
+      pageInfo: { hasMore: false },
+    }),
+    listProjects: async () => ({
+      projects: attempted
+        ? [{ projectId: "new-project", projectRootPath: "/tmp/owned-check" }]
+        : [],
+    }),
+    createAgent: async () => {
+      attempted = true;
+      throw new Error("quota refused");
+    },
+    removeProject: async (id: string) => {
+      removed.push(id);
+    },
+  };
+  await assert.rejects(
+    withLiveTestSession(
+      client as unknown as Parameters<typeof withLiveTestSession>[0],
+      { provider: "claude", cwd: "/tmp/owned-check" },
+      async () => {},
+    ),
+    /quota refused/,
+  );
+  assert.deepEqual(removed, []);
+});
+
+test("live creation rejection never guesses ownership from a relative root or supplied workspace", async () => {
+  for (const input of [
+    { cwd: "relative" },
+    { cwd: "/tmp/owned-check", workspaceId: "existing" },
+  ]) {
+    let attempted = false;
+    const removed: string[] = [];
+    const client = {
+      fetchWorkspaces: async () => ({
+        entries: [],
+        pageInfo: { hasMore: false },
+      }),
+      listProjects: async () => ({
+        projects: attempted
+          ? [{ projectId: "new-project", projectRootPath: input.cwd }]
+          : [],
+      }),
+      createAgent: async () => {
+        attempted = true;
+        throw new Error("quota refused");
+      },
+      removeProject: async (id: string) => {
+        removed.push(id);
+      },
+    };
+    await assert.rejects(
+      withLiveTestSession(
+        client as unknown as Parameters<typeof withLiveTestSession>[0],
+        { provider: "claude", ...input },
+        async () => {},
+      ),
+      /quota refused/,
+    );
+    assert.deepEqual(removed, []);
+  }
+});
+
+test("live creation rejection reports ambiguous ownership or cleanup discovery failures", async () => {
+  for (const ambiguous of [true, false]) {
+    let attempted = false;
+    let removed = false;
+    const refusal = new Error("quota refused");
+    const client = {
+      fetchWorkspaces: async () => ({
+        entries: [],
+        pageInfo: { hasMore: false },
+      }),
+      listProjects: async () => {
+        if (!attempted) return { projects: [] };
+        if (!ambiguous) throw new Error("project discovery unavailable");
+        return {
+          projects: ["first", "second"].map((projectId) => ({
+            projectId,
+            projectRootPath: "/tmp/owned-check",
+          })),
+        };
+      },
+      createAgent: async () => {
+        attempted = true;
+        throw refusal;
+      },
+      removeProject: async () => {
+        removed = true;
+      },
+    };
+    await assert.rejects(
+      withLiveTestSession(
+        client as unknown as Parameters<typeof withLiveTestSession>[0],
+        { provider: "claude", cwd: "/tmp/owned-check" },
+        async () => {},
+      ),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors[0], refusal);
+        assert.match(
+          String(error.errors[1]),
+          ambiguous ? /Ambiguous/ : /discovery unavailable/,
+        );
+        return true;
+      },
+    );
+    assert.equal(removed, false);
+  }
+});
+
+test("live creation rejection recovers unreported sessions only in an explicitly owned directory", async () => {
+  const calls: string[] = [];
+  let attempted = false,
+    archived = false;
+  const client = {
+    fetchWorkspaces: async () => ({
+      entries:
+        attempted && !archived
+          ? [
+              {
+                id: "owned-ws",
+                projectId: "owned-project",
+                workspaceDirectory: "/tmp/unique-owned",
+              },
+            ]
+          : [],
+      pageInfo: { hasMore: false },
+    }),
+    listProjects: async () => ({
+      projects: attempted
+        ? [{ projectId: "owned-project", projectRootPath: "/tmp/unique-owned" }]
+        : [],
+    }),
+    createAgent: async () => {
+      attempted = true;
+      throw new Error("connection lost before snapshot");
+    },
+    fetchAgents: async (input: { page: { cursor?: string } }) =>
+      input.page.cursor
+        ? {
+            entries: [{ agent: { id: "own-agent", workspaceId: "owned-ws" } }],
+            pageInfo: { hasMore: false },
+          }
+        : {
+            entries: [{ agent: { id: "other-agent", workspaceId: "user-ws" } }],
+            pageInfo: { hasMore: true, nextCursor: "next" },
+          },
+    deleteAgent: async (id: string) => {
+      calls.push("agent:" + id);
+    },
+    archiveWorkspace: async (id: string) => {
+      calls.push("workspace:" + id);
+      archived = true;
+      return { error: null };
+    },
+    removeProject: async (id: string) => {
+      calls.push("project:" + id);
+    },
+  };
+  await assert.rejects(
+    withLiveTestSession(
+      client as unknown as Parameters<typeof withLiveTestSession>[0],
+      { provider: "claude", cwd: "/tmp/unique-owned" },
+      async () => {},
+      { ownedDirectory: "/tmp/unique-owned" },
+    ),
+    /connection lost before snapshot/,
+  );
+  assert.deepEqual(calls, [
+    "agent:own-agent",
+    "workspace:owned-ws",
+    "project:owned-project",
+  ]);
+});
+
 test("live cleanup keeps a new project when another workspace appears on a later page", async () => {
   const calls: string[] = [];
   let created = false,
