@@ -1,4 +1,15 @@
 {
-  "name": "paseo-ui", "version": "1.0.18", "private": true, "type": "module",
-  "files": ["paseo-plugin.json", "index.client.tsx", "index.server.ts", "client/", "shared/", "modules/", "README.md"]
+  "name": "paseo-ui",
+  "version": "1.0.19",
+  "private": true,
+  "type": "module",
+  "files": [
+    "paseo-plugin.json",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "shared/",
+    "modules/",
+    "README.md"
+  ]
 }
