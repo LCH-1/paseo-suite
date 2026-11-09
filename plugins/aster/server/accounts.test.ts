@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   exhaustedUntil,
+  exhaustedAccountsResetAt,
   accountSecureDirectory,
   bootstrapAccounts,
   expiredAccounts,
@@ -185,6 +186,100 @@ function report(label = "a@example.test", id = "claude:account.org-a") {
     },
   };
 }
+
+test("5시간 창이 없어도 두 계정의 주간 소진과 가장 빠른 복귀 시각을 구분한다", () => {
+  const other: Account = {
+    id: "b",
+    home: "/fixture/b",
+    email: "b@example.test",
+    identity: "org-b|b@example.test",
+  };
+  const first = report();
+  first.report.windows = [
+    {
+      id: "weekly",
+      usedPct: 100,
+      resetsAt: new Date(now + 3600000).toISOString(),
+    },
+  ];
+  const second = report(other.email!, "claude:account.org-b");
+  second.report.windows = [
+    {
+      id: "weekly",
+      usedPct: 100,
+      resetsAt: new Date(now + 7200000).toISOString(),
+    },
+  ];
+  const readings = reportsSchema.parse([first, second]);
+  assert.deepEqual(mapReports([...accounts, other], readings, {}, now), []);
+  assert.deepEqual(bootstrapAccounts([...accounts, other], readings, now), []);
+  assert.equal(
+    exhaustedAccountsResetAt([...accounts, other], readings, now),
+    now + 3600000,
+  );
+  assert.equal(
+    exhaustedAccountsResetAt([...accounts, other], [readings[0]], now),
+    null,
+  );
+});
+
+test("한도 소진 안내는 최신 보고서와 확인된 초기화만 사용하고 정상·미확인 계정을 소진으로 오인하지 않는다", () => {
+  const exhausted = report();
+  exhausted.report.windows = [
+    {
+      id: "weekly",
+      usedPct: 100,
+      resetsAt: new Date(now + 3600000).toISOString(),
+    },
+  ];
+  for (const fetchedAt of [
+    new Date(now - 7 * 60000).toISOString(),
+    new Date(now + 1000).toISOString(),
+  ]) {
+    assert.equal(
+      exhaustedAccountsResetAt(
+        accounts,
+        reportsSchema.parse([{ ...exhausted, fetchedAt }]),
+        now,
+      ),
+      null,
+    );
+  }
+  const newer = { ...report(), fetchedAt: new Date(now + 1).toISOString() };
+  assert.equal(
+    exhaustedAccountsResetAt(
+      accounts,
+      reportsSchema.parse([exhausted, newer]),
+      now + 1,
+    ),
+    null,
+  );
+  for (const resetsAt of [null, "invalid", new Date(now - 1).toISOString()]) {
+    const unknown = {
+      ...exhausted,
+      report: {
+        ...exhausted.report,
+        windows: [{ id: "weekly", usedPct: 100, resetsAt }],
+      },
+    };
+    assert.equal(
+      exhaustedAccountsResetAt(accounts, reportsSchema.parse([unknown]), now),
+      null,
+    );
+  }
+  assert.equal(exhaustedAccountsResetAt([], [], now), null);
+});
+
+test("한 계정의 두 소진 창이 모두 풀리는 시각을 복귀 시각으로 사용한다", () => {
+  const exhausted = report();
+  exhausted.report.windows.forEach((window) => {
+    window.usedPct = 100;
+  });
+  assert.equal(
+    exhaustedAccountsResetAt(accounts, reportsSchema.parse([exhausted]), now),
+    now + 100 * 3600000,
+  );
+});
 
 test("사용량 API의 일시적 조회 제한은 공식 CLI 확인을 통한 새 세션 시작을 막지 않는다", () => {
   const limited = reportsSchema.parse([
