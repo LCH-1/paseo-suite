@@ -54,10 +54,12 @@ const commandSchema = z.array(z.string().min(1)).min(1);
 
 export function codexOriginalCommand(command: string[] | undefined): string[] {
   const value = command ?? ["codex"];
-  if (!value[1]?.replaceAll("\\", "/").endsWith("/codex-proxy.mjs"))
-    return value;
+  const proxy = value.findIndex((part) =>
+    part.replaceAll("\\", "/").endsWith("/codex-proxy.mjs"),
+  );
+  if (proxy < 1) return value;
   try {
-    return commandSchema.parse(JSON.parse(value[2]));
+    return commandSchema.parse(JSON.parse(value[proxy + 1]));
   } catch {
     throw Error("Codex 계정 연결 실행 설정이 손상되었습니다.");
   }
@@ -158,10 +160,49 @@ export function codexNodeLauncher(
   platform: NodeJS.Platform = process.platform,
 ) {
   if (platform === "win32") {
-    const codePage = /[^\x00-\x7f]/.test(execPath) ? "chcp 65001 >nul\r\n" : "";
     return {
-      file: "codex-node.cmd",
-      content: `@echo off\r\n${codePage}set "ELECTRON_RUN_AS_NODE=1"\r\n"${execPath.replaceAll("%", "%%")}" %*\r\nexit /b %errorlevel%\r\n`,
+      file: "codex-node.ps1",
+      // A batch file can outlive Codex at the Ctrl+C Y/N prompt and consume RPC stdin.
+      // Copy raw streams: PowerShell's native pipeline can re-encode JSON and buffer stdin.
+      content: `\uFEFF$ErrorActionPreference = "Stop"
+Add-Type @'
+using System;
+using System.IO;
+using System.Threading.Tasks;
+public static class CodexStdio {
+  public static async Task Input(Stream source, Stream target) {
+    try {
+      var buffer = new byte[8192];
+      int count;
+      while ((count = await source.ReadAsync(buffer, 0, buffer.Length)) > 0) {
+        await target.WriteAsync(buffer, 0, count);
+        await target.FlushAsync();
+      }
+    }
+    catch (IOException) { }
+    catch (ObjectDisposedException) { }
+    finally { target.Close(); }
+  }
+}
+'@
+$start = New-Object System.Diagnostics.ProcessStartInfo
+$start.FileName = '${execPath.replaceAll("'", "''")}'
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$start.RedirectStandardInput = $true
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$start.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1"
+$start.Arguments = [string]::Join(" ", @($args | ForEach-Object { '"' + ($_ -replace '(\\\\*)"', '$1$1\\"' -replace '(\\\\+)$', '$1$1') + '"' }))
+$child = [System.Diagnostics.Process]::Start($start)
+$inputTask = [CodexStdio]::Input([Console]::OpenStandardInput(), $child.StandardInput.BaseStream)
+$outputTask = $child.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
+$errorTask = $child.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
+$child.WaitForExit()
+$null = $outputTask.GetAwaiter().GetResult()
+$null = $errorTask.GetAwaiter().GetResult()
+exit $child.ExitCode
+`.replaceAll("\n", "\r\n"),
     };
   }
   return {
@@ -171,7 +212,7 @@ export function codexNodeLauncher(
 }
 
 async function codexNodeCommand(home: string) {
-  if (!process.versions.electron) return process.execPath;
+  if (!process.versions.electron) return [process.execPath];
   const launcher = codexNodeLauncher(process.execPath),
     directory = join(home, "aster"),
     file = join(directory, launcher.file);
@@ -183,7 +224,31 @@ async function codexNodeCommand(home: string) {
     await chmod(temporary, 0o755);
     await rename(temporary, file);
   }
-  return file;
+  return codexLauncherCommand(file);
+}
+
+export function codexLauncherCommand(
+  file: string,
+  platform: NodeJS.Platform = process.platform,
+) {
+  return platform === "win32"
+    ? [
+        join(
+          process.env.SystemRoot ?? "C:\\Windows",
+          "System32",
+          "WindowsPowerShell",
+          "v1.0",
+          "powershell.exe",
+        ),
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        file,
+      ]
+    : [file];
 }
 
 export async function installCodexBridge(home = paseoHome) {
@@ -210,7 +275,7 @@ export async function installCodexBridge(home = paseoHome) {
       const original = codexOriginalCommand(
         provider?.command ?? providers.codex?.command,
       );
-      const command = [node, proxy, JSON.stringify(original)];
+      const command = [...node, proxy, JSON.stringify(original)];
       if (JSON.stringify(command) !== JSON.stringify(provider?.command))
         patch[id] = { command };
     }
