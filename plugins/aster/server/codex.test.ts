@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { spawnProcess } from "@getpaseo/plugin/server";
+import { spawnProcess, terminateProcess } from "@getpaseo/plugin/server";
 import {
   chooseCodexAccount,
   hasCodexSubscription,
@@ -427,6 +429,8 @@ test("Electron 실행 launcher는 환경변수를 직접 설정하고 경로를 
       '$start.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1"',
     ),
   );
+  // No per-launch C# build, and nothing that stops the child inheriting the daemon's pipes.
+  assert.doesNotMatch(launcher.content, /Add-Type|Redirect|CreateNoWindow/);
   assert.equal(
     codexNodeLauncher("/opt/it's/Paseo", "linux").content,
     "#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '/opt/it'\\''s/Paseo' \"$@\"\n",
@@ -529,6 +533,167 @@ test(
       assert.equal(await closed, 130);
       assert.equal(stderr, "종료 확인\n");
       assert.equal((await messages.next()).done, true);
+    }),
+);
+
+const processAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+async function waitUntil(done: () => boolean, timeout = 5000) {
+  const until = Date.now() + timeout;
+  while (!done() && Date.now() < until)
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  return done();
+}
+async function launchThroughLauncher(
+  home: string,
+  args: string[],
+  overlay: NodeJS.ProcessEnv = {},
+) {
+  const launcher = codexNodeLauncher(process.execPath),
+    file = join(home, launcher.file);
+  await writeFile(file, launcher.content);
+  const env = { ...process.env, ...overlay };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const [command, ...prefix] = codexLauncherCommand(file);
+  // The daemon starts provider commands through this same helper.
+  return spawnProcess(command, [...prefix, ...args], { stdio: "pipe", env });
+}
+
+test(
+  "실행기는 RPC 입력을 가로채지 않고 Codex가 Ctrl+C 코드로 사라지면 같은 코드로 즉시 끝난다",
+  { skip: process.platform !== "win32", timeout: 15000 },
+  async () =>
+    fixture(async (home) => {
+      const script = join(home, "echo-until-quit.cjs");
+      await writeFile(
+        script,
+        `require("node:readline").createInterface({input:process.stdin}).on("line",line=>{if(line==="quit")process.exit(0xC000013A);process.stdout.write(line+"\\n");});`,
+      );
+      const child = await launchThroughLauncher(home, [script]);
+      const received: string[] = [];
+      createInterface({ input: child.stdout }).on("line", (line) =>
+        received.push(line),
+      );
+      child.stderr.resume();
+      const closed = new Promise((accept) => child.on("close", accept));
+      // Written before PowerShell has started: the launcher shares this pipe and must not read it.
+      const sent = Array.from({ length: 500 }, (_, id) =>
+        JSON.stringify({ id, text: "한글 λ 🚀 " + "x".repeat(id) }),
+      );
+      child.stdin.write(sent.join("\n") + "\n");
+      assert.equal(
+        await waitUntil(() => received.length === sent.length),
+        true,
+      );
+      assert.deepEqual(received, sent);
+      // stdin stays open, as it did when the batch launcher stopped at its Y/N prompt.
+      child.stdin.write("quit\n");
+      assert.equal(await closed, 0xc000013a);
+    }),
+);
+
+test(
+  "실행기만 강제 종료돼도 자식은 stdin 종료로 끝나고 프로세스 트리 종료는 자식까지 정리한다",
+  { skip: process.platform !== "win32", timeout: 20000 },
+  async () =>
+    fixture(async (home) => {
+      const script = join(home, "wait.cjs"),
+        marker = join(home, "stdin-ended");
+      await writeFile(
+        script,
+        `console.log(process.pid);
+if(process.argv[2])process.stdin.on("end",()=>{require("node:fs").writeFileSync(process.argv[2],"");process.exit(0);}).resume();
+else setInterval(()=>{},1000);`,
+      );
+      const start = async (...args: string[]) => {
+        const child = await launchThroughLauncher(home, [script, ...args]);
+        child.stderr.resume();
+        const [line] = await once(
+          createInterface({ input: child.stdout }),
+          "line",
+        );
+        return { child, pid: Number(line) };
+      };
+      const pids: number[] = [];
+      try {
+        const alone = await start(marker);
+        pids.push(alone.pid);
+        alone.child.kill();
+        assert.equal(await waitUntil(() => existsSync(marker)), true);
+        assert.equal(await waitUntil(() => !processAlive(alone.pid)), true);
+
+        // This child ignores stdin, so only the tree kill can end it.
+        const tree = await start();
+        pids.push(tree.pid);
+        // The daemon stops a Codex session with the same taskkill /T /F tree kill.
+        await terminateProcess(tree.child);
+        assert.equal(await waitUntil(() => !processAlive(tree.pid)), true);
+      } finally {
+        for (const pid of pids) if (processAlive(pid)) process.kill(pid);
+      }
+    }),
+);
+
+test(
+  "실행기와 인증 브리지를 함께 거쳐도 요청·EOF·종료 코드가 끝까지 이어진다",
+  { skip: process.platform !== "win32", timeout: 15000 },
+  async () =>
+    fixture(async (home) => {
+      const account = join(home, "account"),
+        shared = join(home, "shared"),
+        script = join(home, "fake.cjs");
+      const token = await tokenFile(account, "account-a");
+      await writeFile(script, fakeServer);
+      const child = await launchThroughLauncher(
+        home,
+        [
+          join(import.meta.dirname, "codex-proxy.mjs"),
+          JSON.stringify([process.execPath, script]),
+          "app-server",
+        ],
+        {
+          CODEX_HOME: shared,
+          ASTER_CODEX_ACCOUNT_HOME: account,
+          ASTER_CODEX_ACCOUNT_ID: "account-a",
+        },
+      );
+      let output = "";
+      child.stdout.on("data", (data) => (output += data));
+      child.stderr.resume();
+      const closed = new Promise((accept) => child.on("close", accept));
+      const messages = createInterface({ input: child.stdout })[
+        Symbol.asyncIterator
+      ]();
+      const send = (message: object) =>
+        child.stdin.write(JSON.stringify(message) + "\n");
+      const reply = async () =>
+        JSON.parse(String((await messages.next()).value));
+      send({ id: 1, method: "initialize", params: {} });
+      assert.equal((await reply()).id, 1);
+      send({ method: "initialized", params: {} });
+      send({
+        id: 2,
+        method: "thread/resume",
+        params: { threadId: "existing-thread" },
+      });
+      assert.deepEqual(await reply(), {
+        id: 2,
+        result: {
+          thread: "existing-thread",
+          home: shared,
+          loggedIn: true,
+          ephemeral: true,
+        },
+      });
+      child.stdin.end();
+      assert.equal(await closed, 0);
+      assert.equal(output.includes(token), false);
     }),
 );
 
@@ -655,7 +820,7 @@ test("Codex 인증 갱신은 같은 계정만 허용하고 토큰과 내부 갱�
       const child = spawn(
         process.execPath,
         [
-          resolve("plugins/aster/server/codex-proxy.mjs"),
+          join(import.meta.dirname, "codex-proxy.mjs"),
           JSON.stringify([process.execPath, script]),
           "app-server",
         ],
@@ -726,7 +891,7 @@ test("인증 브리지는 기록 경로와 대화 ID를 유지하며 토큰을 �
     const child = spawn(
       process.execPath,
       [
-        resolve("plugins/aster/server/codex-proxy.mjs"),
+        join(import.meta.dirname, "codex-proxy.mjs"),
         JSON.stringify([process.execPath, script]),
         "app-server",
       ],
@@ -788,7 +953,7 @@ test("인증 브리지는 기록 경로와 대화 ID를 유지하며 토큰을 �
     assert.deepEqual(
       codexOriginalCommand([
         process.execPath,
-        resolve("plugins/aster/server/codex-proxy.mjs"),
+        join(import.meta.dirname, "codex-proxy.mjs"),
         JSON.stringify([process.execPath, script]),
       ]),
       [process.execPath, script],

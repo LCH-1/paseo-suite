@@ -164,44 +164,17 @@ export function codexNodeLauncher(
     return {
       file: "codex-node.ps1",
       // A batch file can outlive Codex at the Ctrl+C Y/N prompt and consume RPC stdin.
-      // Copy raw streams: PowerShell's native pipeline can re-encode JSON and buffer stdin.
+      // The child inherits this process's own pipes, so PowerShell never reads, re-encodes
+      // or buffers the RPC stream. Redirect* or CreateNoWindow would detach those handles:
+      // the daemon already hides this console and the Electron host opens none of its own.
       content: `\uFEFF$ErrorActionPreference = "Stop"
-Add-Type @'
-using System;
-using System.IO;
-using System.Threading.Tasks;
-public static class CodexStdio {
-  public static async Task Input(Stream source, Stream target) {
-    try {
-      var buffer = new byte[8192];
-      int count;
-      while ((count = await source.ReadAsync(buffer, 0, buffer.Length)) > 0) {
-        await target.WriteAsync(buffer, 0, count);
-        await target.FlushAsync();
-      }
-    }
-    catch (IOException) { }
-    catch (ObjectDisposedException) { }
-    finally { target.Close(); }
-  }
-}
-'@
 $start = New-Object System.Diagnostics.ProcessStartInfo
 $start.FileName = '${execPath.replaceAll("'", "''")}'
 $start.UseShellExecute = $false
-$start.CreateNoWindow = $true
-$start.RedirectStandardInput = $true
-$start.RedirectStandardOutput = $true
-$start.RedirectStandardError = $true
 $start.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1"
 $start.Arguments = [string]::Join(" ", @($args | ForEach-Object { '"' + ($_ -replace '(\\\\*)"', '$1$1\\"' -replace '(\\\\+)$', '$1$1') + '"' }))
 $child = [System.Diagnostics.Process]::Start($start)
-$inputTask = [CodexStdio]::Input([Console]::OpenStandardInput(), $child.StandardInput.BaseStream)
-$outputTask = $child.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
-$errorTask = $child.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
 $child.WaitForExit()
-$null = $outputTask.GetAwaiter().GetResult()
-$null = $errorTask.GetAwaiter().GetResult()
 exit $child.ExitCode
 `.replaceAll("\n", "\r\n"),
     };
