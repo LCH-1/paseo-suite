@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
 const { setImmediate } = require("node:timers/promises");
 const test = require("node:test");
+const { runInNewContext } = require("node:vm");
 const { createModel, STORAGE_KEY } = require("./model.js");
 const { createLoader } = require("./metadata.js");
 
@@ -21,6 +23,7 @@ function harness(
       agentId: "agent",
     },
   ],
+  loaderFactory = createLoader,
 ) {
   const data = new Map([[STORAGE_KEY, JSON.stringify({ entries })]]);
   const model = createModel({
@@ -60,7 +63,7 @@ function harness(
       return () => listeners.delete(listener);
     },
   });
-  const loader = createLoader({
+  const loader = loaderFactory({
     model,
     sessions,
     getPaseoClient(serverId) {
@@ -372,5 +375,150 @@ test("stream-only updates do not schedule tab metadata reconciliation", async ()
   await setImmediate();
   assert.ok(reconciliations > 0);
   assert.equal(app.model.entries()[0].title, "new title");
+  app.loader.dispose();
+});
+
+test("a failed lookup retries once after the same client reconnects", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let count = 0;
+  const app = harness(async () => {
+    if (++count === 1) throw new Error("temporary transport failure");
+    return result();
+  });
+  await setImmediate();
+  assert.equal(app.loader.state(app.model.entries()[0]).tag, "error");
+  app.session.client.isConnected = false;
+  app.emit();
+  app.session.client.isConnected = true;
+  app.emit();
+  await setImmediate();
+  assert.equal(count, 2);
+  assert.equal(app.loader.state(app.model.entries()[0]).tag, "ready");
+  for (let index = 0; index < 10; index++) {
+    app.session.client.isConnected = false;
+    app.emit();
+    app.session.client.isConnected = true;
+    app.emit();
+    await setImmediate();
+  }
+  assert.equal(count, 2);
+  app.loader.dispose();
+});
+
+test("a reconnect fences the old response even with the same client and generation", async () => {
+  const old = deferred();
+  const current = deferred();
+  let count = 0;
+  const app = harness(() => (++count === 1 ? old.promise : current.promise));
+  await setImmediate();
+  app.session.client.isConnected = false;
+  app.emit();
+  app.session.client.isConnected = true;
+  app.emit();
+  await setImmediate();
+  assert.equal(count, 2);
+  old.resolve(result("old transport"));
+  await setImmediate();
+  assert.equal(app.session.agentDetails.size, 0);
+  assert.equal(app.loader.state(app.model.entries()[0]).tag, "loading");
+  current.resolve(result("new transport"));
+  await setImmediate();
+  assert.equal(app.session.agentDetails.get("agent").title, "new transport");
+  app.loader.dispose();
+});
+
+test("closing and reopening a retained tab rejects its former pending lookup", async () => {
+  const old = deferred();
+  const current = deferred();
+  let count = 0;
+  const app = harness(() => (++count === 1 ? old.promise : current.promise));
+  await setImmediate();
+  const entry = app.model.entries()[0];
+  app.model.close(entry.key);
+  assert.equal(app.loader.state(entry).tag, "waiting");
+  app.model.retainAt("host", "workspace", {
+    tabId: "reopened",
+    target: { kind: "agent", agentId: "agent" },
+  });
+  await setImmediate();
+  old.resolve(result("closed tab"));
+  await setImmediate();
+  assert.equal(app.session.agentDetails.size, 0);
+  current.resolve(result("reopened tab"));
+  await setImmediate();
+  assert.equal(count, 2);
+  assert.equal(app.session.agentDetails.get("agent").title, "reopened tab");
+  app.loader.dispose();
+});
+
+test("releases historical attempts when tabs close, clients change, or hosts disappear", async () => {
+  const maps = [];
+  class TrackedMap extends Map {
+    constructor(...args) {
+      super(...args);
+      maps.push(this);
+    }
+  }
+  const module = { exports: {} };
+  runInNewContext(readFileSync(require.resolve("./metadata.js"), "utf8"), {
+    Map: TrackedMap,
+    module,
+    console,
+  });
+  const app = harness(async () => null, undefined, module.exports.createLoader);
+  await setImmediate();
+  const attempts = maps.find((map) =>
+    [...map.values()].some((item) => item?.tag),
+  );
+  assert.ok(attempts);
+  const oldClient = app.session.client;
+  app.session.client = { isConnected: false };
+  app.session.clientGeneration++;
+  app.emit();
+  assert.equal(attempts.size, 0);
+  assert.equal(
+    [...attempts.values()].some((item) => item.client === oldClient),
+    false,
+  );
+  app.session.client.isConnected = true;
+  app.emit();
+  await setImmediate();
+  assert.equal(attempts.size, 1);
+  delete app.state.sessions.host;
+  app.emit();
+  assert.equal(attempts.size, 0);
+  app.state.sessions.host = app.session;
+  app.emit();
+  await setImmediate();
+  assert.equal(attempts.size, 1);
+  app.model.close(app.model.entries()[0].key);
+  assert.equal(attempts.size, 0);
+  app.loader.dispose();
+});
+
+test("repeated connection flaps cannot exceed four unresolved requests or poll failures", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const pending = Array.from({ length: 5 }, deferred);
+  let count = 0;
+  const app = harness(() => pending[count++].promise);
+  await setImmediate();
+  for (let index = 0; index < 10; index++) {
+    app.session.client.isConnected = false;
+    app.emit();
+    app.session.client.isConnected = true;
+    app.emit();
+    await setImmediate();
+  }
+  assert.equal(count, 4);
+  pending.slice(0, 4).forEach((item) => item.resolve(result("obsolete")));
+  await setImmediate();
+  assert.equal(count, 5);
+  assert.equal(app.session.agentDetails.size, 0);
+  pending[4].resolve(null);
+  await setImmediate();
+  for (let index = 0; index < 10; index++) app.emit();
+  await setImmediate();
+  assert.equal(count, 5);
+  assert.equal(app.loader.state(app.model.entries()[0]).tag, "missing");
   app.loader.dispose();
 });

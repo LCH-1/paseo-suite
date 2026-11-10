@@ -47,14 +47,12 @@
   const agentDescriptors = new Map();
   let indexedRevision = -1;
   let entriesByAgent = new Map();
-  let sessionSource;
   let sessionModelRevision = -1;
   let sessionServerIds = [];
   let tabSessions = {};
   function getTabSessions() {
     const current = sessions.getState().sessions;
     const revision = model.revision();
-    if (current === sessionSource && revision === sessionModelRevision) return tabSessions;
     if (revision !== sessionModelRevision) sessionServerIds = [...new Set(model.entries().map(entry => entry.serverId))];
     const selected = {};
     let changed = false;
@@ -65,11 +63,10 @@
         if (previous) selected[serverId] = previous;
       } else {
         changed = true;
-        if (next) selected[serverId] = next;
+        if (next) selected[serverId] = { agents: next.agents, agentDetails: next.agentDetails, workspaces: next.workspaces };
       }
     }
     if (changed || Object.keys(selected).length !== Object.keys(tabSessions).length) tabSessions = selected;
-    sessionSource = current;
     sessionModelRevision = revision;
     return tabSessions;
   }

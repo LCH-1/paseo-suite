@@ -551,7 +551,13 @@
         return entry;
       },
       reconcile(sessionMap) {
-        observedSessions = sessionMap;
+        if (!getSessionMap)
+          observedSessions = Object.fromEntries(
+            Object.entries(sessionMap || {}).map(([id, session]) => [
+              id,
+              { agents: session?.agents, agentDetails: session?.agentDetails },
+            ]),
+          );
         for (const entry of trackedAgents())
           if (!openAgents.has(identity(entry))) archiveState(entry);
         let changed = false;
