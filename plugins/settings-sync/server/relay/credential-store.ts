@@ -7,6 +7,7 @@ import {
   credentialRuntimeVersion,
   withCredentialLocks,
 } from "./credential-runtime.js";
+import { sharedWindowsCredentialReader } from "../windows-credential-reader";
 import type {
   CredentialOwnership,
   CredentialProviders,
@@ -56,9 +57,16 @@ export function credentialStore(
   if (credentialRuntimeVersion !== 3)
     throw Error("Aster: 인증 저장 런타임 버전이 일치하지 않습니다.");
   const userHome = options.userHome ?? homedir();
+  // Each status call reads every login, and several windows and hosts ask about once a minute.
+  const windows = (options.platform ?? process.platform) === "win32" && process.platform === "win32";
   const store =
     options.storage ??
-    new ProviderCredentialSync({ home, userHome: options.userHome, platform: options.platform });
+    new ProviderCredentialSync({
+      home,
+      userHome: options.userHome,
+      platform: options.platform,
+      ...(windows ? { reader: sharedWindowsCredentialReader() } : {}),
+    });
   async function read(providers: CredentialProviders): Promise<CredentialState> {
     const registry = await json(path.join(home, "paseo-accounts", "accounts.json"));
     const registered = Array.isArray(registry.accounts) ? registry.accounts.filter(object) : [];
