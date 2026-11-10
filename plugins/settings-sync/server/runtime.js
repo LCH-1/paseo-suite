@@ -52,17 +52,17 @@ var providerCredentialRecordSchema = z.object({
   if (!record2.id.startsWith(`${record2.vendor}-`) || new Set(record2.providerIds).size !== record2.providerIds.length) ctx.addIssue({ code: "custom", message: "\uC798\uBABB\uB41C \uD504\uB85C\uBC14\uC774\uB354 \uC778\uC99D \uC5F0\uACB0\uC785\uB2C8\uB2E4." });
   const oauth2 = record2.credential.claudeAiOauth;
   const tokens = record2.credential.tokens;
-  const object5 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-  if (record2.vendor === "claude" && (!object5(oauth2) || typeof oauth2.accessToken !== "string" || !oauth2.accessToken)) ctx.addIssue({ code: "custom", message: "Claude OAuth \uC778\uC99D \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." });
-  if (record2.vendor === "codex" && !(typeof record2.credential.OPENAI_API_KEY === "string" && record2.credential.OPENAI_API_KEY || object5(tokens) && typeof tokens.access_token === "string" && tokens.access_token)) ctx.addIssue({ code: "custom", message: "Codex \uC778\uC99D \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." });
+  const object6 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+  if (record2.vendor === "claude" && (!object6(oauth2) || typeof oauth2.accessToken !== "string" || !oauth2.accessToken)) ctx.addIssue({ code: "custom", message: "Claude OAuth \uC778\uC99D \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." });
+  if (record2.vendor === "codex" && !(typeof record2.credential.OPENAI_API_KEY === "string" && record2.credential.OPENAI_API_KEY || object6(tokens) && typeof tokens.access_token === "string" && tokens.access_token)) ctx.addIssue({ code: "custom", message: "Codex \uC778\uC99D \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." });
   if (record2.vendor === "codex") {
     const mode = record2.credential.auth_mode;
     if (mode != null && (typeof mode !== "string" || !["apikey", "chatgpt", "chatgptAuthTokens"].includes(mode)) || ["agent_identity", "personal_access_token", "bedrock_api_key", "bedrock_access_keys"].some((key) => record2.credential[key] != null)) ctx.addIssue({ code: "custom", message: "\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 Codex \uC778\uC99D \uBC29\uC2DD\uC785\uB2C8\uB2E4." });
-    if (object5(tokens)) {
+    if (object6(tokens)) {
       if (tokens.login_owner_id != null && typeof tokens.login_owner_id !== "string") ctx.addIssue({ code: "custom", message: "\uC798\uBABB\uB41C Codex \uB85C\uADF8\uC778 \uC18C\uC720 \uC815\uBCF4\uC785\uB2C8\uB2E4." });
-      if (tokens.oauth_provenance != null && (!object5(tokens.oauth_provenance) || typeof tokens.oauth_provenance.issuer !== "string" || typeof tokens.oauth_provenance.client_id !== "string")) ctx.addIssue({ code: "custom", message: "\uC798\uBABB\uB41C Codex OAuth \uBC1C\uAE09 \uC815\uBCF4\uC785\uB2C8\uB2E4." });
+      if (tokens.oauth_provenance != null && (!object6(tokens.oauth_provenance) || typeof tokens.oauth_provenance.issuer !== "string" || typeof tokens.oauth_provenance.client_id !== "string")) ctx.addIssue({ code: "custom", message: "\uC798\uBABB\uB41C Codex OAuth \uBC1C\uAE09 \uC815\uBCF4\uC785\uB2C8\uB2E4." });
     }
-    if (mode === "apikey" && !(typeof record2.credential.OPENAI_API_KEY === "string" && record2.credential.OPENAI_API_KEY) || (mode === "chatgpt" || mode === "chatgptAuthTokens") && !(object5(tokens) && typeof tokens.access_token === "string" && tokens.access_token)) ctx.addIssue({ code: "custom", message: "\uC120\uD0DD\uB41C Codex \uC778\uC99D \uBC29\uC2DD\uC758 \uC790\uACA9\uC99D\uBA85\uC774 \uC5C6\uC2B5\uB2C8\uB2E4." });
+    if (mode === "apikey" && !(typeof record2.credential.OPENAI_API_KEY === "string" && record2.credential.OPENAI_API_KEY) || (mode === "chatgpt" || mode === "chatgptAuthTokens") && !(object6(tokens) && typeof tokens.access_token === "string" && tokens.access_token)) ctx.addIssue({ code: "custom", message: "\uC120\uD0DD\uB41C Codex \uC778\uC99D \uBC29\uC2DD\uC758 \uC790\uACA9\uC99D\uBA85\uC774 \uC5C6\uC2B5\uB2C8\uB2E4." });
   }
 }).transform((record2) => ({ ...record2, credential: normalizeVendorCredential(record2.vendor, record2.credential) }));
 var providerCredentialsSchema = z.object({ version: z.literal(1), records: z.array(providerCredentialRecordSchema).max(200) }).strict().superRefine((bundle, ctx) => {
@@ -795,7 +795,7 @@ async function decryptLocal(raw, password) {
 // server/environment.ts
 import { mkdir as mkdir7, rm as rm6 } from "node:fs/promises";
 import { homedir as homedir5, hostname } from "node:os";
-import path15 from "node:path";
+import path16 from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 
 // bundled @getpaseo/protocol/dist/agent-message.js
@@ -8646,11 +8646,11 @@ async function verifyPlugins(home, plugins, read = installedPlugins, reload = re
 }
 
 // server/provider-credentials.ts
-import { spawn as spawn4 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
 import { lstat as lstat6, mkdir as mkdir5, readFile as readFile6, realpath as realpath3, rename as rename4, rm as rm4, symlink, utimes as utimes3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import path10 from "node:path";
+import path11 from "node:path";
 import { randomUUID as randomUUID5 } from "node:crypto";
 
 // server/vendor-credential-files.ts
@@ -9490,18 +9490,176 @@ var ClaudeSecureJournal = class _ClaudeSecureJournal {
   }
 };
 
-// server/provider-credentials.ts
+// server/windows-credential-reader.ts
+import { spawn as spawn4 } from "node:child_process";
+import path10 from "node:path";
+var WINDOWS_CREDENTIAL_READER_SCRIPT = String.raw`$ErrorActionPreference='Stop'
+try {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.ComponentModel;
+public static class PaseoProviderCredentialReader {
+ [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct Credential { public UInt32 Flags; public UInt32 Type; public string TargetName; public string Comment; public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten; public UInt32 CredentialBlobSize; public IntPtr CredentialBlob; public UInt32 Persist; public UInt32 AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName; }
+ [DllImport("advapi32.dll",EntryPoint="CredReadW",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool ReadNative(string target,UInt32 type,UInt32 flags,out IntPtr value);
+ [DllImport("advapi32.dll")] static extern void CredFree(IntPtr value);
+ public static object Read(string target) { IntPtr pointer; if(!ReadNative(target,1,0,out pointer)) { if(Marshal.GetLastWin32Error()==1168)return null; throw new Win32Exception(); } try { var credential=(Credential)Marshal.PtrToStructure(pointer,typeof(Credential)); if(credential.CredentialBlobSize>1048576)throw new Exception(); var bytes=new byte[credential.CredentialBlobSize]; Marshal.Copy(credential.CredentialBlob,bytes,0,bytes.Length); long stamp=((long)(uint)credential.LastWritten.dwHighDateTime<<32)|(uint)credential.LastWritten.dwLowDateTime; return new {value=Convert.ToBase64String(bytes),updatedAt=(DateTime.FromFileTimeUtc(stamp)-new DateTime(1970,1,1)).TotalMilliseconds,persistence=credential.Persist}; } finally { CredFree(pointer); } }
+}
+'@
+} catch { [Console]::Error.Write('Provider credential store failed.'); exit 1 }
+while($true) {
+ $line=[Console]::In.ReadLine()
+ if($null -eq $line){break}
+ $reply=@{id=$null;ok=$false}
+ try {
+  $request=$line|ConvertFrom-Json
+  $reply.id=$request.id
+  if($request.operation -ne 'read' -or $request.target -isnot [string] -or $request.target.Length -eq 0){throw 'request'}
+  $reply.result=[PaseoProviderCredentialReader]::Read($request.target)
+  $reply.ok=$true
+ } catch {}
+ [Console]::Out.WriteLine(($reply|ConvertTo-Json -Compress -Depth 3))
+ [Console]::Out.Flush()
+}`;
 var LIMIT2 = 1048576;
-var CLAUDE_AUTH_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
 var object3 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+var unavailable = () => new Error("Windows credential reader is unavailable.");
+var ascii = (json) => json.replace(/[\u007f-\uffff]/g, (character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"));
+var hold = (child, referenced) => {
+  for (const handle of [child, child.stdin, child.stdout, child.stderr]) (referenced ? handle.ref : handle.unref)?.call(handle);
+};
+var WindowsCredentialReader = class {
+  constructor(options = {}) {
+    this.options = options;
+  }
+  options;
+  session = null;
+  sequence = 0;
+  retryAt = 0;
+  get now() {
+    return (this.options.now ?? Date.now)();
+  }
+  /** Resolves to the text the one-shot helper prints: "null" for a missing entry, else its JSON. */
+  read(target) {
+    return new Promise((resolve, reject) => {
+      let session2;
+      try {
+        session2 = this.open();
+      } catch {
+        reject(unavailable());
+        return;
+      }
+      const id = ++this.sequence;
+      const timer = setTimeout(() => this.end(session2, true), this.options.requestTimeoutMs ?? 2e4);
+      session2.pending.set(id, { resolve, reject, timer });
+      clearTimeout(session2.idle);
+      hold(session2.process, true);
+      try {
+        session2.process.stdin.write(ascii(JSON.stringify({ id, operation: "read", target })) + "\n");
+      } catch {
+        this.end(session2, true);
+      }
+    });
+  }
+  dispose() {
+    if (this.session) this.end(this.session, false);
+  }
+  open() {
+    if (this.session) return this.session;
+    if (this.now < this.retryAt) throw unavailable();
+    const systemRoot = this.options.systemRoot ?? process.env.SystemRoot ?? "C:\\Windows";
+    const executable = path10.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_READER_SCRIPT, "utf16le").toString("base64")];
+    let child;
+    try {
+      child = this.options.spawn ? this.options.spawn(executable, args) : spawn4(executable, args, { windowsHide: true, stdio: "pipe", cwd: systemRoot });
+    } catch (error) {
+      this.backOff();
+      throw error;
+    }
+    const session2 = { process: child, pending: /* @__PURE__ */ new Map(), buffer: "", ended: false };
+    this.session = session2;
+    child.stdout.on("data", (chunk) => this.receive(session2, chunk.toString()));
+    child.stderr.resume();
+    child.on("error", () => this.end(session2, true));
+    child.on("close", () => this.end(session2, true));
+    child.stdin.on("error", () => this.end(session2, true));
+    return session2;
+  }
+  /** A helper that cannot run must not cost an extra process on every read. */
+  backOff() {
+    this.retryAt = this.now + (this.options.retryMs ?? 5 * 6e4);
+    console.warn("[settings-sync] Windows \uC790\uACA9\uC99D\uBA85 \uC870\uD68C \uB3C4\uC6B0\uBBF8\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC5B4 \uD55C\uB3D9\uC548 \uC870\uD68C\uB9C8\uB2E4 \uBCC4\uB3C4 \uD504\uB85C\uC138\uC2A4\uB85C \uC77D\uC2B5\uB2C8\uB2E4.");
+  }
+  receive(session2, text) {
+    if (session2.ended) return;
+    session2.buffer += text;
+    for (let end = session2.buffer.indexOf("\n"); end >= 0; end = session2.buffer.indexOf("\n")) {
+      const line = session2.buffer.slice(0, end).trim();
+      session2.buffer = session2.buffer.slice(end + 1);
+      if (line && !this.answer(session2, line)) return this.end(session2, true);
+    }
+    if (session2.buffer.length > LIMIT2 * 2) this.end(session2, true);
+  }
+  answer(session2, line) {
+    let reply;
+    try {
+      reply = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    const request = object3(reply) && typeof reply.id === "number" ? session2.pending.get(reply.id) : void 0;
+    if (!object3(reply) || !request) return false;
+    session2.pending.delete(reply.id);
+    clearTimeout(request.timer);
+    if (reply.ok === true && reply.result === null) request.resolve("null");
+    else if (reply.ok === true && object3(reply.result)) request.resolve(JSON.stringify(reply.result));
+    else request.reject(unavailable());
+    if (!session2.pending.size) {
+      hold(session2.process, false);
+      session2.idle = setTimeout(() => this.end(session2, false), this.options.idleMs ?? 2 * 6e4);
+      session2.idle.unref?.();
+    }
+    return true;
+  }
+  end(session2, failed) {
+    if (session2.ended) return;
+    session2.ended = true;
+    if (this.session === session2) this.session = null;
+    clearTimeout(session2.idle);
+    if (failed) this.backOff();
+    for (const request of session2.pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(unavailable());
+    }
+    session2.pending.clear();
+    try {
+      session2.process.kill();
+    } catch {
+    }
+  }
+};
+var sharedKey = /* @__PURE__ */ Symbol.for("paseo.settings-sync.windows-credential-reader.v1");
+function sharedWindowsCredentialReader(systemRoot = process.env.SystemRoot ?? "C:\\Windows") {
+  const scope = globalThis;
+  const readers = scope[sharedKey] ??= /* @__PURE__ */ new Map();
+  let reader = readers.get(systemRoot);
+  if (!reader) readers.set(systemRoot, reader = new WindowsCredentialReader({ systemRoot }));
+  return reader;
+}
+
+// server/provider-credentials.ts
+var LIMIT3 = 1048576;
+var CLAUDE_AUTH_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+var object4 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 var hash3 = (value) => createHash5("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
 var concurrentAuthentication = () => new Error("\uBCF5\uC6D0 \uC900\uBE44 \uC911 \uACC4\uC815 \uB610\uB294 \uC778\uC99D\uC774 \uB2E4\uB978 \uD504\uB85C\uC138\uC2A4\uC5D0\uC11C \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uCD5C\uC2E0 \uC778\uC99D\uC744 \uBCF4\uC874\uD588\uC73C\uB2C8 \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
 var authState = (vendor, raw) => JSON.stringify(raw === null ? null : normalizeVendorCredential(vendor, parseObject(raw, vendor)));
 function parseObject(raw, label) {
   try {
-    if (Buffer.byteLength(raw, "utf8") > LIMIT2) throw new Error();
+    if (Buffer.byteLength(raw, "utf8") > LIMIT3) throw new Error();
     const value = JSON.parse(raw);
-    if (!object3(value)) throw new Error();
+    if (!object4(value)) throw new Error();
     return value;
   } catch {
     throw new Error(`${label} \uC778\uC99D \uB370\uC774\uD130\uAC00 \uC190\uC0C1\uB418\uC5C8\uAC70\uB098 \uC9C0\uC6D0\uD558\uB294 \uD06C\uAE30\uB97C \uCD08\uACFC\uD588\uC2B5\uB2C8\uB2E4. \uD574\uB2F9 CLI\uC5D0\uC11C \uB2E4\uC2DC \uB85C\uADF8\uC778\uD558\uC138\uC694.`);
@@ -9509,19 +9667,19 @@ function parseObject(raw, label) {
 }
 async function readKnown2(file) {
   try {
-    let parent = path10.dirname(path10.resolve(file));
+    let parent = path11.dirname(path11.resolve(file));
     while (true) {
       const info = await lstat6(parent).catch((error) => {
         if (error.code === "ENOENT") return null;
         throw error;
       });
       if (info && (!info.isDirectory() || info.isSymbolicLink())) throw new Error("unsafe");
-      const next = path10.dirname(parent);
+      const next = path11.dirname(parent);
       if (next === parent) break;
       parent = next;
     }
     const stat2 = await lstat6(file);
-    if (stat2.isSymbolicLink() || !stat2.isFile() || stat2.size > LIMIT2) throw new Error("unsafe");
+    if (stat2.isSymbolicLink() || !stat2.isFile() || stat2.size > LIMIT3) throw new Error("unsafe");
     return { raw: await readFile6(file, "utf8"), updatedAt: Math.max(0, Math.trunc(stat2.mtimeMs)) };
   } catch (error) {
     if (error.code === "ENOENT") return null;
@@ -9530,13 +9688,13 @@ async function readKnown2(file) {
 }
 function providerProfileDirectory(home, id) {
   if (!/^(claude|codex|cursor|opencode|pi)-[a-f0-9]{24}$/.test(id)) throw new Error("\uC798\uBABB\uB41C \uD504\uB85C\uBC14\uC774\uB354 \uD504\uB85C\uD544 ID\uC785\uB2C8\uB2E4.");
-  return path10.join(path10.resolve(home), "settings-sync", "provider-profiles", id);
+  return path11.join(path11.resolve(home), "settings-sync", "provider-profiles", id);
 }
 async function managedDirectory(home, id) {
   const directory2 = providerProfileDirectory(home, id);
-  let current = path10.resolve(home);
+  let current = path11.resolve(home);
   for (const part of ["settings-sync", "provider-profiles", id]) {
-    current = path10.join(current, part);
+    current = path11.join(current, part);
     await mkdir5(current, { recursive: true, mode: 448 });
     const stat2 = await lstat6(current);
     if (!stat2.isDirectory() || stat2.isSymbolicLink()) throw new Error("\uC778\uC99D \uD504\uB85C\uD544 \uACBD\uB85C\uC5D0 \uC2EC\uBCFC\uB9AD \uB9C1\uD06C\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
@@ -9546,11 +9704,11 @@ async function managedDirectory(home, id) {
 function expand2(value, fallback, userHome) {
   const raw = value === void 0 || value === "" ? fallback : value;
   if (raw.startsWith("@paseo-profile:")) throw new Error("\uD504\uB85C\uBC14\uC774\uB354 \uD504\uB85C\uD544 \uACBD\uB85C\uB97C \uBA3C\uC800 \uD604\uC7AC \uAE30\uAE30\uC758 \uACBD\uB85C\uB85C \uBCC0\uD658\uD558\uC138\uC694.");
-  return path10.resolve(raw === "~" ? userHome : raw.startsWith("~/") || raw.startsWith("~\\") ? path10.join(userHome, raw.slice(2)) : raw);
+  return path11.resolve(raw === "~" ? userHome : raw.startsWith("~/") || raw.startsWith("~\\") ? path11.join(userHome, raw.slice(2)) : raw);
 }
 function metadata(config) {
   return {
-    ...object3(config.oauthAccount) ? { oauthAccount: config.oauthAccount } : {},
+    ...object4(config.oauthAccount) ? { oauthAccount: config.oauthAccount } : {},
     ...typeof config.hasCompletedOnboarding === "boolean" ? { hasCompletedOnboarding: config.hasCompletedOnboarding } : {},
     ...typeof config.lastOnboardingVersion === "string" ? { lastOnboardingVersion: config.lastOnboardingVersion } : {}
   };
@@ -9559,7 +9717,7 @@ function jwtClaims(value) {
   if (typeof value !== "string") return {};
   try {
     const parsed = JSON.parse(Buffer.from(value.split(".")[1] ?? "", "base64url").toString("utf8"));
-    return object3(parsed) ? parsed : {};
+    return object4(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -9567,24 +9725,24 @@ function jwtClaims(value) {
 function identity2(vendor, credential, meta) {
   if (vendor === "claude") {
     const account = meta.oauthAccount ?? {};
-    const oauth2 = object3(credential.claudeAiOauth) ? credential.claudeAiOauth : {};
+    const oauth2 = object4(credential.claudeAiOauth) ? credential.claudeAiOauth : {};
     const claims2 = jwtClaims(oauth2.accessToken);
     const stable2 = account.accountUuid ?? account.accountId ?? claims2.sub ?? account.emailAddress;
     return hash3([vendor, stable2 ?? oauth2.refreshToken ?? oauth2.accessToken, account.organizationUuid ?? account.organizationId ?? null]);
   }
-  const tokens = object3(credential.tokens) ? credential.tokens : {};
+  const tokens = object4(credential.tokens) ? credential.tokens : {};
   const claims = jwtClaims(tokens.id_token ?? tokens.access_token);
   if (credential.auth_mode === "apikey" || credential.auth_mode == null && typeof credential.OPENAI_API_KEY === "string" && credential.OPENAI_API_KEY) return hash3([vendor, credential.OPENAI_API_KEY]);
-  const provenance = object3(tokens.oauth_provenance) ? tokens.oauth_provenance : {};
+  const provenance = object4(tokens.oauth_provenance) ? tokens.oauth_provenance : {};
   return hash3([vendor, tokens.account_id ?? claims.sub ?? credential.OPENAI_API_KEY ?? tokens.refresh_token ?? tokens.access_token, ...tokens.login_owner_id != null || tokens.oauth_provenance != null ? [tokens.login_owner_id ?? null, provenance.issuer ?? null, provenance.client_id ?? null] : []]);
 }
 function expiresAt2(vendor, credential) {
   if (vendor === "claude") {
     const oauth2 = credential.claudeAiOauth;
-    return object3(oauth2) && typeof oauth2.expiresAt === "number" && Number.isFinite(oauth2.expiresAt) ? oauth2.expiresAt : null;
+    return object4(oauth2) && typeof oauth2.expiresAt === "number" && Number.isFinite(oauth2.expiresAt) ? oauth2.expiresAt : null;
   }
   if (credential.auth_mode === "apikey" || credential.auth_mode == null && typeof credential.OPENAI_API_KEY === "string" && credential.OPENAI_API_KEY) return null;
-  const tokens = object3(credential.tokens) ? credential.tokens : {};
+  const tokens = object4(credential.tokens) ? credential.tokens : {};
   const claims = jwtClaims(tokens.access_token);
   return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
 }
@@ -9640,7 +9798,7 @@ switch($request.operation) {
 }
 } catch { [Console]::Error.Write('Provider credential store failed.'); exit 1 }`;
 var runProviderSecret = (executable, args, input) => new Promise((resolve, reject) => {
-  const child = spawn4(executable, args, { windowsHide: true, stdio: "pipe" });
+  const child = spawn5(executable, args, { windowsHide: true, stdio: "pipe" });
   const chunks = [];
   let bytes = 0;
   let finished = false;
@@ -9661,7 +9819,7 @@ var runProviderSecret = (executable, args, input) => new Promise((resolve, rejec
   child.stdout.on("data", (chunk) => {
     if (failed) return;
     bytes += chunk.length;
-    if (bytes > LIMIT2 * 2) abort();
+    if (bytes > LIMIT3 * 2) abort();
     else chunks.push(chunk);
   });
   child.stderr.resume();
@@ -9671,27 +9829,31 @@ var runProviderSecret = (executable, args, input) => new Promise((resolve, rejec
   child.stdin.end(input);
 });
 var WindowsProviderSecureStore = class {
-  constructor(run = runProviderSecret, systemRoot = process.env.SystemRoot ?? "C:\\Windows") {
+  constructor(run = runProviderSecret, systemRoot = process.env.SystemRoot ?? "C:\\Windows", reader) {
     this.run = run;
     this.systemRoot = systemRoot;
+    this.reader = reader;
   }
   run;
   systemRoot;
+  reader;
   writerTracker;
   setWriterTracker(tracker) {
     this.writerTracker = tracker;
   }
   async command(operation, service, name, value) {
-    const executable = path10.win32.join(this.systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const executable = path11.win32.join(this.systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const writer = operation === "read" ? void 0 : this.writerTracker?.(service);
-    return this.run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64")], JSON.stringify({ operation, target: `${service}/${name}`, ...writer ? { writer } : {}, ...value === void 0 ? {} : { value: Buffer.from(value, "utf8").toString("base64") } }));
+    const oneShot = () => this.run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64")], JSON.stringify({ operation, target: `${service}/${name}`, ...writer ? { writer } : {}, ...value === void 0 ? {} : { value: Buffer.from(value, "utf8").toString("base64") } }));
+    if (operation === "read" && this.reader) return this.reader.read(`${service}/${name}`).catch(oneShot);
+    return oneShot();
   }
   async read(service, name) {
     const raw = await this.command("read", service, name);
     if (raw === "null") return null;
     try {
       const result = JSON.parse(raw);
-      if (!object3(result) || typeof result.value !== "string" || typeof result.updatedAt !== "number") throw new Error();
+      if (!object4(result) || typeof result.value !== "string" || typeof result.updatedAt !== "number") throw new Error();
       return { value: Buffer.from(result.value, "base64").toString("utf8"), updatedAt: Math.max(0, result.updatedAt), ...typeof result.persistence === "number" ? { persistence: result.persistence } : {} };
     } catch {
       throw new Error("Windows \uC790\uACA9\uC99D\uBA85 \uC800\uC7A5\uC18C \uC751\uB2F5\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
@@ -9780,8 +9942,9 @@ var ProviderCredentialSync = class {
     this.userHome = options.userHome ?? homedir2();
     this.platform = options.platform ?? process.platform;
     this.env = options.env ?? process.env;
-    this.secure = options.secure ?? (this.platform === "win32" ? new WindowsProviderSecureStore(options.run, this.env.SystemRoot) : void 0);
-    this.journal = options.journal ?? (this.platform === "win32" && process.platform === "win32" && !options.secure && !options.run ? new ClaudeSecureJournal(path10.join(this.home, "settings-sync", "claude-restore-journal")) : void 0);
+    const reader = () => options.reader ?? (process.platform === "win32" && !options.run ? sharedWindowsCredentialReader(this.env.SystemRoot) : void 0);
+    this.secure = options.secure ?? (this.platform === "win32" ? new WindowsProviderSecureStore(options.run, this.env.SystemRoot, reader()) : void 0);
+    this.journal = options.journal ?? (this.platform === "win32" && process.platform === "win32" && !options.secure && !options.run ? new ClaudeSecureJournal(path11.join(this.home, "settings-sync", "claude-restore-journal")) : void 0);
     if (this.journal && this.secure instanceof WindowsProviderSecureStore) this.secure.setWriterTracker((service) => this.journal.writer(service));
   }
   journalIO(profile, lock) {
@@ -9790,9 +9953,9 @@ var ProviderCredentialSync = class {
       readComplete: async () => (await readSecure(this.secure, profile.secureService))?.value ?? null,
       writeComplete: (raw, beforeMutation) => writeSecure(this.secure, profile.secureService, raw, void 0, beforeMutation, lock.verify),
       context: async () => {
-        const file = await readKnown2(path10.join(profile.configDirectory, ".claude.json"));
+        const file = await readKnown2(path11.join(profile.configDirectory, ".claude.json"));
         const account = file ? parseObject(file.raw, "Claude \uACC4\uC815 \uC124\uC815").oauthAccount : null;
-        return hash3(object3(account) ? [account.accountUuid ?? account.accountId ?? null, account.organizationUuid ?? account.organizationId ?? null, account.emailAddress ?? null] : null);
+        return hash3(object4(account) ? [account.accountUuid ?? account.accountId ?? null, account.organizationUuid ?? account.organizationId ?? null, account.emailAddress ?? null] : null);
       },
       verify: lock.verify,
       locks: lock.snapshot
@@ -9804,9 +9967,9 @@ var ProviderCredentialSync = class {
   effectiveEnvironment(id, providers, visited = /* @__PURE__ */ new Set()) {
     if (visited.has(id)) throw new Error("\uD504\uB85C\uBC14\uC774\uB354 \uC0C1\uC18D \uC124\uC815\uC5D0 \uC21C\uD658\uC774 \uC788\uC2B5\uB2C8\uB2E4.");
     visited.add(id);
-    const entry = object3(providers[id]) ? providers[id] : {};
+    const entry = object4(providers[id]) ? providers[id] : {};
     const base = typeof entry.extends === "string" ? this.effectiveEnvironment(entry.extends, providers, visited) : this.env;
-    return Object.fromEntries(Object.entries({ ...base, ...object3(entry.env) ? entry.env : {} }).filter((entry2) => typeof entry2[1] === "string"));
+    return Object.fromEntries(Object.entries({ ...base, ...object4(entry.env) ? entry.env : {} }).filter((entry2) => typeof entry2[1] === "string"));
   }
   profiles(providers) {
     const result = /* @__PURE__ */ new Map();
@@ -9814,7 +9977,7 @@ var ProviderCredentialSync = class {
       const vendor = providerFamily(id, asProviders(providers));
       if (vendor !== "claude" && vendor !== "codex") continue;
       const env = this.effectiveEnvironment(id, providers);
-      const fallback = path10.join(this.userHome, vendor === "claude" ? ".claude" : ".codex");
+      const fallback = path11.join(this.userHome, vendor === "claude" ? ".claude" : ".codex");
       const directory2 = expand2(vendor === "claude" ? env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME, fallback, this.userHome);
       const configDirectory = vendor === "claude" ? expand2(env.CLAUDE_CONFIG_DIR, this.userHome, this.userHome) : directory2;
       const defaultProfile = vendor === "claude" && (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== void 0 ? !env.CLAUDE_SECURESTORAGE_CONFIG_DIR : !env.CLAUDE_CONFIG_DIR);
@@ -9854,16 +10017,16 @@ var ProviderCredentialSync = class {
   }
   async readRecord(profile) {
     const { vendor, directory: directory2, configDirectory } = profile;
-    const metaFile = vendor === "claude" ? await readKnown2(path10.join(configDirectory, ".claude.json")) : null;
+    const metaFile = vendor === "claude" ? await readKnown2(path11.join(configDirectory, ".claude.json")) : null;
     const config = metaFile ? parseObject(metaFile.raw, "Claude \uACC4\uC815 \uC124\uC815") : {};
     const meta = metadata(config);
     let source = null;
     let store = "none";
     if (vendor === "claude" && this.platform === "win32") {
       const forced = profile.env.CLAUDE_CODE_FORCE_WINDOWS_CREDMAN === "1";
-      const legacy = forced ? null : await readKnown2(path10.join(directory2, ".config.json"));
+      const legacy = forced ? null : await readKnown2(path11.join(directory2, ".config.json"));
       const backend = legacy?.raw ? parseObject(legacy.raw, "Claude \uC800\uC7A5\uC18C \uC124\uC815") : config;
-      const enabled = forced || object3(backend.cachedGrowthBookFeatures) && backend.cachedGrowthBookFeatures.tengu_windows_credman === true;
+      const enabled = forced || object4(backend.cachedGrowthBookFeatures) && backend.cachedGrowthBookFeatures.tengu_windows_credman === true;
       if (enabled) {
         if (!this.secure) throw new Error("Windows Claude \uC778\uC99D \uC800\uC7A5\uC18C \uC5B4\uB311\uD130\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
         const secured = await readSecure(this.secure, profile.secureService);
@@ -9874,13 +10037,13 @@ var ProviderCredentialSync = class {
       }
     }
     if (!source) {
-      source = await readKnown2(path10.join(directory2, vendor === "claude" ? ".credentials.json" : "auth.json"));
+      source = await readKnown2(path11.join(directory2, vendor === "claude" ? ".credentials.json" : "auth.json"));
       if (source) store = "file";
     }
     if (vendor === "claude" && this.platform === "win32" && store === "file" && source) {
       const file = parseObject(source.raw, "Claude");
       const oauth2 = file?.claudeAiOauth;
-      const missing = oauth2 == null || object3(oauth2) && (oauth2.accessToken == null || typeof oauth2.accessToken === "string" && !oauth2.accessToken.trim());
+      const missing = oauth2 == null || object4(oauth2) && (oauth2.accessToken == null || typeof oauth2.accessToken === "string" && !oauth2.accessToken.trim());
       if (missing && this.secure) {
         const secured = await readSecure(this.secure, profile.secureService);
         if (secured) {
@@ -9892,7 +10055,7 @@ var ProviderCredentialSync = class {
     if (!source) {
       if (vendor === "claude" && this.platform === "darwin" && config.oauthAccount) throw new Error("\uC774 Claude \uACC4\uC815\uC740 macOS \uD0A4\uCCB4\uC778\uC5D0 \uC800\uC7A5\uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4. \uC774 \uBC84\uC804\uC740 \uD574\uB2F9 \uD0A4\uCCB4\uC778 \uB0B4\uBCF4\uB0B4\uAE30\uB97C \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. CLI\uC758 \uC7A5\uAE30 \uC2E4\uD589 \uD1A0\uD070\uC744 \uD504\uB85C\uBC14\uC774\uB354 \uD658\uACBD\uC5D0 \uC9C0\uC815\uD558\uC138\uC694.");
       if (vendor === "codex") {
-        const configuration = await readKnown2(path10.join(directory2, "config.toml"));
+        const configuration = await readKnown2(path11.join(directory2, "config.toml"));
         const global = configuration?.raw.split(/^\s*\[/m)[0] ?? "";
         if (/^\s*cli_auth_credentials_store\s*=\s*["']keyring["']\s*(?:#.*)?$/m.test(global)) throw new Error("Codex\uAC00 OS \uD0A4\uB9C1 \uC778\uC99D \uC800\uC7A5\uC18C\uB97C \uC0AC\uC6A9\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4. \uC774 \uBC84\uC804\uC740 Codex \uD0A4\uB9C1 \uB0B4\uBCF4\uB0B4\uAE30\uB97C \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. Codex\uC758 cli_auth_credentials_store\uB97C file\uB85C \uC124\uC815\uD55C \uB4A4 CLI\uC5D0\uC11C \uB2E4\uC2DC \uB85C\uADF8\uC778\uD558\uC138\uC694.");
       }
@@ -9902,7 +10065,7 @@ var ProviderCredentialSync = class {
     if (vendor === "claude") {
       const oauth2 = credential.claudeAiOauth;
       if (oauth2 == null) return { record: null, store };
-      if (!object3(oauth2)) throw new Error("Claude OAuth \uC778\uC99D \uB370\uC774\uD130\uC758 \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. CLI\uC5D0\uC11C \uB2E4\uC2DC \uB85C\uADF8\uC778\uD558\uC138\uC694.");
+      if (!object4(oauth2)) throw new Error("Claude OAuth \uC778\uC99D \uB370\uC774\uD130\uC758 \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. CLI\uC5D0\uC11C \uB2E4\uC2DC \uB85C\uADF8\uC778\uD558\uC138\uC694.");
       if (oauth2.accessToken == null || typeof oauth2.accessToken === "string" && !oauth2.accessToken.trim()) return { record: null, store };
       if (typeof oauth2.accessToken !== "string") throw new Error("Claude OAuth \uC778\uC99D \uD1A0\uD070\uC758 \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. CLI\uC5D0\uC11C \uB2E4\uC2DC \uB85C\uADF8\uC778\uD558\uC138\uC694.");
     }
@@ -9920,15 +10083,15 @@ var ProviderCredentialSync = class {
     const next = structuredClone(providers);
     const records = [];
     const status = [];
-    const registryFile = await readKnown2(path10.join(this.home, "paseo-accounts", "accounts.json"));
+    const registryFile = await readKnown2(path11.join(this.home, "paseo-accounts", "accounts.json"));
     const registry = registryFile ? parseObject(registryFile.raw, "Paseo \uACC4\uC815 \uBAA9\uB85D") : null;
     if (registry && !Array.isArray(registry.accounts)) throw new Error("Paseo \uACC4\uC815 \uBAA9\uB85D \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
     for (const profile of this.profiles(providers)) {
       const tokenNames = profile.vendor === "claude" ? CLAUDE_AUTH_ENV : ["OPENAI_API_KEY", "CODEX_API_KEY"];
       if (tokenNames.some((name) => profile.env[name])) {
         for (const id of profile.providerIds) {
-          const entry = object3(next[id]) ? next[id] : {};
-          next[id] = { ...entry, env: { ...object3(entry.env) ? entry.env : {}, ...Object.fromEntries(tokenNames.filter((name) => profile.env[name]).map((name) => [name, profile.env[name]])) } };
+          const entry = object4(next[id]) ? next[id] : {};
+          next[id] = { ...entry, env: { ...object4(entry.env) ? entry.env : {}, ...Object.fromEntries(tokenNames.filter((name) => profile.env[name]).map((name) => [name, profile.env[name]])) } };
         }
         status.push({ vendor: profile.vendor, providerIds: profile.providerIds, status: "environment", store: "environment" });
         continue;
@@ -9937,16 +10100,16 @@ var ProviderCredentialSync = class {
       if (captured.record) {
         const accounts = [];
         for (const entry of registry?.accounts ?? []) {
-          if (!object3(entry) || entry.base !== profile.vendor || typeof entry.id !== "string" || typeof entry.signedIn !== "boolean") continue;
-          const accountHome = entry.home === null ? path10.join(this.userHome, profile.vendor === "claude" ? ".claude" : ".codex") : typeof entry.home === "string" ? expand2(entry.home, "", this.userHome) : null;
+          if (!object4(entry) || entry.base !== profile.vendor || typeof entry.id !== "string" || typeof entry.signedIn !== "boolean") continue;
+          const accountHome = entry.home === null ? path11.join(this.userHome, profile.vendor === "claude" ? ".claude" : ".codex") : typeof entry.home === "string" ? expand2(entry.home, "", this.userHome) : null;
           if (accountHome !== profile.directory) continue;
           accounts.push({ id: entry.id, base: profile.vendor, ...typeof entry.name === "string" ? { name: entry.name } : {}, home: null, email: typeof entry.email === "string" ? entry.email : null, identity: typeof entry.identity === "string" ? entry.identity : null, signedIn: entry.signedIn });
         }
         if (accounts.length) captured.record.metadata.accounts = accounts;
         records.push(captured.record);
         for (const id of profile.providerIds) {
-          const entry = object3(next[id]) ? next[id] : {};
-          next[id] = { ...entry, env: { ...object3(entry.env) ? entry.env : {}, ...profile.vendor === "claude" ? { CLAUDE_CONFIG_DIR: profile.configDirectory, CLAUDE_SECURESTORAGE_CONFIG_DIR: profile.directory, ...Object.fromEntries(CLAUDE_AUTH_ENV.map((name) => [name, ""])) } : { CODEX_HOME: profile.directory } } };
+          const entry = object4(next[id]) ? next[id] : {};
+          next[id] = { ...entry, env: { ...object4(entry.env) ? entry.env : {}, ...profile.vendor === "claude" ? { CLAUDE_CONFIG_DIR: profile.configDirectory, CLAUDE_SECURESTORAGE_CONFIG_DIR: profile.directory, ...Object.fromEntries(CLAUDE_AUTH_ENV.map((name) => [name, ""])) } : { CODEX_HOME: profile.directory } } };
         }
       }
       status.push({ vendor: profile.vendor, providerIds: profile.providerIds, status: captured.record ? "available" : "missing", store: captured.store });
@@ -10028,15 +10191,15 @@ var ProviderCredentialSync = class {
         let local = profile ? await this.record(profile) : { record: null, store: "none" };
         if (options.preserveLocalClaude && incoming.vendor === "claude" && profile && !canRenewClaudeCredential(local.record, incoming)) {
           const activeEnvironment = profile.env;
-          const configFile = !local.record ? await readKnown2(path10.join(profile.configDirectory, ".claude.json")) : null;
+          const configFile = !local.record ? await readKnown2(path11.join(profile.configDirectory, ".claude.json")) : null;
           const account = configFile ? parseObject(configFile.raw, "Claude \uACC4\uC815 \uC124\uC815").oauthAccount : null;
-          const initialized = object3(account) && typeof account.accountUuid === "string" && !!account.accountUuid;
+          const initialized = object4(account) && typeof account.accountUuid === "string" && !!account.accountUuid;
           if (local.record || initialized || CLAUDE_AUTH_ENV.some((name) => activeEnvironment[name])) {
             for (const id of incoming.providerIds) {
-              const entry = object3(next[id]) ? next[id] : {};
-              const env = { ...object3(entry.env) ? entry.env : {} };
+              const entry = object4(next[id]) ? next[id] : {};
+              const env = { ...object4(entry.env) ? entry.env : {} };
               const previous = asProviders(currentProviders)[id];
-              const previousEnv = object3(previous?.env) ? previous.env : {};
+              const previousEnv = object4(previous?.env) ? previous.env : {};
               for (const name of [...CLAUDE_AUTH_ENV, "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CODE_FORCE_WINDOWS_CREDMAN"]) {
                 delete env[name];
                 if (previousEnv[name] !== void 0) env[name] = previousEnv[name];
@@ -10065,7 +10228,7 @@ var ProviderCredentialSync = class {
           wroteClaude = true;
         }
         await checkLocks();
-        const credentialFile = path10.join(directory2, incoming.vendor === "claude" ? ".credentials.json" : "auth.json");
+        const credentialFile = path11.join(directory2, incoming.vendor === "claude" ? ".credentials.json" : "auth.json");
         const observedFile = !unchanged ? await readKnown2(credentialFile) : null;
         const service = profile.secureService;
         const observedSecure = !unchanged && service && this.secure ? await readSecure(this.secure, service) : null;
@@ -10074,10 +10237,10 @@ var ProviderCredentialSync = class {
         if (!unchanged && incoming.vendor === "claude") {
           console.info(`${auditPrefix}: providers=${incoming.providerIds.join(",")} localExpiresAt=${local.record?.expiresAt ?? "none"} incomingExpiresAt=${incoming.expiresAt ?? "none"} chosenExpiresAt=${chosen.expiresAt ?? "none"}`);
           if (this.platform === "darwin") throw new Error("macOS Claude \uD0A4\uCCB4\uC778 \uAC00\uC838\uC624\uAE30\uB97C \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uD504\uB85C\uBC14\uC774\uB354 \uD658\uACBD\uC5D0 CLI \uC7A5\uAE30 \uC2E4\uD589 \uD1A0\uD070\uC744 \uC9C0\uC815\uD558\uC138\uC694.");
-          const previousConfig = await readKnown2(path10.join(configDirectory, ".claude.json"));
+          const previousConfig = await readKnown2(path11.join(configDirectory, ".claude.json"));
           const existingConfig = previousConfig ? parseObject(previousConfig.raw, "Claude \uACC4\uC815 \uC124\uC815") : {};
-          const config = { ...existingConfig, ...chosenMetadata, ...this.platform === "win32" ? { cachedGrowthBookFeatures: { ...object3(existingConfig.cachedGrowthBookFeatures) ? existingConfig.cachedGrowthBookFeatures : {}, tengu_windows_credman: true } } : {} };
-          await write(path10.join(configDirectory, ".claude.json"), JSON.stringify(config), chosen.updatedAt, previousConfig?.raw ?? null);
+          const config = { ...existingConfig, ...chosenMetadata, ...this.platform === "win32" ? { cachedGrowthBookFeatures: { ...object4(existingConfig.cachedGrowthBookFeatures) ? existingConfig.cachedGrowthBookFeatures : {}, tengu_windows_credman: true } } : {} };
+          await write(path11.join(configDirectory, ".claude.json"), JSON.stringify(config), chosen.updatedAt, previousConfig?.raw ?? null);
           if (this.platform === "win32") {
             if (!this.secure) throw new Error("Windows Claude \uC778\uC99D \uC800\uC7A5\uC18C \uC5B4\uB311\uD130\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
             const previous2 = await readSecure(this.secure, service);
@@ -10110,32 +10273,32 @@ var ProviderCredentialSync = class {
           await write(file, JSON.stringify({ ...originalCredential, ...chosen.credential }), chosen.updatedAt, previous?.raw ?? null);
         }
         for (const id of incoming.providerIds) {
-          const entry = object3(next[id]) ? next[id] : {};
-          const env = { ...object3(entry.env) ? entry.env : {} };
+          const entry = object4(next[id]) ? next[id] : {};
+          const env = { ...object4(entry.env) ? entry.env : {} };
           const names2 = incoming.vendor === "claude" ? ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"] : ["CODEX_HOME"];
           for (const name of names2) delete env[name];
           const binding = keepProfile ? Object.fromEntries(names2.filter((name) => profile.env[name] !== void 0).map((name) => [name, profile.env[name]])) : incoming.vendor === "claude" ? { CLAUDE_CONFIG_DIR: configDirectory, CLAUDE_SECURESTORAGE_CONFIG_DIR: directory2 } : { CODEX_HOME: directory2 };
           next[id] = { ...entry, env: { ...env, ...binding, ...incoming.vendor === "claude" ? Object.fromEntries(CLAUDE_AUTH_ENV.map((name) => [name, ""])) : {} } };
         }
         if (incoming.metadata.accounts?.length) {
-          const registryDirectory = path10.join(this.home, "paseo-accounts");
+          const registryDirectory = path11.join(this.home, "paseo-accounts");
           await mkdir5(registryDirectory, { recursive: true, mode: 448 });
           if ((await lstat6(registryDirectory)).isSymbolicLink()) throw new Error("Paseo \uACC4\uC815 \uBAA9\uB85D\uC5D0 \uC2EC\uBCFC\uB9AD \uB9C1\uD06C \uB514\uB809\uD130\uB9AC\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-          const file = path10.join(registryDirectory, "accounts.json");
+          const file = path11.join(registryDirectory, "accounts.json");
           const previous = await readKnown2(file);
           const registry = previous ? parseObject(previous.raw, "Paseo \uACC4\uC815 \uBAA9\uB85D") : { accounts: [] };
           if (!Array.isArray(registry.accounts)) throw new Error("Paseo \uACC4\uC815 \uBAA9\uB85D \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
           const ids = new Set(incoming.metadata.accounts.map((entry) => entry.id));
           const restoredAccounts = incoming.metadata.accounts.map((entry) => ({ ...entry, home: directory2 }));
-          const replaced = registry.accounts.filter((entry) => object3(entry) && typeof entry.id === "string" && ids.has(entry.id) && JSON.stringify(entry) !== JSON.stringify(restoredAccounts.find((account) => account.id === entry.id)));
+          const replaced = registry.accounts.filter((entry) => object4(entry) && typeof entry.id === "string" && ids.has(entry.id) && JSON.stringify(entry) !== JSON.stringify(restoredAccounts.find((account) => account.id === entry.id)));
           const archive = Array.isArray(registry.settingsSyncPreviousAccounts) ? [...registry.settingsSyncPreviousAccounts] : [];
-          for (const entry of replaced) if (!archive.some((saved) => object3(saved) && JSON.stringify(saved.account) === JSON.stringify(entry))) archive.push({ replacedAt: (/* @__PURE__ */ new Date()).toISOString(), account: entry });
-          const accounts = [...registry.accounts.filter((entry) => !object3(entry) || typeof entry.id !== "string" || !ids.has(entry.id)), ...restoredAccounts];
+          for (const entry of replaced) if (!archive.some((saved) => object4(saved) && JSON.stringify(saved.account) === JSON.stringify(entry))) archive.push({ replacedAt: (/* @__PURE__ */ new Date()).toISOString(), account: entry });
+          const accounts = [...registry.accounts.filter((entry) => !object4(entry) || typeof entry.id !== "string" || !ids.has(entry.id)), ...restoredAccounts];
           await write(file, JSON.stringify({ ...registry, accounts, ...archive.length ? { settingsSyncPreviousAccounts: archive } : {} }), incoming.updatedAt, previous?.raw ?? null);
           if (!keepProfile && incoming.vendor === "claude") {
-            const shared = path10.join(this.userHome, ".claude", "projects");
+            const shared = path11.join(this.userHome, ".claude", "projects");
             await mkdir5(shared, { recursive: true, mode: 448 });
-            const projects = path10.join(directory2, "projects");
+            const projects = path11.join(directory2, "projects");
             const link = await lstat6(projects).catch((error) => {
               if (error.code === "ENOENT") return null;
               throw error;
@@ -10178,7 +10341,7 @@ var ProviderCredentialSync = class {
 import { access, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
-import path11 from "node:path";
+import path12 from "node:path";
 async function exists(file) {
   try {
     await access(
@@ -10205,7 +10368,7 @@ async function resolveInstalledExecutable(name, options = {}) {
   const fileExists = options.exists ?? exists;
   const home = options.home ?? homedir3();
   const paths = (environmentValue(environment, "PATH") ?? "").split(platform === "win32" ? ";" : ":").filter(Boolean).map((entry) => entry.replace(/^"|"$/g, ""));
-  const join = platform === "win32" ? path11.win32.join : path11.posix.join;
+  const join = platform === "win32" ? path12.win32.join : path12.posix.join;
   const extension = platform === "win32" ? /\.(?:exe|com|cmd|bat)$/i.test(name) ? [""] : [".exe", ".com", ".cmd", ".bat"] : [""];
   if (platform === "win32" && /\.ps1$/i.test(name)) return null;
   const standardPaths = platform === "win32" ? [
@@ -10241,7 +10404,7 @@ function materializeHome(value, home, platform) {
   const relative = value.slice(HOME_PATH_PREFIX.length);
   if (isAbsolutePath(relative) || relative.includes("\\") || relative.split("/").some((entry) => entry === "." || entry === "..") || /[:\u0000\r\n]/.test(relative))
     throw new Error("\uB3D9\uAE30\uD654\uB41C \uD648 \uACBD\uB85C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
-  return (platform === "win32" ? path11.win32.join : path11.posix.join)(
+  return (platform === "win32" ? path12.win32.join : path12.posix.join)(
     home,
     ...relative.split("/").filter(Boolean)
   );
@@ -10297,7 +10460,7 @@ async function materializeProviders(value, current, options = {}) {
               ([name2]) => name2.toUpperCase() === key.toUpperCase()
             )?.[1] : void 0;
             const environment = options.env ?? process.env;
-            const join = platform === "win32" ? path11.win32.join : path11.posix.join;
+            const join = platform === "win32" ? path12.win32.join : path12.posix.join;
             const fallback = {
               HOME: home,
               USERPROFILE: home,
@@ -10321,7 +10484,7 @@ async function materializeProviders(value, current, options = {}) {
             const localEnv = local[id]?.env;
             const localValue = localEnv && typeof localEnv === "object" && !Array.isArray(localEnv) ? localEnv[key] : void 0;
             const existing = typeof localValue === "string" && !localValue.startsWith(PROFILE_PATH_PREFIX) ? localValue : void 0;
-            const directory2 = options.profileDirectories?.[id]?.[key] ?? existing ?? (platform === "win32" ? path11.win32.join : path11.posix.join)(
+            const directory2 = options.profileDirectories?.[id]?.[key] ?? existing ?? (platform === "win32" ? path12.win32.join : path12.posix.join)(
               home,
               ".paseo",
               "settings-sync",
@@ -10341,18 +10504,18 @@ async function materializeProviders(value, current, options = {}) {
 }
 
 // server/provider-install.ts
-import { spawn as spawn5 } from "node:child_process";
+import { spawn as spawn6 } from "node:child_process";
 import { createHash as createHash6 } from "node:crypto";
 import { chmod, lstat as lstat7, mkdir as mkdir6, mkdtemp, readFile as readFile7, rename as rename5, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { homedir as homedir4 } from "node:os";
-import path12 from "node:path";
+import path13 from "node:path";
 import { gunzipSync } from "node:zlib";
 var SCRIPT_LIMIT = 2 * 1024 * 1024;
 var ARCHIVE_LIMIT = 256 * 1024 * 1024;
 var INFLATED_LIMIT = 1024 * 1024 * 1024;
 var installs = /* @__PURE__ */ new Map();
 var runProviderInstaller = (executable, args, options) => new Promise((resolve, reject) => {
-  const child = spawn5(executable, args, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn6(executable, args, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   let output = 0;
   let finished = false;
   const finish = (ok) => {
@@ -10376,14 +10539,14 @@ var runProviderInstaller = (executable, args, options) => new Promise((resolve, 
   child.on("close", (code) => finish(code === 0));
 });
 function within(root, file) {
-  const relative = path12.relative(path12.resolve(root), path12.resolve(file));
-  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path12.sep}`) && !path12.isAbsolute(relative);
+  const relative = path13.relative(path13.resolve(root), path13.resolve(file));
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path13.sep}`) && !path13.isAbsolute(relative);
 }
 async function directory(root, relative) {
-  let current = path12.resolve(root);
+  let current = path13.resolve(root);
   await mkdir6(current, { recursive: true, mode: 448 });
   for (const part of ["", ...relative.split("/").filter(Boolean)]) {
-    current = part ? path12.join(current, part) : current;
+    current = part ? path13.join(current, part) : current;
     await mkdir6(current, { recursive: true, mode: 448 });
     const stat2 = await lstat7(current);
     if (!stat2.isDirectory() || stat2.isSymbolicLink()) throw new Error("CLI \uC124\uCE58 \uB514\uB809\uD130\uB9AC\uB97C \uC548\uC804\uD558\uAC8C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
@@ -10494,22 +10657,22 @@ async function codex(root, temporary, options) {
   const archive = await download(url, ARCHIVE_LIMIT, request, (target) => target.hostname === "github.com" && target.pathname === `/openai/codex/releases/download/${tag}/${name}` || target.hostname === "release-assets.githubusercontent.com");
   if (`sha256:${createHash6("sha256").update(archive).digest("hex")}` !== asset.digest) throw new Error("Codex \uB2E4\uC6B4\uB85C\uB4DC SHA256 \uAC80\uC99D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
   const files = readCodexArchive(archive);
-  const binaries = [...files].filter(([file, content]) => ["codex", "codex.exe", `codex-${cpu}-${system}${platform === "win32" ? ".exe" : ""}`].includes(path12.posix.basename(file)) && nativeBinary(content, platform));
+  const binaries = [...files].filter(([file, content]) => ["codex", "codex.exe", `codex-${cpu}-${system}${platform === "win32" ? ".exe" : ""}`].includes(path13.posix.basename(file)) && nativeBinary(content, platform));
   if (binaries.length !== 1) throw new Error("\uACF5\uC2DD Codex \uC2E4\uD589 \uD30C\uC77C\uC744 \uC555\uCD95\uD30C\uC77C\uC5D0\uC11C \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
   const staged = await directory(temporary, "payload");
   for (const [name2, contents] of files) {
-    const destination = path12.join(staged, ...name2.split("/"));
+    const destination = path13.join(staged, ...name2.split("/"));
     if (!within(staged, destination)) throw new Error("Codex \uD30C\uC77C \uACBD\uB85C\uAC00 \uC124\uCE58 \uB514\uB809\uD130\uB9AC\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.");
-    await mkdir6(path12.dirname(destination), { recursive: true, mode: 448 });
+    await mkdir6(path13.dirname(destination), { recursive: true, mode: 448 });
     await writeFile4(destination, contents, { mode: 448, flag: "wx" });
     await chmod(destination, 448);
   }
-  const installed = path12.join(root, `codex-${tag}-${platform}-${arch}`);
+  const installed = path13.join(root, `codex-${tag}-${platform}-${arch}`);
   if (!within(root, installed)) throw new Error("Codex \uC124\uCE58 \uACBD\uB85C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
   await rename5(staged, installed);
-  const relative = path12.join(path12.basename(installed), ...binaries[0][0].split("/"));
-  await writeFile4(path12.join(root, "codex-install.json"), JSON.stringify({ version: 1, path: relative }), { mode: 384 });
-  return path12.join(root, relative);
+  const relative = path13.join(path13.basename(installed), ...binaries[0][0].split("/"));
+  await writeFile4(path13.join(root, "codex-install.json"), JSON.stringify({ version: 1, path: relative }), { mode: 384 });
+  return path13.join(root, relative);
 }
 async function script(name, temporary, options) {
   const platform = options.platform ?? process.platform;
@@ -10519,12 +10682,12 @@ async function script(name, temporary, options) {
   const domain = name === "claude" ? "claude.ai" : "cursor.com";
   const content = await download(url, SCRIPT_LIMIT, options.fetch ?? fetch, (target) => target.hostname === domain || target.hostname.endsWith(`.${domain}`));
   if (!content.length || content.includes(0)) throw new Error("\uACF5\uC2DD CLI \uC124\uCE58 \uC2A4\uD06C\uB9BD\uD2B8\uB97C \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-  const file = path12.join(temporary, windows2 ? "official-install.ps1" : "official-install.sh");
+  const file = path13.join(temporary, windows2 ? "official-install.ps1" : "official-install.sh");
   await writeFile4(file, content, { mode: 448, flag: "wx" });
   const home = options.home ?? homedir4();
   const environment = { ...process.env, ...options.env, HOME: home, USERPROFILE: home };
   const run = options.run ?? runProviderInstaller;
-  const executable = windows2 ? path12.win32.join(environment.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "/bin/bash";
+  const executable = windows2 ? path13.win32.join(environment.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "/bin/bash";
   const args = windows2 ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file] : [file];
   await run(executable, args, { cwd: temporary, env: environment, timeoutMs: 24e4, maxOutputBytes: 2 * 1024 * 1024 });
   const resolved = await (options.resolveExecutable ?? ((command) => resolveInstalledExecutable(command, options)))(name);
@@ -10532,22 +10695,22 @@ async function script(name, temporary, options) {
   return resolved;
 }
 async function install(name, options) {
-  const root = await directory(options.paseoHome ?? path12.join(options.home ?? homedir4(), ".paseo"), "settings-sync/tools");
+  const root = await directory(options.paseoHome ?? path13.join(options.home ?? homedir4(), ".paseo"), "settings-sync/tools");
   if (name === "codex") {
     try {
-      const record2 = JSON.parse(await readFile7(path12.join(root, "codex-install.json"), "utf8"));
-      const file = path12.resolve(root, record2.path);
+      const record2 = JSON.parse(await readFile7(path13.join(root, "codex-install.json"), "utf8"));
+      const file = path13.resolve(root, record2.path);
       if (record2.version !== 1 || typeof record2.path !== "string" || !within(root, file) || !(await lstat7(file)).isFile() || (await lstat7(file)).isSymbolicLink()) throw new Error("\uAE30\uC874 Codex \uC124\uCE58 \uAE30\uB85D\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
       return file;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
   }
-  const temporary = await mkdtemp(path12.join(root, "install-"));
+  const temporary = await mkdtemp(path13.join(root, "install-"));
   try {
     return name === "codex" ? await codex(root, temporary, options) : await script(name, temporary, options);
   } finally {
-    if (!within(root, temporary) || !/^install-[a-zA-Z0-9]+$/.test(path12.basename(temporary))) throw new Error("CLI \uC784\uC2DC \uC124\uCE58 \uACBD\uB85C\uB97C \uC548\uC804\uD558\uAC8C \uC815\uB9AC\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+    if (!within(root, temporary) || !/^install-[a-zA-Z0-9]+$/.test(path13.basename(temporary))) throw new Error("CLI \uC784\uC2DC \uC124\uCE58 \uACBD\uB85C\uB97C \uC548\uC804\uD558\uAC8C \uC815\uB9AC\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
     await rm5(temporary, { recursive: true, force: true });
   }
 }
@@ -10555,7 +10718,7 @@ async function ensureProviderExecutable(name, options = {}) {
   const existing = await (options.resolveExecutable ?? ((command) => resolveInstalledExecutable(command, options)))(name);
   if (existing) return existing;
   if (!["claude", "codex", "cursor-agent"].includes(name)) throw new Error("\uC774 CLI\uB294 \uC790\uB3D9 \uC124\uCE58\uB97C \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uD574\uB2F9 \uD504\uB85C\uBC14\uC774\uB354\uC758 \uACF5\uC2DD CLI\uB97C \uBA3C\uC800 \uC124\uCE58\uD558\uC138\uC694.");
-  const key = `${path12.resolve(options.paseoHome ?? path12.join(options.home ?? homedir4(), ".paseo"))}:${name}`;
+  const key = `${path13.resolve(options.paseoHome ?? path13.join(options.home ?? homedir4(), ".paseo"))}:${name}`;
   const pending = installs.get(key);
   if (pending) return pending;
   const task = install(name, options).catch(() => {
@@ -10566,7 +10729,7 @@ async function ensureProviderExecutable(name, options = {}) {
 }
 
 // server/suite-compat.ts
-import path13 from "node:path";
+import path14 from "node:path";
 import { readFile as readFile8 } from "node:fs/promises";
 
 // shared/suite-transfer.ts
@@ -10581,13 +10744,13 @@ var legacyUi = { tabs: "global-workspace-tabs", hosts: "host-order", import: "se
 async function suiteInstallation(home) {
   let raw;
   try {
-    raw = await readFile8(path13.join(home, "suite/installed.json"), "utf8");
+    raw = await readFile8(path14.join(home, "suite/installed.json"), "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
   const state = JSON.parse(raw);
-  if (state.schemaVersion !== 1 || typeof state.release !== "string" || !path13.isAbsolute(state.release)) throw new Error("Suite \uC124\uCE58 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC138\uC694.");
+  if (state.schemaVersion !== 1 || typeof state.release !== "string" || !path14.isAbsolute(state.release)) throw new Error("Suite \uC124\uCE58 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC138\uC694.");
   return { release: state.release, nativeUsagePending: state.nativeUsagePending === true };
 }
 async function normalizeSuitePlugins(home, incoming) {
@@ -10617,7 +10780,7 @@ async function normalizeSuitePlugins(home, incoming) {
         enabled = remembered.enabled;
       } else if (remembered.enabled) enabled = true;
     }
-    ui = await packPlugin(home, "terminal-tabs", path13.join(suite.release, "plugins/ui"), enabled);
+    ui = await packPlugin(home, "terminal-tabs", path14.join(suite.release, "plugins/ui"), enabled);
     if (!ui) throw new Error("Suite UI \uBC30\uD3EC\uBCF8\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
     ui = { ...ui, settings: {
       ...byId.get("terminal-tabs")?.settings,
@@ -10631,7 +10794,7 @@ async function normalizeSuitePlugins(home, incoming) {
     result[result.indexOf(ui)] = replacement;
   }
   if (legacyAster && oldAster) {
-    const aster = await packPlugin(home, "aster", path13.join(suite.release, "plugins/aster"), oldAster.enabled);
+    const aster = await packPlugin(home, "aster", path14.join(suite.release, "plugins/aster"), oldAster.enabled);
     if (!aster) throw new Error("Suite Aster \uBC30\uD3EC\uBCF8\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
     result.push({ ...aster, settings: oldAster.settings });
   }
@@ -10639,7 +10802,7 @@ async function normalizeSuitePlugins(home, incoming) {
 }
 
 // server/legacy-transfer.ts
-import path14 from "node:path";
+import path15 from "node:path";
 import { z as z33 } from "zod";
 async function legacyTransfer(home, plugins) {
   const suite = await suiteInstallation(home);
@@ -10647,7 +10810,7 @@ async function legacyTransfer(home, plugins) {
   const ui = plugins.find((plugin) => plugin.id === "terminal-tabs");
   const result = plugins.filter((plugin) => !["terminal-tabs", "aster"].includes(plugin.id));
   const legacy = async (id, enabled, settings) => {
-    const packed = await packPlugin(home, id, path14.join(suite.release, "compatibility/plugins", id), enabled);
+    const packed = await packPlugin(home, id, path15.join(suite.release, "compatibility/plugins", id), enabled);
     if (!packed) throw new Error("\uAD6C\uBC84\uC804 \uD638\uC2A4\uD2B8\uC6A9 \uD638\uD658 \uBC30\uD3EC\uBCF8\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
     return { ...packed, settings };
   };
@@ -10672,11 +10835,11 @@ async function legacyTransfer(home, plugins) {
 
 // server/restore-config.ts
 var equal = (a, b) => stableString(a) === stableString(b);
-var object4 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+var object5 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 var copy = (value) => structuredClone(value);
 function merge(before, patch) {
-  if (!object4(patch)) return copy(patch);
-  const result = object4(before) ? copy(before) : {};
+  if (!object5(patch)) return copy(patch);
+  const result = object5(before) ? copy(before) : {};
   for (const [key, value] of Object.entries(patch)) result[key] = merge(result[key], value);
   return result;
 }
@@ -10688,26 +10851,26 @@ function apply(config, patch) {
   if (removeProviders.length && next.metadataGeneration?.providers) next.metadataGeneration.providers = next.metadataGeneration.providers.filter((entry) => !removeProviders.includes(entry.provider));
   return next;
 }
-function reconcile(before, desired, live, conflicts, path18 = []) {
+function reconcile(before, desired, live, conflicts, path19 = []) {
   if (equal(before, desired)) return copy(live);
   if (equal(live, before)) return copy(desired);
   if (equal(live, desired)) return copy(live);
-  if (object4(before) && object4(desired) && object4(live) && !(path18[0] === "plugins" && path18.length === 2)) {
+  if (object5(before) && object5(desired) && object5(live) && !(path19[0] === "plugins" && path19.length === 2)) {
     const result = copy(live);
     for (const key of /* @__PURE__ */ new Set([...Object.keys(before), ...Object.keys(desired)])) {
-      const value = reconcile(before[key], desired[key], live[key], conflicts, [...path18, key]);
+      const value = reconcile(before[key], desired[key], live[key], conflicts, [...path19, key]);
       if (value === void 0) delete result[key];
       else result[key] = value;
     }
     return result;
   }
-  conflicts.add(path18.join("."));
+  conflicts.add(path19.join("."));
   return copy(live);
 }
 function appliedIntent(before, intended, live) {
   if (equal(before, intended)) return copy(intended);
   if (equal(live, before)) return copy(before);
-  if (object4(before) && object4(intended) && object4(live)) {
+  if (object5(before) && object5(intended) && object5(live)) {
     const result = copy(intended);
     for (const key of /* @__PURE__ */ new Set([...Object.keys(before), ...Object.keys(intended)])) {
       const value = appliedIntent(before[key], intended[key], live[key]);
@@ -10722,7 +10885,7 @@ function difference(before, after) {
   const patch = {};
   for (const [key, value] of Object.entries(after)) {
     if (equal(before[key], value)) continue;
-    patch[key] = key === "plugins" ? copy(value) : object4(before[key]) && object4(value) ? difference(before[key], value) : copy(value);
+    patch[key] = key === "plugins" ? copy(value) : object5(before[key]) && object5(value) ? difference(before[key], value) : copy(value);
   }
   return patch;
 }
@@ -10807,10 +10970,10 @@ function mergeProviderSettings(local, incoming) {
 var configuredPlugin = z34.object({ source: z34.literal("directory"), path: z34.string(), enabled: z34.boolean().optional() });
 function paseoHome() {
   const raw = process.env.PASEO_HOME ?? "~/.paseo";
-  return path15.resolve(raw === "~" ? homedir5() : raw.startsWith("~/") ? path15.join(homedir5(), raw.slice(2)) : raw);
+  return path16.resolve(raw === "~" ? homedir5() : raw.startsWith("~/") ? path16.join(homedir5(), raw.slice(2)) : raw);
 }
 var Environment = class {
-  constructor(home = paseoHome(), checkPlugins = verifyPlugins, providerCredentials = new ProviderCredentialSync({ home, userHome: home === paseoHome() ? homedir5() : path15.join(home, "user") }), paths = {}) {
+  constructor(home = paseoHome(), checkPlugins = verifyPlugins, providerCredentials = new ProviderCredentialSync({ home, userHome: home === paseoHome() ? homedir5() : path16.join(home, "user") }), paths = {}) {
     this.home = home;
     this.checkPlugins = checkPlugins;
     this.providerCredentials = providerCredentials;
@@ -10873,7 +11036,7 @@ var Environment = class {
     const protectedPlugins = {};
     if (options.plugins) {
       for (const [id, source] of Object.entries(original.plugins ?? {})) {
-        const raw = await readOptional(path15.join(source.path, "paseo-plugin.json"));
+        const raw = await readOptional(path16.join(source.path, "paseo-plugin.json"));
         if (raw && JSON.parse(raw).id === "settings-sync") {
           protectedPlugins[id] = source;
           if (snapshot.plugins.some((plugin) => plugin.id === id)) throw new Error("\uC2E4\uD589 \uC911\uC778 Settings Sync \uD50C\uB7EC\uADF8\uC778\uC740 \uB36E\uC5B4\uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
@@ -10884,9 +11047,9 @@ var Environment = class {
     const incomingProviders = providers && snapshot.config.providers ? await materializeProviders(merge2 ? mergeProviderSettings(original.providers, snapshot.config.providers) : snapshot.config.providers, original.providers, paths) : null;
     const patch = MutableDaemonConfigPatchSchema.parse({ ...selectConfig(pickConfig(snapshot.config), configScopes), ...incomingProviders ? { providers: incomingProviders } : {} });
     let authentication = null;
-    const operation = path15.join(this.home, "settings-sync", "restore", randomUUID6());
+    const operation = path16.join(this.home, "settings-sync", "restore", randomUUID6());
     await mkdir7(operation, { recursive: true, mode: 448 });
-    await atomicWrite(path15.join(operation, "previous-config.json"), JSON.stringify(original));
+    await atomicWrite(path16.join(operation, "previous-config.json"), JSON.stringify(original));
     const suite = await suiteInstallation(this.home);
     if (suite?.nativeUsagePending && original.plugins?.["claude-windows-usage"]) protectedPlugins["claude-windows-usage"] = original.plugins["claude-windows-usage"];
     const selected = options.plugins ? (await normalizeSuitePlugins(this.home, snapshot.plugins)).map(portablePlugin) : [];
@@ -10915,7 +11078,7 @@ var Environment = class {
         settingsId.parse(name);
         checkedRelative(`${name}.json`);
         if (stableString(localSettings[name]) === stableString(plugin.settings[name])) continue;
-        const file = path15.join(this.home, "plugin-settings", plugin.id, `${name}.json`);
+        const file = path16.join(this.home, "plugin-settings", plugin.id, `${name}.json`);
         previousSettings.push({ file, raw: await readOptional(file) });
         settingsWrites.push({ file, raw: name in plugin.settings ? JSON.stringify(plugin.settings[name]) : null });
         changedPlugins.add(plugin.id);
@@ -10927,7 +11090,7 @@ var Environment = class {
         changedPlugins.add(plugin.id);
       }
     }
-    await atomicWrite(path15.join(operation, "previous-settings.json"), JSON.stringify(previousSettings));
+    await atomicWrite(path16.join(operation, "previous-settings.json"), JSON.stringify(previousSettings));
     if (await this.fingerprint(paseo, snapshot) !== expected) throw new Error("\uBCF5\uC6D0 \uC900\uBE44 \uC911 \uC124\uC815\uC774 \uBCC0\uACBD\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uC5EC\uC138\uC694.");
     const withoutCredentials = { ...snapshot, credentials: void 0 };
     const prepared = await this.fingerprint(paseo, withoutCredentials);
@@ -11001,11 +11164,11 @@ var Environment = class {
 import { z as z35 } from "zod";
 
 // server/fresh-github-get.ts
-import { spawn as spawn6 } from "node:child_process";
+import { spawn as spawn7 } from "node:child_process";
 var script2 = `let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{input+=part;if(input.length>65536)process.exit(1)});process.stdin.on('end',async()=>{try{const data=JSON.parse(input);input='';const url=new URL(data.url);if(url.protocol!=='https:'||!['api.github.com','gist.githubusercontent.com'].includes(url.hostname)||url.username||url.password)throw Error();const response=await fetch(url,{method:'GET',headers:data.headers,redirect:'error',signal:AbortSignal.timeout(25000)});const text=await response.text();if(Buffer.byteLength(text)>${MAX_BYTES * 2})throw Error();process.stdout.write(JSON.stringify({status:response.status,text}));}catch{process.exitCode=1}});`;
 function freshGitHubGet(url, init) {
   return new Promise((resolve, reject) => {
-    const child = spawn6(process.execPath, ["-e", script2], { windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: "pipe" });
+    const child = spawn7(process.execPath, ["-e", script2], { windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: "pipe" });
     const chunks = [];
     let bytes = 0, done = false;
     const finish = (ok) => {
@@ -11091,7 +11254,7 @@ var GitHubVault = class {
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
   }
-  async api(path18, method = "GET", body) {
+  async api(path19, method = "GET", body) {
     const init = {
       method,
       redirect: "error",
@@ -11099,7 +11262,7 @@ var GitHubVault = class {
       headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
       body: body === void 0 ? void 0 : JSON.stringify(body)
     };
-    const response = method === "GET" ? await this.get(`https://api.github.com${path18}`, init) : await this.request(`https://api.github.com${path18}`, init);
+    const response = method === "GET" ? await this.get(`https://api.github.com${path19}`, init) : await this.request(`https://api.github.com${path19}`, init);
     if (!response.ok) throw new GitHubError(response.status);
     const text = await response.text();
     if (Buffer.byteLength(text) > MAX_BYTES * 2) throw new Error("GitHub \uC751\uB2F5 \uD06C\uAE30 \uC81C\uD55C\uC744 \uCD08\uACFC\uD588\uC2B5\uB2C8\uB2E4.");
@@ -11205,7 +11368,7 @@ var GitHubVault = class {
 };
 
 // server/login.ts
-import { execFile, spawn as spawn7 } from "node:child_process";
+import { execFile, spawn as spawn8 } from "node:child_process";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { promisify as promisify2 } from "node:util";
 import { z as z36 } from "zod";
@@ -11226,7 +11389,7 @@ async function githubLogin(token2, request = fetch) {
   return z36.object({ login: z36.string() }).parse(await response.json()).login;
 }
 var GitHubLogin = class {
-  constructor(token2 = githubToken, identity3 = githubLogin, launch = () => spawn7("gh", ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--skip-ssh-key"], { windowsHide: true, stdio: "pipe" })) {
+  constructor(token2 = githubToken, identity3 = githubLogin, launch = () => spawn8("gh", ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--skip-ssh-key"], { windowsHide: true, stdio: "pipe" })) {
     this.token = token2;
     this.identity = identity3;
     this.launch = launch;
@@ -11558,7 +11721,7 @@ var SyncService = class {
 
 // server/automation.ts
 import { createHash as createHash7, randomUUID as randomUUID9 } from "node:crypto";
-import path16 from "node:path";
+import path17 from "node:path";
 import { z as z37 } from "zod";
 var activeRecordSchema = z37.object({ version: z37.literal(1), enabled: z37.literal(true), login: z37.string(), secret: secretReferenceSchema, encrypted: z37.string() });
 var recordSchema = z37.discriminatedUnion("enabled", [activeRecordSchema, z37.object({ version: z37.literal(1), enabled: z37.literal(false) })]);
@@ -11596,7 +11759,7 @@ var AutoSync = class {
     this.vaultFactory = vaultFactory;
     this.token = token2;
     this.identity = identity3;
-    this.file = path16.join(environment.home, "settings-sync", "automation.json");
+    this.file = path17.join(environment.home, "settings-sync", "automation.json");
   }
   environment;
   credentials;
@@ -12054,7 +12217,7 @@ var AutoSync = class {
 
 // server/diagnostics.ts
 import { homedir as homedir6 } from "node:os";
-import path17 from "node:path";
+import path18 from "node:path";
 async function providerDiagnostics(paseo) {
   const home = paseoHome();
   const { config } = await paseo.config.get();
@@ -12062,7 +12225,7 @@ async function providerDiagnostics(paseo) {
   const snapshot = await new Environment().capture(paseo, { hosts: [], preferences: {} }, { hosts: false, preferences: false, providers: true, config: false, plugins: false });
   return {
     platform: process.platform,
-    defaultHome: home === path17.join(homedir6(), ".paseo"),
+    defaultHome: home === path18.join(homedir6(), ".paseo"),
     userHomeDigest: digest(homedir6()),
     directAuthenticatedProviders: captured.credentials.records.flatMap((record2) => record2.providerIds).sort(),
     environmentAuthenticatedProviders: (snapshot.credentials?.records ?? []).flatMap((record2) => record2.providerIds).sort(),

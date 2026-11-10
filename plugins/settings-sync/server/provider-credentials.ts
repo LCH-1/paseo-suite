@@ -10,6 +10,7 @@ import { asProviders, providerFamily } from "../shared/provider-paths";
 import { lockClaudeAuthentication } from "./claude-auth-lock";
 import { CHUNK, MAX_CHUNKS, NAME } from "./claude-secure-format";
 import { ClaudeSecureJournal, type JournalIO, type JournalWriter } from "./claude-secure-journal";
+import { sharedWindowsCredentialReader } from "./windows-credential-reader";
 
 type Providers = Record<string, unknown>;
 type JsonObject = ProviderCredentialRecord["credential"];
@@ -21,7 +22,9 @@ export interface ProviderSecureStore {
   remove(service: string, name: string): Promise<void>;
 }
 export type ProviderSecretRunner = (executable: string, args: string[], input: string) => Promise<string>;
-export type ProviderCredentialOptions = { home: string; userHome?: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; secure?: ProviderSecureStore; run?: ProviderSecretRunner; journal?: ClaudeSecureJournal };
+/** Answers a read with the text the one-shot helper prints, or rejects when it cannot. */
+export type ProviderSecretReader = { read(target: string): Promise<string> };
+export type ProviderCredentialOptions = { home: string; userHome?: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; secure?: ProviderSecureStore; run?: ProviderSecretRunner; reader?: ProviderSecretReader; journal?: ClaudeSecureJournal };
 export type ProviderCredentialStatus = { vendor: Vendor; providerIds: string[]; status: "available" | "missing" | "environment"; store: "file" | "windows-credman" | "environment" | "none" };
 const LIMIT = 1_048_576;
 const CLAUDE_AUTH_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
@@ -198,11 +201,14 @@ export const runProviderSecret: ProviderSecretRunner = (executable, args, input)
 export class WindowsProviderSecureStore implements ProviderSecureStore {
   private writerTracker?: (service: string) => JournalWriter | undefined;
   setWriterTracker(tracker: (service: string) => JournalWriter | undefined) { this.writerTracker = tracker; }
-  constructor(private run: ProviderSecretRunner = runProviderSecret, private systemRoot = process.env.SystemRoot ?? "C:\\Windows") {}
+  constructor(private run: ProviderSecretRunner = runProviderSecret, private systemRoot = process.env.SystemRoot ?? "C:\\Windows", private reader?: ProviderSecretReader) {}
   private async command(operation: "read" | "write" | "delete" | "normalize", service: string, name: string, value?: string) {
     const executable = path.win32.join(this.systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const writer = operation === "read" ? undefined : this.writerTracker?.(service);
-    return this.run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64")], JSON.stringify({ operation, target: `${service}/${name}`, ...(writer ? { writer } : {}), ...(value === undefined ? {} : { value: Buffer.from(value, "utf8").toString("base64") }) }));
+    const oneShot = () => this.run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64")], JSON.stringify({ operation, target: `${service}/${name}`, ...(writer ? { writer } : {}), ...(value === undefined ? {} : { value: Buffer.from(value, "utf8").toString("base64") }) }));
+    // Only reads use the resident helper, and whenever it cannot answer, the one-shot process decides.
+    if (operation === "read" && this.reader) return this.reader.read(`${service}/${name}`).catch(oneShot);
+    return oneShot();
   }
   async read(service: string, name: string): Promise<SecureCredentialValue | null> {
     const raw = await this.command("read", service, name);
@@ -273,7 +279,9 @@ export class ProviderCredentialSync {
   private preparedClaudeLocks = new Map<string, Awaited<ReturnType<typeof lockClaudeAuthentication>>>();
   constructor(options: ProviderCredentialOptions) {
     this.home = options.home; this.userHome = options.userHome ?? homedir(); this.platform = options.platform ?? process.platform; this.env = options.env ?? process.env;
-    this.secure = options.secure ?? (this.platform === "win32" ? new WindowsProviderSecureStore(options.run, this.env.SystemRoot) : undefined);
+    // An injected runner has to see every operation, so only the real Windows path gets the shared helper.
+    const reader = () => options.reader ?? (process.platform === "win32" && !options.run ? sharedWindowsCredentialReader(this.env.SystemRoot) : undefined);
+    this.secure = options.secure ?? (this.platform === "win32" ? new WindowsProviderSecureStore(options.run, this.env.SystemRoot, reader()) : undefined);
     this.journal = options.journal ?? (this.platform === "win32" && process.platform === "win32" && !options.secure && !options.run ? new ClaudeSecureJournal(path.join(this.home, "settings-sync", "claude-restore-journal")) : undefined);
     if (this.journal && this.secure instanceof WindowsProviderSecureStore) this.secure.setWriterTracker(service => this.journal!.writer(service));
   }

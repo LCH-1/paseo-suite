@@ -8,6 +8,8 @@ import type { CredentialProviders } from "./credential-types";
 import { ProviderCredentialSync } from "./credential-runtime.js";
 import { CredentialSharing } from "./credential-sharing";
 import { relayCredentials } from "../../client/credential-relay";
+import { WindowsCredentialReader } from "../windows-credential-reader";
+import { syntheticCredentialHost } from "../../tests/fixtures/credential-helper";
 async function fixture(managed = true) {
   const root = await mkdtemp(path.join(tmpdir(), "aster-share-test-")),
     home = path.join(root, "paseo"),
@@ -365,6 +367,53 @@ for (const fail of [false, true])
     );
     assert.ok(![...values.keys()].some((key) => key.endsWith("#p")));
   });
+
+test("status checks of a Windows login share one resident helper and still see a login renewed in between", async () => {
+  const f = await fixture(),
+    host = syntheticCredentialHost(),
+    reader = new WindowsCredentialReader({ spawn: host.spawn });
+  f.providers.claude.env!.CLAUDE_CODE_FORCE_WINDOWS_CREDMAN = "1";
+  const storage = (resident: boolean) =>
+    credentialStore(f.home, {
+      userHome: f.userHome,
+      storage: new ProviderCredentialSync({
+        home: f.home,
+        userHome: f.userHome,
+        platform: "win32",
+        env: {},
+        run: host.run,
+        ...(resident ? { reader } : {}),
+      }),
+    });
+  const login = (token: string, expiresAt: number) =>
+    JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: "synthetic-refresh", expiresAt } });
+  // The entry name is derived from the profile path; whatever the store asks for first is it.
+  await storage(false).read(f.providers);
+  const target = host.oneShots[0].target.replace(/#m$/, "");
+  host.entries.set(target, login("synthetic-windows-access", 2_000_000_000_000));
+  host.oneShots.length = 0;
+  try {
+    // Before: every window and host asking for the status costs a process per stored entry.
+    for (let check = 0; check < 5; check++) await storage(false).read(f.providers);
+    assert.equal(host.oneShots.length, 10);
+    assert.equal(host.helpers.length, 0);
+    host.oneShots.length = 0;
+    const store = storage(true);
+    for (let check = 0; check < 5; check++)
+      assert.equal((await store.read(f.providers)).accounts[0].record?.expiresAt, 2_000_000_000_000);
+    assert.equal(host.oneShots.length, 0);
+    assert.equal(host.helpers.length, 1);
+    // The CLI renews on its own; the old access token is dead from that moment.
+    host.entries.set(target, login("synthetic-renewed-by-cli", 2_100_000_000_000));
+    const renewed = (await store.read(f.providers)).accounts[0].record!;
+    assert.equal(renewed.expiresAt, 2_100_000_000_000);
+    assert.equal((renewed.credential.claudeAiOauth as any).accessToken, "synthetic-renewed-by-cli");
+    assert.equal(host.helpers.length, 1);
+    assert.equal(host.oneShots.length, 0);
+  } finally {
+    reader.dispose();
+  }
+});
 
 test("encrypted relay survives expiry, a busy alias, cleared credentials and a later logout across isolated stores", async () => {
   const source = await fixture(),

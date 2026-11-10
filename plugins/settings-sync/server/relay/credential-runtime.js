@@ -1323,12 +1323,14 @@ var runProviderSecret = (executable, args, input) => new Promise((resolve, rejec
   child.stdin.end(input);
 });
 var WindowsProviderSecureStore = class {
-  constructor(run = runProviderSecret, systemRoot = process.env.SystemRoot ?? "C:\\Windows") {
+  constructor(run = runProviderSecret, systemRoot = process.env.SystemRoot ?? "C:\\Windows", reader) {
     this.run = run;
     this.systemRoot = systemRoot;
+    this.reader = reader;
   }
   run;
   systemRoot;
+  reader;
   writerTracker;
   setWriterTracker(tracker) {
     this.writerTracker = tracker;
@@ -1336,7 +1338,10 @@ var WindowsProviderSecureStore = class {
   async command(operation, service, name, value) {
     const executable = path6.win32.join(this.systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const writer = operation === "read" ? void 0 : this.writerTracker?.(service);
-    return this.run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64")], JSON.stringify({ operation, target: `${service}/${name}`, ...writer ? { writer } : {}, ...value === void 0 ? {} : { value: Buffer.from(value, "utf8").toString("base64") } }));
+    const oneShot = () => this.run(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64")], JSON.stringify({ operation, target: `${service}/${name}`, ...writer ? { writer } : {}, ...value === void 0 ? {} : { value: Buffer.from(value, "utf8").toString("base64") } }));
+    // Only reads use the resident helper, and whenever it cannot answer, the one-shot process decides.
+    if (operation === "read" && this.reader) return this.reader.read(`${service}/${name}`).catch(oneShot);
+    return oneShot();
   }
   async read(service, name) {
     const raw = await this.command("read", service, name);
@@ -1432,7 +1437,7 @@ var ProviderCredentialSync = class {
     this.userHome = options.userHome ?? homedir2();
     this.platform = options.platform ?? process.platform;
     this.env = options.env ?? process.env;
-    this.secure = options.secure ?? (this.platform === "win32" ? new WindowsProviderSecureStore(options.run, this.env.SystemRoot) : void 0);
+    this.secure = options.secure ?? (this.platform === "win32" ? new WindowsProviderSecureStore(options.run, this.env.SystemRoot, options.reader) : void 0);
     this.journal = options.journal ?? (this.platform === "win32" && process.platform === "win32" && !options.secure && !options.run ? new ClaudeSecureJournal(path6.join(this.home, "settings-sync", "claude-restore-journal")) : void 0);
     if (this.journal && this.secure instanceof WindowsProviderSecureStore) this.secure.setWriterTracker((service) => this.journal.writer(service));
   }

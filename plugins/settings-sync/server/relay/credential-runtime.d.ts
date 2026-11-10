@@ -12,6 +12,9 @@ export class ProviderCredentialSync {
     userHome?: string;
     platform?: NodeJS.Platform;
     env?: NodeJS.ProcessEnv;
+    run?: (executable: string, args: string[], input: string) => Promise<string>;
+    /** Answers Windows reads from one resident helper; a read it rejects runs as a one-shot process. */
+    reader?: { read(target: string): Promise<string> };
     secure?: {
       read(service: string, name: string): Promise<{ value: string; updatedAt: number } | null>;
       write(service: string, name: string, value: string): Promise<void>;
