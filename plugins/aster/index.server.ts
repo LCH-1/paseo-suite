@@ -318,10 +318,22 @@ export default function contribute(server: PluginServerContext) {
             let selectedId =
               controller.choose(request.agentId, readings, Date.now())?.id ??
               null;
+            const previousId =
+              controller.bindings.get(request.agentId)?.accountId ??
+              request.env.ASTER_ACCOUNT_ID ??
+              (request.provider !== "claude" ? request.provider : null);
+            const previousAccount = eligible.find(
+              (entry) => entry.id === previousId,
+            );
+            const previousExhausted =
+              previousAccount !== undefined &&
+              exhaustedUntil(previousAccount, reports) !== null;
             if (
               !selectedId &&
               (request.reason === "create" ||
                 authenticationRecovery.has(request.agentId) ||
+                refreshing.has(request.agentId) ||
+                previousExhausted ||
                 !hasPreviousAccount(
                   request,
                   controller.bindings.has(request.agentId),
@@ -491,12 +503,10 @@ export default function contribute(server: PluginServerContext) {
           signal,
         );
         let readings: ReturnType<typeof mapReports>;
+        let reports: Awaited<ReturnType<typeof readUsage>> = [];
         try {
-          readings = mapReports(
-            eligible,
-            await readUsage(settings.command, signal),
-            settings.capacities,
-          );
+          reports = await readUsage(settings.command, signal);
+          readings = mapReports(eligible, reports, settings.capacities);
         } catch (error) {
           signal.throwIfAborted();
           if (!authenticationFailed && !subscriptionFailed) throw error;
@@ -506,10 +516,16 @@ export default function contribute(server: PluginServerContext) {
         if (!stillCurrent()) return;
         if (authenticationFailed || subscriptionFailed || limited)
           limitRoute(agent.id, agent.provider, accounts);
-        const selected = controller.choose(agent.id, readings, Date.now());
+        const selectedId =
+          controller.choose(agent.id, readings, Date.now())?.id ??
+          (authenticationFailed || subscriptionFailed || limited
+            ? bootstrapAccounts(eligible, reports, Date.now(), (id) =>
+                controller.isBlocked(id, Date.now()),
+              )[0]?.id
+            : undefined);
         if (
           (!authenticationFailed &&
-            (!selected || selected.id === binding?.accountId)) ||
+            (!selectedId || selectedId === binding?.accountId)) ||
           controller.busy.has(agent.id) ||
           controller.pendingPermission.has(agent.id)
         )
