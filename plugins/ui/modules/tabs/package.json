@@ -4,6 +4,6 @@
   "private": true,
   "scripts": {
     "build": "node build-plugin.cjs",
-    "test": "node --test tests.cjs compatibility.test.cjs metadata.test.cjs"
+    "test": "node --test tests.cjs compatibility.test.cjs metadata.test.cjs history.test.cjs"
   }
 }
