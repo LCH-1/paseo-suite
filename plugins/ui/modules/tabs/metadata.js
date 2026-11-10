@@ -16,6 +16,7 @@
     let revision = 0;
     const listeners = new Set();
     const attempts = new Map();
+    const connections = new Map();
     const releases = [];
     let sessionMetadata = new Map();
     function onSessionsChanged() {
@@ -43,7 +44,20 @@
         })
       )
         return;
+      for (const [index, id] of ids.entries()) {
+        const previous = sessionMetadata.get(id);
+        if (
+          !previous ||
+          values[index]
+            .slice(0, 3)
+            .some((value, field) => value !== previous[field])
+        )
+          connections.set(id, Symbol());
+      }
+      for (const id of connections.keys())
+        if (!Object.hasOwn(current, id)) connections.delete(id);
       sessionMetadata = new Map(ids.map((id, index) => [id, values[index]]));
+      if (pruneAttempts()) notify();
       schedule();
     }
     function notify() {
@@ -64,8 +78,34 @@
       const session = sessionFor(entry);
       return (
         session?.client === attempt.client &&
-        session?.clientGeneration === attempt.generation
+        session?.clientGeneration === attempt.generation &&
+        session?.client?.isConnected !== false &&
+        connections.get(entry.serverId) === attempt.connection
       );
+    }
+    function pruneAttempts(entries = model.entries()) {
+      if (!attempts.size) return false;
+      const retained = new Map(entries.map((entry) => [keyOf(entry), entry]));
+      let changed = false;
+      for (const [key, attempt] of attempts) {
+        const entry = retained.get(key);
+        if (!entry || cached(entry) || !sameConnection(entry, attempt)) {
+          attempts.delete(key);
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    function currentAttempt(entry, attempt) {
+      return (
+        attempts.get(keyOf(entry)) === attempt &&
+        sameConnection(entry, attempt) &&
+        model.entries().some((item) => keyOf(item) === keyOf(entry))
+      );
+    }
+    function onModelChanged() {
+      if (pruneAttempts()) notify();
+      schedule();
     }
     function state(entry) {
       const agent = cached(entry);
@@ -87,7 +127,7 @@
         const result = await getPaseoClient(entry.serverId)
           .agents.ref(entry.agentId)
           .refresh();
-        if (stopped || !sameConnection(entry, attempt)) return;
+        if (stopped || !currentAttempt(entry, attempt)) return;
         if (!result) {
           attempt.tag = "missing";
           return;
@@ -116,7 +156,7 @@
         );
         attempt.tag = "ready";
       } catch (error) {
-        if (!stopped && sameConnection(entry, attempt)) {
+        if (!stopped && currentAttempt(entry, attempt)) {
           attempt.tag = "error";
           console.warn(
             "[global-workspace-tabs] Agent metadata lookup failed",
@@ -136,7 +176,9 @@
     function pump() {
       if (stopped || typeof getPaseoClient !== "function") return;
       model.reconcile(sessions.getState().sessions);
-      for (const entry of model.entries()) {
+      const entries = model.entries();
+      if (pruneAttempts(entries)) notify();
+      for (const entry of entries) {
         const agent = cached(entry);
         if (agent) {
           if (entry.title !== agent.title)
@@ -152,6 +194,7 @@
           tag: "loading",
           client: session.client,
           generation: session.clientGeneration,
+          connection: connections.get(entry.serverId),
         };
         attempts.set(keyOf(entry), attempt);
         running++;
@@ -160,7 +203,7 @@
       }
     }
     releases.push(
-      model.subscribe(schedule),
+      model.subscribe(onModelChanged),
       sessions.subscribe(onSessionsChanged),
     );
     onSessionsChanged();
@@ -176,6 +219,7 @@
         releases.forEach((release) => release());
         listeners.clear();
         attempts.clear();
+        connections.clear();
         sessionMetadata.clear();
       },
     };

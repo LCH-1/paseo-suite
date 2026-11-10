@@ -1637,6 +1637,82 @@ test("탭 표시를 부모 상태에 반영해도 React 갱신이 반복되지 �
   }
 });
 
+test("metadata-only 탭 snapshot은 원 세션의 스트림·클라이언트 참조를 보관하지 않는다", () => {
+  const app = harness();
+  const payload = new Uint8Array(1024 * 1024);
+  app.session.agentStreamTail = new Map([["agent-a", payload]]);
+  app.session.client = { retainedTransport: true };
+  const props = app.props("a", [row("a")]);
+  app.render(props);
+  app.render(props);
+  const store = app.externalStores.at(-1);
+  const before = store.read();
+  assert.deepEqual(Object.keys(before.host).sort(), [
+    "agentDetails",
+    "agents",
+    "workspaces",
+  ]);
+  assert.notEqual(before.host, app.session);
+  app.replaceSessionMap({
+    host: { ...app.session, agentStreamTail: new Map(), client: null },
+  });
+  assert.equal(store.read(), before);
+  assert.equal(before.host.agents, app.sessionMap.host.agents);
+  assert.equal(before.host.agentStreamTail, undefined);
+  assert.equal(before.host.client, undefined);
+  app.context.__PASEO_GLOBAL_TABS__.dispose();
+});
+
+test("metadata-only 모델 fallback은 getter 유무와 관계없이 원 세션을 보관하지 않는다", () => {
+  const source = fs.readFileSync(path.join(__dirname, "model.js"), "utf8");
+  assert.equal(source.split("      storageStatus: () => ({").length, 2);
+  const context = { module: { exports: {} } };
+  vm.runInNewContext(
+    source.replace(
+      "      storageStatus: () => ({",
+      "      auditSnapshot: () => observedSessions,\n      storageStatus: () => ({",
+    ),
+    context,
+  );
+  for (const withGetter of [false, true]) {
+    const session = {
+      agents: new Map(),
+      agentDetails: new Map(),
+      agentStreamTail: new Map([["agent-a", new Uint8Array(1024 * 1024)]]),
+      client: { retainedTransport: true },
+    };
+    let current = { host: session };
+    const model = context.module.exports.createModel(
+      storage(),
+      withGetter ? () => current : undefined,
+    );
+    model.reconcile(current);
+    const retained = model.auditSnapshot();
+    assert.notEqual(retained, current);
+    if (withGetter) assert.equal(retained.host, undefined);
+    else {
+      assert.deepEqual(Object.keys(retained.host).sort(), [
+        "agentDetails",
+        "agents",
+      ]);
+      assert.equal(retained.host.agents, session.agents);
+      assert.equal(retained.host.agentDetails, session.agentDetails);
+      assert.equal(retained.host.agentStreamTail, undefined);
+      assert.equal(retained.host.client, undefined);
+    }
+    const entry = model.retainAt("host", "a", row("a").tab);
+    model.close(entry.key);
+    if (withGetter)
+      current = {
+        host: {
+          agents: new Map([["agent-a", { archivedAt: 10, updatedAt: 10 }]]),
+        },
+      };
+    else session.agents.set("agent-a", { archivedAt: 10, updatedAt: 10 });
+    assert.equal(model.retainAt("host", "a", row("a").tab), null);
+  }
+});
+
 test("대화 스트림만 바뀌면 탭 목록 snapshot을 유지하고 이름·보관 변경은 반영한다", () => {
   const app = harness();
   const props = app.props("a", [row("a")]);
@@ -1693,7 +1769,10 @@ test("모델의 host 추가·제거와 agentDetails hydration은 탭 snapshot에
   const remote = app.model.retainAt("remote", "r", row("r").tab);
   const added = store.read();
   assert.notEqual(added, before);
-  assert.equal(added.remote, app.sessionMap.remote);
+  assert.notEqual(added.remote, app.sessionMap.remote);
+  assert.equal(added.remote.agents, app.sessionMap.remote.agents);
+  assert.equal(added.remote.agentDetails, app.sessionMap.remote.agentDetails);
+  assert.equal(added.remote.workspaces, app.sessionMap.remote.workspaces);
   app.model.close(remote.key);
   const removed = store.read();
   assert.notEqual(removed, added);
