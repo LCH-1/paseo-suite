@@ -1,5 +1,6 @@
 import type { PluginClientContext, PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { acquireController } from "./client/bridge";
+import { readAppBundle } from "../../client/bundle-modules";
+import { acquireController, hostModulesMatch } from "./client/bridge";
 import { HostOrderSettings } from "./client/settings";
 import { installSidebarHostDrag } from "./client/sidebar-drag";
 import { resolveModuleMap, type HostModuleMap } from "./client/resolve-modules";
@@ -54,11 +55,9 @@ export default function contribute(client: PluginClientContext) {
   else {
     void resolveModuleMap(
       Array.from(document.scripts, (script) => script.src),
-      async (url) => {
-        const response = await fetch(url, { signal: request.signal });
-        if (!response.ok) throw new Error("현재 앱의 호스트 순서 모듈을 읽을 수 없습니다.");
-        return response.text();
-      },
+      (url) => readAppBundle(url, request.signal),
+      undefined,
+      hostModulesMatch,
     )
       .catch((error: unknown) => {
         if (stopped) return;

@@ -1,4 +1,5 @@
-import { installImportPresentation, parseImportPresentationModules } from "./client/import-presentation";
+import { readAppBundle, resolveBundleModules } from "../../client/bundle-modules";
+import { importModulesMatch, installImportPresentation, parseImportPresentationModules } from "./client/import-presentation";
 
 interface ImportLease {
   version?: number;
@@ -54,13 +55,17 @@ export default function contribute() {
         const bundles = [...new Set(Array.from(runtime.document!.scripts, script => script.src)
           .filter(src => /\/index-[a-f0-9]+\.js(?:\?.*)?$/.test(src)))];
         if (bundles.length !== 1) throw new Error("Session Import: 앱 번들을 확인할 수 없습니다.");
-        const response = await runtime.fetch(bundles[0], { signal: currentRequest.signal });
-        if (!response.ok) throw new Error("Session Import: 앱 번들을 읽을 수 없습니다.");
-        const source = await response.text();
+        const { ids, confirm } = await resolveBundleModules({
+          name: "session-import",
+          url: bundles[0],
+          read: url => readAppBundle(url, currentRequest.signal),
+          parse: parseImportPresentationModules,
+          accepts: remembered => importModulesMatch(remembered, requireModule),
+        });
         if (disposed || currentRequest.signal.aborted) return;
-        const ids = parseImportPresentationModules(source);
         if (!ids) throw new Error("Session Import: 불러오기 화면이 없습니다.");
         restore = installImportPresentation(ids, requireModule);
+        confirm();
       })().catch(error => {
         if (!disposed && !currentRequest.signal.aborted) {
           lease.failed = true;

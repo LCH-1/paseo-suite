@@ -1,6 +1,9 @@
 import { importComponentSource, importContracts } from "./import-component";
 import { resolveImportScope, type ImportScopeInput } from "./import-scope";
 import { readNewWorkspaceImportScope } from "./new-workspace-scope";
+import { isModuleId } from "../../../client/bundle-modules";
+
+const sheetDependencies = 26;
 
 export function parseImportPresentationModules(source: string) {
   const modules = source.split("\n");
@@ -10,7 +13,7 @@ export function parseImportPresentationModules(source: string) {
   const signature = candidates[0].match(/},(\d+),\[([\d,]*)\]\);?$/);
   if (!signature) throw new Error("Session Import: 불러오기 모듈 계약을 확인할 수 없습니다.");
   const dependencies = signature[2].split(",").map(Number);
-  if (dependencies.length !== 26) throw new Error("Session Import: 지원하지 않는 불러오기 모듈입니다.");
+  if (dependencies.length !== sheetDependencies) throw new Error("Session Import: 지원하지 않는 불러오기 모듈입니다.");
   const owner = (symbol: string, optional = false) => {
     const candidates = modules.filter(line => {
       const exported = line.match(/^__d\(function\(([^)]*)\)/)?.[1].split(",")[5]?.trim();
@@ -28,7 +31,9 @@ export function parseImportPresentationModules(source: string) {
   return { sheet: Number(signature[1]), dependencies, sessions: owner("useSessionStore")!, titles: owner("selectAgentTabSidebarLabel", true), ...(navigation === null ? {} : { navigation }), ...(newWorkspace === null ? {} : { newWorkspace }) };
 }
 
-export function installImportPresentation(ids: NonNullable<ReturnType<typeof parseImportPresentationModules>>, requireModule: (id: number) => any) {
+export type ImportPresentationModules = NonNullable<ReturnType<typeof parseImportPresentationModules>>;
+
+function requireImportModules(ids: ImportPresentationModules, requireModule: (id: number) => any) {
   const sheet = requireModule(ids.sheet);
   const sessions = requireModule(ids.sessions);
   const titles = ids.titles === null ? null : requireModule(ids.titles);
@@ -39,6 +44,27 @@ export function installImportPresentation(ids: NonNullable<ReturnType<typeof par
     imports.set(name, module);
   }
   if (typeof sheet?.ImportSessionSheet !== "function" || typeof sessions?.useSessionStore?.getState !== "function" || (titles && typeof titles.selectAgentTabSidebarLabel !== "function")) throw new Error("Session Import: 불러오기 런타임을 확인할 수 없습니다.");
+  return { sheet, sessions, titles, imports };
+}
+
+/** Whether remembered IDs have the parsed shape and still lead to the modules the sheet is installed into. */
+export function importModulesMatch(remembered: unknown, requireModule: (id: number) => any): boolean {
+  const ids = remembered as Partial<ImportPresentationModules>;
+  const optional = (id: unknown) => id === undefined || isModuleId(id);
+  if (!isModuleId(ids.sheet) || !isModuleId(ids.sessions) || !(ids.titles === null || isModuleId(ids.titles)) || !optional(ids.navigation) || !optional(ids.newWorkspace) ||
+    !Array.isArray(ids.dependencies) || ids.dependencies.length !== sheetDependencies || !ids.dependencies.every(isModuleId)) return false;
+  try {
+    const { titles } = requireImportModules(ids as ImportPresentationModules, requireModule);
+    return (ids.titles === null || Boolean(titles)) &&
+      (ids.navigation === undefined || typeof requireModule(ids.navigation)?.getLastWorkspaceSelection === "function") &&
+      (ids.newWorkspace === undefined || typeof requireModule(ids.newWorkspace)?.NewWorkspaceScreen === "function");
+  } catch {
+    return false;
+  }
+}
+
+export function installImportPresentation(ids: ImportPresentationModules, requireModule: (id: number) => any) {
+  const { sheet, sessions, titles, imports } = requireImportModules(ids, requireModule);
   imports.set("@/stores/session-store", sessions);
   const nativeRequire = (name: string) => {
     if (!imports.has(name)) throw new Error(`Session Import: 허용되지 않은 불러오기 의존성: ${name}`);

@@ -1,3 +1,4 @@
+import { isModuleId, resolveBundleModules } from "../../../client/bundle-modules";
 import moduleMaps from "./module-maps";
 
 export interface HostModuleMap {
@@ -28,14 +29,29 @@ export function parseModuleMap(bundle: string, source: string): HostModuleMap {
   };
 }
 
+/** IDs remembered for this bundle are reused, and new ones remembered, only while `matches` finds the host exports behind them. */
 export async function resolveModuleMap(
   scripts: readonly string[],
   readSource: (url: string) => Promise<string>,
   knownMaps: readonly HostModuleMap[] = moduleMaps,
+  matches: (ids: HostModuleMap) => boolean = () => false,
 ): Promise<HostModuleMap | undefined> {
   const url = scripts.find((script) => /\/(index-[a-f0-9]+\.js)(?:\?.*)?$/.test(script));
   if (!url) return undefined;
   const bundle = url.split("?")[0].split("/").pop()!;
   const known = knownMaps.find((entry) => entry.bundle === bundle);
-  return known ?? parseModuleMap(bundle, await readSource(url));
+  if (known) return known;
+  const resolved = await resolveBundleModules({
+    name: "host-order",
+    url,
+    read: readSource,
+    parse: (source) => parseModuleMap(bundle, source),
+    accepts: (remembered) => {
+      const ids = remembered as Partial<HostModuleMap>;
+      return ids.bundle === bundle && isModuleId(ids.runtime) && isModuleId(ids.ordering) &&
+        isModuleId(ids.desktop) && matches(ids as HostModuleMap);
+    },
+  });
+  if (matches(resolved.ids)) resolved.confirm();
+  return resolved.ids;
 }
