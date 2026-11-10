@@ -1,3 +1,5 @@
+import { orderProviderModels } from "./model-order";
+
 type Row = { id: string; label?: string };
 type Profile = { provider: string };
 
@@ -23,12 +25,15 @@ export function installMenuPresentation(
   catalog: any,
   profileState: any,
   settings: any,
+  browser?: any,
 ) {
   const originalForm = form.useAgentFormState;
   const originalProfiles = profiles.useAgentProfilePicker;
   const originalCatalog = catalog.useAgentProfileFormCatalog;
   const originalState = profileState.useAgentProfileFormState;
   const originalSettings = settings.useSessionSettings;
+  const originalBrowser = browser?.useModelBrowser;
+  const orderedProviders = new WeakMap<object, any>();
   const forms = new WeakMap<object, object>();
   const pickers = new WeakMap<object, object>();
   const models = new WeakMap<object, string>();
@@ -101,6 +106,18 @@ export function installMenuPresentation(
     }
     return sessionSettings.get(result);
   };
+  const wrappedBrowser = (options: any) => {
+    if (!active(options.serverId)) return originalBrowser(options);
+    if (!orderedProviders.has(options.providers))
+      orderedProviders.set(
+        options.providers,
+        orderProviderModels(options.providers),
+      );
+    const providers = orderedProviders.get(options.providers);
+    return originalBrowser(
+      providers === options.providers ? options : { ...options, providers },
+    );
+  };
   const restore = () => {
     const failures = [];
     for (const [target, name, wrapped, original] of [
@@ -109,6 +126,9 @@ export function installMenuPresentation(
       [catalog, "useAgentProfileFormCatalog", wrappedCatalog, originalCatalog],
       [profileState, "useAgentProfileFormState", wrappedState, originalState],
       [settings, "useSessionSettings", wrappedSettings, originalSettings],
+      ...(browser
+        ? [[browser, "useModelBrowser", wrappedBrowser, originalBrowser]]
+        : []),
     ]) {
       try {
         if (target[name] === wrapped) target[name] = original;
@@ -128,6 +148,7 @@ export function installMenuPresentation(
     catalog.useAgentProfileFormCatalog = wrappedCatalog;
     profileState.useAgentProfileFormState = wrappedState;
     settings.useSessionSettings = wrappedSettings;
+    if (browser) browser.useModelBrowser = wrappedBrowser;
   } catch (error) {
     try {
       restore();

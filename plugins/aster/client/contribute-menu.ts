@@ -28,7 +28,9 @@ export function contributeMenu() {
     }
   }
   const legacy =
-    runtime[key] && (runtime[key]?.version ?? 0) < 9 ? runtime[key] : undefined;
+    runtime[key] && (runtime[key]?.version ?? 0) < 10
+      ? runtime[key]
+      : undefined;
   const disposeLegacy = legacy?.dispose.bind(legacy);
   if (legacy) {
     disposeLegacy!();
@@ -39,7 +41,7 @@ export function contributeMenu() {
     const requireModule = runtime.__r;
     let restore: (() => void) | undefined;
     const lease: MenuLease = {
-      version: 9,
+      version: 10,
       owners: 0,
       ready: Promise.resolve(),
       retry() {
@@ -79,13 +81,15 @@ export function contributeMenu() {
           const catalog = requireModule(ids.catalog);
           const profileState = requireModule(ids.profileState);
           const settings = requireModule(ids.settings);
+          const browser = requireModule(ids.browser);
           if (
             typeof form?.useAgentFormState !== "function" ||
             typeof profiles?.useAgentProfilePicker !== "function" ||
             typeof registry?.pluginRegistry?.getSnapshot !== "function" ||
             typeof catalog?.useAgentProfileFormCatalog !== "function" ||
             typeof profileState?.useAgentProfileFormState !== "function" ||
-            typeof settings?.useSessionSettings !== "function"
+            typeof settings?.useSessionSettings !== "function" ||
+            typeof browser?.useModelBrowser !== "function"
           ) {
             throw new Error(
               "Aster: 현재 앱의 메뉴 확장 호환성을 확인할 수 없습니다.",
@@ -98,6 +102,7 @@ export function contributeMenu() {
             catalog,
             profileState,
             settings,
+            browser,
           );
           restore = menuRestore;
         })

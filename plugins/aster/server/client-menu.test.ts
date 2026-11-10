@@ -1,10 +1,134 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  orderClaudeModels,
+  orderProviderModels,
+} from "../client/model-order.ts";
+import {
   installMenuPresentation,
   singleProviderRows,
   withoutAccountProfiles,
 } from "../client/menu.ts";
+
+test("각 계열 최신부터 순환하고 같은 버전 변형은 함께 두며 선택 메타데이터를 보존한다", () => {
+  const ids = [
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+    "claude-opus-4-8[1m]",
+    "claude-opus-4-8",
+    "claude-sonnet-5[1m]",
+    "claude-haiku-5-5",
+    "custom",
+    "claude-fable-5-2",
+    "claude-sonnet-5-5",
+  ];
+  const rows = ids.map((modelId) =>
+    Object.freeze({ modelId, isDefault: modelId === "claude-opus-5-5" }),
+  );
+  Object.freeze(rows);
+  const ordered = orderClaudeModels(rows, (row) => row.modelId);
+  assert.deepEqual(
+    ordered.map((row) => row.modelId),
+    [
+      "claude-fable-5-2",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+      "claude-fable-5-1",
+      "claude-opus-5",
+      "claude-sonnet-5",
+      "claude-sonnet-5[1m]",
+      "claude-haiku-4-5",
+      "claude-opus-4-8[1m]",
+      "claude-opus-4-8",
+      "custom",
+    ],
+  );
+  assert.equal(ordered[1], rows[1]);
+  assert.equal(ordered[1].isDefault, true);
+  assert.equal(
+    orderClaudeModels(ordered, (row) => row.modelId),
+    ordered,
+  );
+  assert.deepEqual(
+    rows.map((row) => row.modelId),
+    ids,
+  );
+});
+
+test("모델 브라우저는 Aster 활성 호스트만 정렬하고 검색·선택·Codex 순서와 해제를 보존한다", () => {
+  const f = fixture();
+  f.dispose();
+  const browser = { useModelBrowser: (options: any) => options };
+  const original = browser.useModelBrowser;
+  const registry = {
+    pluginRegistry: {
+      getSnapshot: () => [
+        {
+          id: "aster",
+          serverId: "local",
+          lifetime: { signal: { aborted: false } },
+        },
+      ],
+    },
+  };
+  const dispose = installMenuPresentation(
+    f.form,
+    f.profiles,
+    registry,
+    f.catalog,
+    f.profileState,
+    f.settings,
+    browser,
+  );
+  try {
+    const rows = [
+      "claude-opus-5",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+      "claude-haiku-5-5",
+    ].map((modelId) => ({ modelId }));
+    const providers = [
+      { id: "claude", modelSelection: { kind: "models", rows } },
+      {
+        id: "codex",
+        modelSelection: {
+          kind: "models",
+          rows: [{ modelId: "codex-mini" }, { modelId: "codex" }],
+        },
+      },
+    ];
+    const options = {
+      serverId: "local",
+      providers,
+      selectedModel: "claude-opus-5",
+      onSelect: () => {},
+    };
+    const result = browser.useModelBrowser(options);
+    assert.deepEqual(
+      result.providers[0].modelSelection.rows.map((r) => r.modelId),
+      [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-opus-5",
+      ],
+    );
+    assert.equal(result.selectedModel, options.selectedModel);
+    assert.equal(result.onSelect, options.onSelect);
+    assert.equal(result.providers[1], providers[1]);
+    assert.equal(browser.useModelBrowser(options).providers, result.providers);
+    const remote = { ...options, serverId: "other" };
+    assert.equal(browser.useModelBrowser(remote), remote);
+    assert.equal(orderProviderModels([providers[1]])[0], providers[1]);
+  } finally {
+    dispose();
+  }
+  assert.equal(browser.useModelBrowser, original);
+});
 
 test("공급자 선택은 Claude와 Codex만 남기고 원본 목록을 보존한다", () => {
   const rows = [
