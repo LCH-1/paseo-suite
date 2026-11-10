@@ -15,6 +15,20 @@ interface Lease {
 }
 const leaseKey = "__PASEO_HOST_ORDER__";
 
+/** Whether these IDs still lead to the exports `resolve-modules` located them by. */
+export function hostModulesMatch(ids: HostModuleMap): boolean {
+  const requireModule = (globalThis as { __r?: (id: number) => unknown }).__r;
+  if (typeof requireModule !== "function") return false;
+  const provides = (id: number, symbol: string) =>
+    typeof (requireModule(id) as Record<string, unknown> | undefined)?.[symbol] === "function";
+  try {
+    return provides(ids.runtime, "getHostRuntimeStore") && provides(ids.ordering, "orderHostsLocalFirst") &&
+      provides(ids.desktop, "getDesktopDaemonStatus");
+  } catch {
+    return false;
+  }
+}
+
 export function acquireController(
   attachSidebar?: (controller: Controller) => () => void,
   resolvedIds?: HostModuleMap,

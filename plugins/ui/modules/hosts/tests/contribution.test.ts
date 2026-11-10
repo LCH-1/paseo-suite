@@ -35,6 +35,7 @@ function harness(t: TestContext) {
   set("document", { scripts });
   set("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
   set("__PASEO_HOST_ORDER__", undefined);
+  set("__PASEO_SUITE_BUNDLE_SOURCES_1__", undefined);
   set("__r", (id: number) => id === moduleMaps[0].runtime ? { getHostRuntimeStore: () => store }
     : id === moduleMaps[0].ordering ? ordering : { shouldUseDesktopDaemon: () => false });
   set("addEventListener", (_type: string, callback: unknown) => { storageListeners.add(callback); });
@@ -161,4 +162,63 @@ test("unload while resolving a bundle never registers contributions from its lat
   await settle();
   assert.deepEqual(h.counts(), { settings: 0, commands: 0, removedSettings: 0, removedCommands: 0 });
   assert.equal(h.lease(), undefined);
+});
+
+function unlistedBundle(h: ReturnType<typeof harness>) {
+  const ids = moduleMaps[0];
+  h.scripts[0].src = "paseo://app/index-aabbcc.js";
+  h.set("__r", (id: number) => id === ids.runtime ? { getHostRuntimeStore: () => h.store }
+    : id === ids.ordering ? h.ordering
+    : id === ids.desktop ? { shouldUseDesktopDaemon: () => false, getDesktopDaemonStatus: async () => ({ serverId: "" }) } : {});
+  const source = [
+    `__d(function(g,r,i,a,m,e,d){e.getHostRuntimeStore=function(){}},${ids.runtime},[]);`,
+    `__d(function(g,r,i,a,m,e,d){e.orderHostsLocalFirst=function(){}},${ids.ordering},[]);`,
+    `__d(function(g,r,i,a,m,e,d){e.getDesktopDaemonStatus=function(){}},${ids.desktop},[]);`,
+  ].join("\n");
+  let fetches = 0;
+  h.set("fetch", async () => { fetches++; return { ok: true, text: async () => source }; });
+  return {
+    fetches: () => fetches,
+    remembered: () => JSON.parse(globalThis.localStorage.getItem("@paseo-suite:bundle-modules:1:host-order") ?? "null"),
+    remember: (stale: object) => globalThis.localStorage.setItem("@paseo-suite:bundle-modules:1:host-order",
+      JSON.stringify({ bundle: "index-aabbcc.js", ids: { ...ids, bundle: "index-aabbcc.js", ...stale } })),
+    nextWindow: () => h.set("__PASEO_SUITE_BUNDLE_SOURCES_1__", undefined),
+  };
+}
+
+test("hosts loading together read an unlisted bundle once, and a later window not at all", async (t) => {
+  const h = harness(t);
+  const app = unlistedBundle(h);
+  const first = h.contribute(), second = h.contribute();
+  await settle();
+  assert.equal(app.fetches(), 1);
+  assert.equal(h.lease().owners, 2);
+  assert.equal(h.warnings.length, 0);
+  assert.deepEqual(app.remembered().ids, { ...moduleMaps[0], bundle: "index-aabbcc.js" });
+  first(); second();
+  assert.equal(h.lease(), undefined);
+  app.nextWindow();
+  const later = h.contribute();
+  await settle();
+  assert.equal(app.fetches(), 1);
+  assert.equal(h.lease().owners, 1);
+  assert.notEqual(h.store.getHosts, h.nativeHosts);
+  later();
+  assert.equal(h.store.getHosts, h.nativeHosts);
+});
+
+test("remembered IDs that lead to other modules are resolved again before any host module is wrapped", async (t) => {
+  const h = harness(t);
+  const app = unlistedBundle(h);
+  app.remember({ runtime: moduleMaps[0].ordering, ordering: moduleMaps[0].runtime });
+  const release = h.contribute();
+  await settle();
+  assert.equal(app.fetches(), 1);
+  assert.equal(h.warnings.length, 0);
+  assert.equal(h.lease().owners, 1);
+  assert.notEqual(h.store.getHosts, h.nativeHosts);
+  assert.equal(app.remembered().ids.runtime, moduleMaps[0].runtime);
+  release();
+  assert.equal(h.store.getHosts, h.nativeHosts);
+  assert.equal(h.ordering.orderHostsLocalFirst, h.nativeOrder);
 });

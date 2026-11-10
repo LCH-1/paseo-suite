@@ -1,5 +1,6 @@
+import { readAppBundle } from "../../ui/client/bundle-modules";
 import { installMenuPresentation } from "./menu";
-import { resolveMenuModules } from "./modules";
+import { resolveMenuModules, type MenuModuleMap } from "./modules";
 import { installRuntimeModelPresentation } from "./runtime-model";
 
 interface MenuLease {
@@ -56,65 +57,66 @@ export function contributeMenu() {
       },
     };
     runtime[key] = lease;
+    function loadMenuModules(ids: MenuModuleMap) {
+      const form = requireModule(ids.form);
+      const profiles = requireModule(ids.profiles);
+      const registry = requireModule(ids.registry);
+      const catalog = requireModule(ids.catalog);
+      const profileState = requireModule(ids.profileState);
+      const settings = requireModule(ids.settings);
+      const browser = requireModule(ids.browser);
+      const store = requireModule(ids.sessions)?.useSessionStore;
+      if (
+        typeof form?.useAgentFormState !== "function" ||
+        typeof profiles?.useAgentProfilePicker !== "function" ||
+        typeof registry?.pluginRegistry?.getSnapshot !== "function" ||
+        typeof catalog?.useAgentProfileFormCatalog !== "function" ||
+        typeof profileState?.useAgentProfileFormState !== "function" ||
+        typeof settings?.useSessionSettings !== "function" ||
+        typeof browser?.useModelBrowser !== "function" ||
+        typeof store?.getState !== "function" ||
+        typeof store?.setState !== "function" ||
+        typeof store?.subscribe !== "function" ||
+        typeof registry?.pluginRegistry?.subscribe !== "function"
+      ) {
+        throw new Error(
+          "Aster: 현재 앱의 메뉴 확장 호환성을 확인할 수 없습니다.",
+        );
+      }
+      return {
+        menu: [
+          form,
+          profiles,
+          registry,
+          catalog,
+          profileState,
+          settings,
+          browser,
+        ] as const,
+        store,
+        registry,
+      };
+    }
     function start() {
       request?.abort();
       const currentRequest = new AbortController();
       request = currentRequest;
       lease.failed = false;
-      let bundleSource = "";
       lease.ready = resolveMenuModules(
         Array.from(runtime.document!.scripts, (script) => script.src),
-        async (url) => {
-          const response = await runtime.fetch(url, {
-            signal: currentRequest.signal,
-          });
-          if (!response.ok)
-            throw new Error("Aster: 현재 앱의 메뉴 모듈을 읽을 수 없습니다.");
-          bundleSource = await response.text();
-          return bundleSource;
-        },
+        (url) => readAppBundle(url, currentRequest.signal),
+        (remembered) => Boolean(loadMenuModules(remembered)),
       )
-        .then((ids) => {
+        .then(({ ids, confirm }) => {
           if (currentRequest.signal.aborted) return;
-          const form = requireModule(ids.form);
-          const profiles = requireModule(ids.profiles);
-          const registry = requireModule(ids.registry);
-          const catalog = requireModule(ids.catalog);
-          const profileState = requireModule(ids.profileState);
-          const settings = requireModule(ids.settings);
-          const browser = requireModule(ids.browser);
-          const store = requireModule(ids.sessions)?.useSessionStore;
-          if (
-            typeof form?.useAgentFormState !== "function" ||
-            typeof profiles?.useAgentProfilePicker !== "function" ||
-            typeof registry?.pluginRegistry?.getSnapshot !== "function" ||
-            typeof catalog?.useAgentProfileFormCatalog !== "function" ||
-            typeof profileState?.useAgentProfileFormState !== "function" ||
-            typeof settings?.useSessionSettings !== "function" ||
-            typeof browser?.useModelBrowser !== "function" ||
-            typeof store?.getState !== "function" ||
-            typeof store?.setState !== "function" ||
-            typeof store?.subscribe !== "function" ||
-            typeof registry?.pluginRegistry?.subscribe !== "function"
-          ) {
-            throw new Error(
-              "Aster: 현재 앱의 메뉴 확장 호환성을 확인할 수 없습니다.",
-            );
-          }
-          const menuRestore = installMenuPresentation(
-            form,
-            profiles,
-            registry,
-            catalog,
-            profileState,
-            settings,
-            browser,
-          );
+          const modules = loadMenuModules(ids);
+          confirm();
+          const menuRestore = installMenuPresentation(...modules.menu);
           restore = menuRestore;
           try {
             const runtimeRestore = installRuntimeModelPresentation(
-              store,
-              registry.pluginRegistry,
+              modules.store,
+              modules.registry.pluginRegistry,
             );
             restore = () => {
               try {

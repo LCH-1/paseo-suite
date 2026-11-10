@@ -1,13 +1,19 @@
-export interface MenuModuleMap {
-  form: number;
-  profiles: number;
-  registry: number;
-  catalog: number;
-  profileState: number;
-  settings: number;
-  browser: number;
-  sessions: number;
-}
+import {
+  isModuleId,
+  resolveBundleModules,
+} from "../../ui/client/bundle-modules";
+
+const menuModuleNames = [
+  "form",
+  "profiles",
+  "registry",
+  "catalog",
+  "profileState",
+  "settings",
+  "browser",
+  "sessions",
+] as const;
+export type MenuModuleMap = Record<(typeof menuModuleNames)[number], number>;
 
 function parseExportModule(source: string, symbol: string, optional = false) {
   const lines = source.split("\n");
@@ -50,9 +56,14 @@ export function parseMenuModules(source: string): MenuModuleMap {
   };
 }
 
+/**
+ * IDs remembered for this bundle are reused only while `matches` finds the
+ * menu exports behind them.
+ */
 export async function resolveMenuModules(
   scripts: readonly string[],
   readSource: (url: string) => Promise<string>,
+  matches: (ids: MenuModuleMap) => boolean = () => false,
 ) {
   const bundles = [
     ...new Set(
@@ -63,5 +74,17 @@ export async function resolveMenuModules(
   ];
   if (bundles.length !== 1)
     throw new Error("Aster: 현재 앱의 메뉴 확장 호환성을 확인할 수 없습니다.");
-  return parseMenuModules(await readSource(bundles[0]));
+  return resolveBundleModules({
+    name: "aster-menu",
+    url: bundles[0],
+    read: readSource,
+    parse: parseMenuModules,
+    accepts: (remembered) => {
+      const ids = remembered as Partial<MenuModuleMap>;
+      return (
+        menuModuleNames.every((name) => isModuleId(ids[name])) &&
+        matches(ids as MenuModuleMap)
+      );
+    },
+  });
 }

@@ -27,25 +27,23 @@ test("새 앱 번들의 고유한 export로 메뉴 ID를 확인하고 모호한 
     sessions: 208,
   });
   const read: string[] = [];
-  assert.deepEqual(
-    await resolveMenuModules(
-      ["paseo://app/index-abcdef.js?v=2"],
-      async (url) => {
-        read.push(url);
-        return source;
-      },
-    ),
-    {
-      form: 901,
-      profiles: 802,
-      registry: 703,
-      catalog: 604,
-      profileState: 505,
-      settings: 406,
-      browser: 307,
-      sessions: 208,
+  const resolved = await resolveMenuModules(
+    ["paseo://app/index-abcdef.js?v=2"],
+    async (url) => {
+      read.push(url);
+      return source;
     },
   );
+  assert.deepEqual(resolved.ids, {
+    form: 901,
+    profiles: 802,
+    registry: 703,
+    catalog: 604,
+    profileState: 505,
+    settings: 406,
+    browser: 307,
+    sessions: 208,
+  });
   assert.deepEqual(read, ["paseo://app/index-abcdef.js?v=2"]);
   assert.throws(
     () => parseMenuModules(source + "\n" + source.split("\n")[0]),
@@ -116,7 +114,7 @@ test("barrel 재수출과 다른 객체의 패치 코드를 실제 export 소유
   });
 });
 
-function harness(t: TestContext) {
+function harness(t: TestContext, remember = false) {
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   function set(key: string, value: unknown) {
     if (!descriptors.has(key))
@@ -157,18 +155,28 @@ function harness(t: TestContext) {
     },
   };
   const required: number[] = [];
+  const stored = new Map<string, string>();
   let fetches = 0;
-  let signal: AbortSignal | undefined;
   let read = async () => source;
   set("document", { scripts: [{ src: "paseo://app/index-abcdef.js" }] });
   set("__PASEO_ASTER_MENU__", undefined);
+  set("__PASEO_SUITE_BUNDLE_SOURCES_1__", undefined);
+  set(
+    "localStorage",
+    remember
+      ? {
+          getItem: (key: string) => stored.get(key) ?? null,
+          setItem: (key: string, value: string) => void stored.set(key, value),
+          removeItem: (key: string) => void stored.delete(key),
+        }
+      : undefined,
+  );
   set("__r", (id: number) => {
     required.push(id);
     return modules[id];
   });
-  set("fetch", async (_url: string, options: { signal: AbortSignal }) => {
+  set("fetch", async () => {
     fetches++;
-    signal = options.signal;
     return { ok: true, text: read };
   });
   return {
@@ -182,8 +190,11 @@ function harness(t: TestContext) {
     get fetches() {
       return fetches;
     },
-    get signal() {
-      return signal;
+    stored,
+    /** A later window shares the saved IDs but none of this window's memory. */
+    nextWindow() {
+      set("__PASEO_SUITE_BUNDLE_SOURCES_1__", undefined);
+      required.length = 0;
     },
     setRead(next: typeof read) {
       read = next;
@@ -222,7 +233,6 @@ test("여러 설치가 한 번만 번들을 분석하고 마지막 해제에서 
   assert.equal(h.modules[505].useAgentProfileFormState, h.originalProfileState);
   assert.equal(h.modules[406].useSessionSettings, h.originalSettings);
   assert.equal(h.lease, undefined);
-  assert.equal(h.signal!.aborted, true);
 });
 
 test("번들 조회 중 해제하면 늦은 응답이 메뉴 패치를 되살리지 않는다", async (t) => {
@@ -584,3 +594,145 @@ test("마지막 설정 export 대입 실패는 모든 앞선 wrapper를 복원�
   assert.equal(h.modules[505].useAgentProfileFormState, h.originalProfileState);
   assert.equal(h.modules[406].useSessionSettings, h.originalSettings);
 });
+
+const menuCacheKey = "@paseo-suite:bundle-modules:1:aster-menu";
+const menuIds = {
+  form: 901,
+  profiles: 802,
+  registry: 703,
+  catalog: 604,
+  profileState: 505,
+  settings: 406,
+  browser: 307,
+  sessions: 208,
+};
+
+test("같은 앱 번들에서 다시 시작하면 기억한 메뉴 ID를 확인하고 번들을 받지 않는다", async (t) => {
+  const h = harness(t, true);
+  let storeListeners = 0;
+  h.modules[208].useSessionStore.subscribe = () => {
+    storeListeners++;
+    return () => void storeListeners--;
+  };
+  const first = contribute();
+  await h.lease!.ready;
+  first();
+  assert.equal(h.fetches, 1);
+  assert.equal(storeListeners, 0);
+  assert.deepEqual(JSON.parse(h.stored.get(menuCacheKey)!), {
+    bundle: "index-abcdef.js",
+    ids: menuIds,
+  });
+  h.nextWindow();
+  const second = contribute();
+  await h.lease!.ready;
+  assert.equal(h.fetches, 1);
+  assert.notEqual(h.modules[901].useAgentFormState, h.originalForm);
+  assert.notEqual(h.modules[406].useSessionSettings, h.originalSettings);
+  assert.equal(storeListeners, 1);
+  second();
+  assert.equal(h.modules[901].useAgentFormState, h.originalForm);
+  assert.equal(h.modules[406].useSessionSettings, h.originalSettings);
+  assert.equal(storeListeners, 0);
+});
+
+test("기억한 ID가 다른 모듈을 가리키면 그 모듈을 고치지 않고 번들에서 다시 해석한다", async (t) => {
+  const h = harness(t, true);
+  Object.defineProperty(h.modules, 999, {
+    get: () => {
+      throw new Error('Requiring unknown module "999"');
+    },
+  });
+  for (const stale of [
+    { ...menuIds, form: 802, profiles: 901 },
+    { ...menuIds, browser: 999 },
+    { ...menuIds, sessions: 307 },
+  ]) {
+    h.nextWindow();
+    h.stored.set(
+      menuCacheKey,
+      JSON.stringify({ bundle: "index-abcdef.js", ids: stale }),
+    );
+    const before = h.fetches;
+    const release = contribute();
+    await h.lease!.ready;
+    assert.equal(h.fetches, before + 1);
+    assert.equal(h.lease!.failed, false);
+    assert.notEqual(h.modules[901].useAgentFormState, h.originalForm);
+    assert.equal(h.modules[802].useAgentFormState, undefined);
+    assert.notEqual(h.modules[802].useAgentProfilePicker, h.originalProfiles);
+    assert.deepEqual(JSON.parse(h.stored.get(menuCacheKey)!).ids, menuIds);
+    release();
+    assert.equal(h.modules[901].useAgentFormState, h.originalForm);
+    assert.equal(h.modules[802].useAgentProfilePicker, h.originalProfiles);
+  }
+});
+
+test("다른 번들이나 모양이 깨진 기록은 모듈을 불러 보지 않고 버린다", async (t) => {
+  const h = harness(t, true);
+  for (const entry of [
+    { bundle: "index-000000.js", ids: menuIds },
+    { bundle: "index-abcdef.js", ids: { ...menuIds, browser: "307" } },
+    { bundle: "index-abcdef.js", ids: { ...menuIds, settings: undefined } },
+    // The seven IDs a build without the session store would have remembered.
+    { bundle: "index-abcdef.js", ids: { ...menuIds, sessions: undefined } },
+    { bundle: "index-abcdef.js", ids: [901, 802, 703, 604, 505, 406, 307] },
+  ]) {
+    h.nextWindow();
+    h.stored.set(menuCacheKey, JSON.stringify(entry));
+    const before = h.fetches;
+    const release = contribute();
+    assert.deepEqual(h.required, []);
+    await h.lease!.ready;
+    assert.equal(h.fetches, before + 1);
+    assert.deepEqual(h.required, [901, 802, 703, 604, 505, 406, 307, 208]);
+    assert.deepEqual(JSON.parse(h.stored.get(menuCacheKey)!), {
+      bundle: "index-abcdef.js",
+      ids: menuIds,
+    });
+    release();
+  }
+});
+
+test("export 계약이 맞지 않는 앱의 ID는 기억하지 않는다", async (t) => {
+  const h = harness(t, true);
+  h.modules[802] = {};
+  const originalError = console.error;
+  console.error = () => {};
+  t.after(() => {
+    console.error = originalError;
+  });
+  const failed = contribute();
+  await h.lease!.ready;
+  assert.equal(h.lease!.failed, true);
+  assert.equal(h.stored.size, 0);
+  failed();
+  h.nextWindow();
+  const retried = contribute();
+  await h.lease!.ready;
+  assert.equal(h.fetches, 2);
+  assert.equal(h.stored.size, 0);
+  assert.equal(h.modules[901].useAgentFormState, h.originalForm);
+  retried();
+});
+
+for (const [contract, id, incompatible] of [
+  ["세션 저장소", 208, { useSessionStore: { getState: () => ({}) } }],
+  ["플러그인 목록 구독", 703, { pluginRegistry: { getSnapshot: () => [] } }],
+] as const)
+  test(`${contract} 계약이 맞지 않는 앱은 메뉴를 고치지 않고 ID도 기억하지 않는다`, async (t) => {
+    const h = harness(t, true);
+    h.modules[id] = incompatible;
+    const originalError = console.error;
+    console.error = () => {};
+    t.after(() => {
+      console.error = originalError;
+    });
+    const release = contribute();
+    await h.lease!.ready;
+    assert.equal(h.lease!.failed, true);
+    assert.equal(h.stored.size, 0);
+    assert.equal(h.modules[901].useAgentFormState, h.originalForm);
+    assert.equal(h.modules[406].useSessionSettings, h.originalSettings);
+    release();
+  });

@@ -1,8 +1,10 @@
+import { isModuleId, readAppBundle, resolveBundleModules } from "./bundle-modules";
 import { peerConnectionsOf, startCredentialRelay, trackRemovedHosts } from "./credential-relay";
 
 // Plugins are replaced one host at a time, so a shared loop must also yield to newer code.
 const relayCodeVersion = 3;
 interface RelayLease { owners: Set<symbol>; dispose(): void; version?: number; }
+interface RelayModules { sessions: number; registry: number; }
 export function contributeRelay() {
   const runtime = globalThis as typeof globalThis & {
     __r?: (id: number) => any;
@@ -35,10 +37,7 @@ export function contributeRelay() {
       .filter((src) => /\/index-[a-f0-9]+\.js(?:\?.*)?$/.test(src)))];
     void (async () => {
       if (scripts.length !== 1) throw new Error("Settings Sync: 앱 번들을 확인할 수 없습니다.");
-      const response = await fetch(scripts[0], { signal: request.signal });
-      if (!response.ok) throw new Error("Settings Sync: 앱 번들을 읽을 수 없습니다.");
-      const source = await response.text();
-      const moduleId = (symbol: string) => {
+      const moduleId = (source: string, symbol: string) => {
         const candidates = source.split("\n").filter((line) => {
           const variable = line.match(/^__d\(function\(([^)]*)\)/)?.[1].split(",")[5]?.trim();
           if (!variable) return false;
@@ -51,8 +50,24 @@ export function contributeRelay() {
         if (!match) throw new Error(`Settings Sync: ${symbol} 모듈 ID가 없습니다.`);
         return Number(match[1]);
       };
-      const sessions = runtime.__r!(moduleId("useSessionStore")).useSessionStore;
-      const registry = runtime.__r!(moduleId("pluginRegistry")).pluginRegistry;
+      const load = (ids: RelayModules) => ({
+        sessions: runtime.__r!(ids.sessions).useSessionStore,
+        registry: runtime.__r!(ids.registry).pluginRegistry,
+      });
+      const usable = (modules: ReturnType<typeof load>) =>
+        typeof modules.sessions?.getState === "function" && typeof modules.registry?.getSnapshot === "function";
+      const { ids, confirm } = await resolveBundleModules({
+        name: "credential-relay",
+        url: scripts[0],
+        read: (url) => readAppBundle(url, request.signal),
+        parse: (source): RelayModules => ({ sessions: moduleId(source, "useSessionStore"), registry: moduleId(source, "pluginRegistry") }),
+        accepts: (remembered) => {
+          const ids = remembered as Partial<RelayModules>;
+          return isModuleId(ids.sessions) && isModuleId(ids.registry) && usable(load(ids as RelayModules));
+        },
+      });
+      const { sessions, registry } = load(ids);
+      if (usable({ sessions, registry })) confirm();
       if (request.signal.aborted) return;
       relay = startCredentialRelay(() => Object.entries(sessions.getState().sessions)
         .flatMap(([serverId, session]: [string, any]) => session.client && registry.getSnapshot()
