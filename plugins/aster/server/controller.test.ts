@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Controller } from "./controller";
+import type { AccountUsage } from "./scheduler";
 
 test("시작 가능 여부 확인은 부트스트랩 순환을 진행하지 않는다", () => {
   const controller = new Controller();
@@ -13,4 +14,174 @@ test("시작 가능 여부 확인은 부트스트랩 순환을 진행하지 않�
   controller.limitAccount("a", now);
   controller.limitAccount("b", now);
   assert.equal(controller.canBootstrap(["a", "b"], now), false);
+});
+
+const minute = 60_000;
+const start = 1800000000000;
+const usage = (id: string, at = start): AccountUsage => ({
+  id,
+  capacity: 1,
+  fetchedAt: at,
+  fiveHour: { used: 10, resetsAt: at + 2 * 60 * minute },
+  weekly: { used: 10, resetsAt: at + 3 * 24 * 60 * minute },
+});
+
+test("한도 안내가 알려 준 초기화 시각까지 차단하고 60초 뒤에 풀지 않는다", () => {
+  const controller = new Controller();
+  const resetsAt = start + 90 * minute;
+  assert.equal(controller.limitAccount("a", start, { resetsAt }), resetsAt);
+  for (const now of [start + 61_000, resetsAt - 1]) {
+    assert.equal(controller.isBlocked("a", now), true);
+    assert.equal(
+      controller.choose("s", [usage("a", now), usage("b", now)], now)?.id,
+      "b",
+    );
+  }
+  assert.equal(controller.isBlocked("a", resetsAt), false);
+  // An authentication or subscription hold keeps its one minute.
+  assert.equal(controller.limitAccount("b", start), start + minute);
+  assert.equal(controller.isBlocked("b", start + minute), false);
+});
+
+test("초기화 시각이 없으면 연속 실패에만 5분·15분·60분으로 늘려 차단한다", () => {
+  const controller = new Controller();
+  assert.equal(
+    controller.limitAccount("a", start, { startedAt: start - 1 }),
+    start + 5 * minute,
+  );
+  // Turns already running when the block began report the same incident.
+  assert.equal(
+    controller.limitAccount("a", start + 1000, { startedAt: start - 5000 }),
+    start + 1000 + 5 * minute,
+  );
+  assert.equal(
+    controller.limitAccount("a", start + 2000, {}),
+    start + 2000 + 5 * minute,
+  );
+  const second = start + 6 * minute;
+  assert.equal(
+    controller.limitAccount("a", second + 1000, { startedAt: second }),
+    second + 1000 + 15 * minute,
+  );
+  const third = second + 20 * minute;
+  assert.equal(
+    controller.limitAccount("a", third + 1000, { startedAt: third }),
+    third + 1000 + 60 * minute,
+  );
+  const fourth = third + 70 * minute;
+  assert.equal(
+    controller.limitAccount("a", fourth + 1000, { startedAt: fourth }),
+    fourth + 1000 + 60 * minute,
+  );
+  // A limit that returns long after the last block ended starts over.
+  const later = fourth + 1000 + 60 * minute + 61 * minute;
+  assert.equal(
+    controller.limitAccount("a", later, { startedAt: later - 1000 }),
+    later + 5 * minute,
+  );
+  // A notice without a time never shortens a reset the CLI already named.
+  const named = later + 10 * minute + 4 * 60 * minute;
+  assert.equal(controller.limitAccount("b", later, { resetsAt: named }), named);
+  assert.equal(controller.limitAccount("b", later + 1000, {}), named);
+});
+
+test("차단된 계정뿐이면 마지막 수단으로 다시 고를 수 있다", () => {
+  const controller = new Controller();
+  controller.limitAccount("a", start, { resetsAt: start + 90 * minute });
+  controller.limitAccount("b", start, {});
+  const readings = [usage("a"), usage("b")];
+  assert.equal(controller.choose("s", readings, start), null);
+  assert.ok(controller.choose("s", readings, start, null, true));
+  assert.equal(controller.bootstrap("s", ["a", "b"], start), null);
+  assert.equal(controller.canBootstrap(["a", "b"], start), false);
+  assert.equal(controller.canBootstrap(["a", "b"], start, true), true);
+  assert.equal(controller.bootstrap("s", ["a", "b"], start, true), "a");
+  assert.equal(controller.canBootstrap([], start, true), false);
+});
+
+test("차단 뒤에 시작해 정상 완료된 턴만 차단을 풀고 곧바로 되돌아온 한도는 풀지 않는다", () => {
+  const controller = new Controller();
+  const until = start + 90 * minute;
+  controller.limitAccount("a", start, {
+    resetsAt: until,
+    startedAt: start - 1000,
+  });
+  // A turn that was already running proves nothing about the limit.
+  assert.equal(controller.succeeded("a", start - 500, start + 1000), false);
+  assert.equal(controller.isBlocked("a", start + 1000), true);
+  assert.equal(controller.succeeded("a", start + 2000, start + 3000), true);
+  assert.equal(controller.isBlocked("a", start + 3000), false);
+  assert.equal(controller.succeeded("a", start + 2000, start + 3000), false);
+  // The same limit straight after a release holds until its reset, whatever other turns do.
+  controller.limitAccount("a", start + 10_000, {
+    resetsAt: until,
+    startedAt: start + 5000,
+  });
+  assert.equal(
+    controller.succeeded("a", start + 20_000, start + 30_000),
+    false,
+  );
+  assert.equal(controller.isBlocked("a", until - 1), true);
+  assert.equal(controller.isBlocked("a", until), false);
+});
+
+test("모델 계열 한도는 그 계열 세션만 막고 다른 계열의 성공으로 풀리지 않는다", () => {
+  const controller = new Controller();
+  const until = start + 3 * 24 * 60 * minute;
+  assert.equal(controller.hasModelLimit("a", start), false);
+  controller.limitAccount("a", start, { resetsAt: until, family: "opus" });
+  assert.equal(controller.hasModelLimit("a", start), true);
+  assert.equal(controller.isBlocked("a", start, "opus"), true);
+  assert.equal(controller.isBlocked("a", start, "sonnet"), false);
+  // A session whose model is unknown is kept off the account.
+  assert.equal(controller.isBlocked("a", start), true);
+  assert.equal(controller.isBlocked("a", start, null), true);
+  const readings = [usage("a"), usage("b")];
+  controller.bind("sonnet-session", "a", start);
+  controller.bind("opus-session", "a", start);
+  assert.equal(
+    controller.choose("sonnet-session", readings, start, "sonnet")?.id,
+    "a",
+  );
+  assert.equal(
+    controller.choose("opus-session", readings, start, "opus")?.id,
+    "b",
+  );
+  assert.equal(
+    controller.succeeded("a", start + 1000, start + 2000, "sonnet"),
+    false,
+  );
+  assert.equal(controller.succeeded("a", start + 1000, start + 2000), false);
+  assert.equal(controller.isBlocked("a", start + 2000, "opus"), true);
+  assert.equal(
+    controller.succeeded("a", start + 1000, start + 2000, "opus"),
+    true,
+  );
+  assert.equal(controller.isBlocked("a", start + 2000, "opus"), false);
+  assert.equal(controller.hasModelLimit("a", start + 2000), false);
+});
+
+test("차단 뒤 새로 시작된 사용량 창은 초기화 시각 없는 차단만 푼다", () => {
+  const controller = new Controller();
+  controller.limitAccount("a", start, {});
+  controller.limitAccount("b", start, { resetsAt: start + 90 * minute });
+  const later = start + 2 * minute;
+  // The same windows as before the block say nothing new.
+  controller.choose("s", [usage("a", later), usage("b", later)], later);
+  assert.equal(controller.isBlocked("a", later), true);
+  const fresh = (id: string): AccountUsage => ({
+    ...usage(id, later),
+    fiveHour: { used: 1, resetsAt: start + minute + 5 * 60 * minute },
+  });
+  assert.equal(
+    controller.choose("s", [fresh("a"), fresh("b")], later)?.id,
+    "a",
+  );
+  assert.equal(controller.isBlocked("a", later), false);
+  assert.equal(controller.isBlocked("b", later), true);
+  // The released block does not carry its backoff step into the next limit.
+  assert.equal(
+    controller.limitAccount("a", later + 1000, { startedAt: later }),
+    later + 1000 + 5 * minute,
+  );
 });

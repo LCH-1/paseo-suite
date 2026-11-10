@@ -20,10 +20,13 @@ import {
 import { join } from "node:path";
 import { accountKey, RoutingCache } from "./server/routing-cache";
 import {
+  continuedAfterLimit,
+  LIMIT_CONTINUATION,
+  limitSignal,
+  modelFamily,
   needsAuthenticationRecovery,
-  needsLimitRecovery,
 } from "./server/auth-recovery";
-import { Controller } from "./server/controller";
+import { Controller, type AccountLimit } from "./server/controller";
 import { runPaseo } from "./server/paseo";
 import { profileDiscovery } from "./server/profile-discovery";
 import * as profileUsage from "./server/profile-usage-runtime.js";
@@ -84,6 +87,7 @@ export default function contribute(server: PluginServerContext) {
   const authenticationRecovery = new Set<string>();
   const startedTurns = new Map<string, string | null>();
   const turnRevisions = new Map<string, number>();
+  const turnStarts = new Map<string, number>();
   let turnSequence = 0;
   const bootstrapping = new Set<string>();
   const authenticationOverrides = [
@@ -123,21 +127,35 @@ export default function contribute(server: PluginServerContext) {
     else if (includeExcluded && cached?.kind === "excluded")
       excluded.add(agentId);
   };
+  /** Every alias of the real account behind `id`. */
+  const sameAccount = (accounts: Account[], id: string | null) => {
+    const target = accounts.find((account) => account.id === id);
+    return target
+      ? accounts.filter((account) => accountKey(account) === accountKey(target))
+      : [];
+  };
   const limitRoute = (
     agentId: string,
     provider: string,
     accounts: Account[],
+    limit?: AccountLimit,
   ) => {
     const id =
       controller.bindings.get(agentId)?.accountId ??
       (provider !== "claude" ? provider : null);
-    const failed = accounts.find((account) => account.id === id);
-    if (failed)
-      for (const account of accounts.filter(
-        (account) => accountKey(account) === accountKey(failed),
-      ))
-        controller.limitAccount(account.id, Date.now());
+    let until: number | null = null;
+    for (const account of sameAccount(accounts, id))
+      until = controller.limitAccount(account.id, Date.now(), limit);
+    return until;
   };
+  const clock = (at: number) =>
+    new Date(at).toLocaleString("ko-KR", {
+      timeZone: "Asia/Seoul",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
   const codex = registerCodexRouting(server);
   const stopHidingAliases = keepAliasesHidden(paseoHome);
@@ -303,13 +321,21 @@ export default function contribute(server: PluginServerContext) {
                 : NO_SELECTABLE_ACCOUNT;
             };
             if (preflight) {
+              // A block only ranks accounts, so a blocked one still counts as startable.
               if (
-                controller.choose(request.agentId, readings, Date.now()) ||
-                controller.canBootstrap(
-                  bootstrapAccounts(eligible, reports, Date.now(), (id) =>
-                    controller.isBlocked(id, Date.now()),
-                  ).map((account) => account.id),
+                controller.choose(
+                  request.agentId,
+                  readings,
                   Date.now(),
+                  null,
+                  true,
+                ) ||
+                controller.canBootstrap(
+                  bootstrapAccounts(eligible, reports).map(
+                    (account) => account.id,
+                  ),
+                  Date.now(),
+                  true,
                 )
               )
                 return;
@@ -328,17 +354,17 @@ export default function contribute(server: PluginServerContext) {
             const previousExhausted =
               previousAccount !== undefined &&
               exhaustedUntil(previousAccount, reports) !== null;
-            if (
-              !selectedId &&
-              (request.reason === "create" ||
-                authenticationRecovery.has(request.agentId) ||
-                refreshing.has(request.agentId) ||
-                previousExhausted ||
-                !hasPreviousAccount(
-                  request,
-                  controller.bindings.has(request.agentId),
-                ))
-            ) {
+            const mayBootstrap =
+              request.reason === "create" ||
+              authenticationRecovery.has(request.agentId) ||
+              refreshing.has(request.agentId) ||
+              previousExhausted ||
+              !hasPreviousAccount(
+                request,
+                controller.bindings.has(request.agentId),
+              );
+            let blockedOnly = false;
+            if (!selectedId && mayBootstrap) {
               selectedId = controller.bootstrap(
                 request.agentId,
                 bootstrapAccounts(eligible, reports, Date.now(), (id) =>
@@ -351,8 +377,44 @@ export default function contribute(server: PluginServerContext) {
                 console.info(
                   `[aster] session ${request.agentId}: 불완전하거나 만료된 사용량을 CLI 정상 확인 경로로 재개`,
                 );
+              } else {
+                // A block only ranks accounts. With nothing else left the CLI reports the limit
+                // itself, so a block never becomes "no selectable account".
+                selectedId =
+                  controller.choose(
+                    request.agentId,
+                    readings,
+                    Date.now(),
+                    null,
+                    true,
+                  )?.id ?? null;
+                if (!selectedId) {
+                  selectedId = controller.bootstrap(
+                    request.agentId,
+                    bootstrapAccounts(eligible, reports).map(
+                      (account) => account.id,
+                    ),
+                    Date.now(),
+                    true,
+                  );
+                  if (selectedId) bootstrapping.add(request.agentId);
+                }
+                blockedOnly = selectedId !== null;
               }
             }
+            const switchReason = blockedOnly
+              ? "차단 중인 계정뿐이라 CLI 확인 경로"
+              : previousExhausted
+                ? "이전 계정 한도 소진"
+                : !previousAccount
+                  ? "이전 계정 구독·등록 확인 불가"
+                  : controller.isBlocked(previousAccount.id, Date.now())
+                    ? "이전 계정 한도·인증 차단 중"
+                    : !readings.some(
+                          (reading) => reading.id === previousAccount.id,
+                        )
+                      ? "이전 계정 사용량 미확인"
+                      : "여유 계정 우선";
             signal.throwIfAborted();
             if (!selectedId) {
               if (exhaustedAccountsResetAt(eligible, reports) !== null)
@@ -374,7 +436,14 @@ export default function contribute(server: PluginServerContext) {
             );
             signal.throwIfAborted();
             excluded.delete(request.agentId);
-            console.info(`[aster] session ${request.agentId}: ${account.id}`);
+            console.info(
+              `[aster] session ${request.agentId}: ${account.id}` +
+                (blockedOnly
+                  ? ` (${switchReason})`
+                  : previousId && previousId !== account.id
+                    ? ` (이전 ${previousId}, 사유: ${switchReason})`
+                    : ""),
+            );
             return withAccount(request, account);
           });
         } catch (error) {
@@ -382,8 +451,17 @@ export default function contribute(server: PluginServerContext) {
           if (
             request.reason === "create" ||
             error instanceof AccountUnavailable
-          )
+          ) {
+            if (!preflight)
+              console.info(
+                `[aster] session ${request.agentId}: 세션 열기 거절 (${request.reason}) · ${
+                  error instanceof Error && error.message.startsWith("Aster:")
+                    ? error.message.slice(0, 120)
+                    : "계정 선택 중 오류"
+                }`,
+              );
             throw error;
+          }
           console.warn(
             `[aster] session ${request.agentId}: 자동 계정 설정 오류, 기존 실행 환경으로 재개`,
           );
@@ -401,6 +479,7 @@ export default function contribute(server: PluginServerContext) {
         authenticationRecovery.delete(agent.id);
       startedTurns.set(agent.id, currentTurn);
       turnRevisions.set(agent.id, ++turnSequence);
+      turnStarts.set(agent.id, Date.now());
       controller.busy.add(agent.id);
     }),
     server.on("agent.permission_requested", ({ agent }) => {
@@ -416,6 +495,7 @@ export default function contribute(server: PluginServerContext) {
         authenticationRecovery.delete(agent.id);
         startedTurns.delete(agent.id);
         turnRevisions.delete(agent.id);
+        turnStarts.delete(agent.id);
         bootstrapping.delete(agent.id);
       }
     }),
@@ -425,6 +505,7 @@ export default function contribute(server: PluginServerContext) {
       authenticationRecovery.delete(agent.id);
       startedTurns.delete(agent.id);
       turnRevisions.delete(agent.id);
+      turnStarts.delete(agent.id);
       bootstrapping.delete(agent.id);
       void routes.forget(agent.id);
     }),
@@ -433,6 +514,7 @@ export default function contribute(server: PluginServerContext) {
       async ({ agent, turnId, outcome, timeline }, { paseo, signal }) => {
         const activeTurn = startedTurns.get(agent.id);
         const revision = turnRevisions.get(agent.id);
+        const startedAt = turnStarts.get(agent.id);
         if (turnId != null && activeTurn != null && turnId !== activeTurn)
           return;
         controller.end(agent.id);
@@ -469,10 +551,11 @@ export default function contribute(server: PluginServerContext) {
           outcome.kind === "completed"
         )
           authenticationRecovery.delete(agent.id);
-        const limited =
-          !authenticationFailed &&
-          !subscriptionFailed &&
-          needsLimitRecovery(outcome, timeline);
+        const limit =
+          authenticationFailed || subscriptionFailed
+            ? null
+            : limitSignal(outcome, timeline);
+        const limited = limit !== null;
         if (
           outcome.kind === "failed" &&
           !authenticationFailed &&
@@ -480,21 +563,33 @@ export default function contribute(server: PluginServerContext) {
           !limited
         )
           return;
-        if (authenticationFailed || subscriptionFailed || limited)
-          reader.invalidate();
+        const trouble = limited
+          ? "한도"
+          : authenticationFailed
+            ? "인증 오류"
+            : subscriptionFailed
+              ? "구독 오류"
+              : null;
+        // An ordinary turn stays silent; only a detected failure says why no switch followed.
+        const skip = (why: string) => {
+          if (trouble)
+            console.info(
+              `[aster] session ${agent.id}: ${trouble} 감지, 전환 건너뜀 (${why})`,
+            );
+        };
+        if (trouble) reader.invalidate();
         const settings = await readSettings();
         const accounts = await discoverAccounts();
-        if (!stillCurrent()) return;
+        if (!stillCurrent()) return skip("새 턴 시작");
         await restoreRoute(agent.id, accounts, true);
-        if (excluded.has(agent.id) || !stillCurrent()) return;
+        if (excluded.has(agent.id)) return;
+        if (!stillCurrent()) return skip("새 턴 시작");
         const binding = controller.bindings.get(agent.id);
+        const boundId =
+          binding?.accountId ??
+          (agent.provider !== "claude" ? agent.provider : null);
         if (subscriptionFailed) {
-          const failed = accounts.find(
-            (account) =>
-              account.id ===
-              (binding?.accountId ??
-                (agent.provider !== "claude" ? agent.provider : null)),
-          );
+          const failed = accounts.find((account) => account.id === boundId);
           if (failed) await subscriptions.deny(failed, stillCurrent);
         }
         const eligible = await subscriptions.filter(
@@ -509,51 +604,94 @@ export default function contribute(server: PluginServerContext) {
           readings = mapReports(eligible, reports, settings.capacities);
         } catch (error) {
           signal.throwIfAborted();
-          if (!authenticationFailed && !subscriptionFailed) throw error;
+          // The CLI's own notice still blocks the account while the usage lookup is down.
+          if (!trouble) throw error;
           readings = [];
         }
         signal.throwIfAborted();
-        if (!stillCurrent()) return;
-        if (authenticationFailed || subscriptionFailed || limited)
-          limitRoute(agent.id, agent.provider, accounts);
-        const selectedId =
-          controller.choose(agent.id, readings, Date.now())?.id ??
-          (authenticationFailed || subscriptionFailed || limited
-            ? bootstrapAccounts(eligible, reports, Date.now(), (id) =>
-                controller.isBlocked(id, Date.now()),
-              )[0]?.id
-            : undefined);
+        if (!stillCurrent()) return skip("새 턴 시작");
+        let family = limit?.family ?? null;
         if (
-          (!authenticationFailed &&
-            (!selectedId || selectedId === binding?.accountId)) ||
-          controller.busy.has(agent.id) ||
-          controller.pendingPermission.has(agent.id)
+          !family &&
+          boundId &&
+          controller.hasModelLimit(boundId, Date.now())
+        ) {
+          const current = await paseo.agents.ref(agent.id).refresh();
+          signal.throwIfAborted();
+          if (!stillCurrent()) return skip("새 턴 시작");
+          family = modelFamily(
+            current?.agent.runtimeInfo?.model ?? current?.agent.model,
+          );
+        }
+        if (trouble) {
+          const until = limitRoute(
+            agent.id,
+            agent.provider,
+            accounts,
+            limit ? { ...limit, startedAt } : undefined,
+          );
+          if (limit && until !== null)
+            console.info(
+              `[aster] account ${boundId}: 한도 차단 ${clock(until)}까지 (${
+                limit.resetsAt
+                  ? "안내된 초기화 시각"
+                  : "초기화 시각 없음, 점증 대기"
+              }${limit.family ? `, ${limit.family} 모델 한정` : ""})`,
+            );
+        } else if (
+          startedAt !== undefined &&
+          sameAccount(accounts, boundId).filter((account) =>
+            controller.succeeded(account.id, startedAt, Date.now(), family),
+          ).length
         )
-          return;
+          console.info(
+            `[aster] account ${boundId}: 정상 응답 확인, 한도 차단 해제`,
+          );
+        const now = Date.now();
+        const selectedId =
+          controller.choose(agent.id, readings, now, family)?.id ??
+          (trouble
+            ? bootstrapAccounts(eligible, reports, now, (id) =>
+                controller.isBlocked(id, now, family),
+              ).find(
+                (account) => !controller.isBlocked(account.id, now, family),
+              )?.id
+            : undefined);
+        if (!authenticationFailed && !selectedId) return skip("후보 없음");
+        if (!authenticationFailed && selectedId === binding?.accountId)
+          return skip("같은 계정");
+        if (controller.busy.has(agent.id)) return skip("작업 중");
+        if (controller.pendingPermission.has(agent.id))
+          return skip("권한 대기");
         const snapshot = await paseo.agents.ref(agent.id).refresh();
         signal.throwIfAborted();
-        if (
-          !snapshot ||
-          !["idle", "error"].includes(snapshot.agent.status) ||
-          snapshot.agent.pendingPermissions.length > 0 ||
-          !stillCurrent()
-        )
-          return;
+        if (!snapshot) return skip("세션 없음");
+        if (!["idle", "error"].includes(snapshot.agent.status))
+          return skip("작업 중");
+        if (snapshot.agent.pendingPermissions.length > 0)
+          return skip("권한 대기");
+        if (!stillCurrent()) return skip("새 턴 시작");
         refreshing.add(agent.id);
         if (authenticationFailed || subscriptionFailed)
           authenticationRecovery.add(agent.id);
+        const resume = limited && settings.continueAfterLimitSwitch === true;
         try {
+          const route = `${binding?.accountId ?? "미지정"} → ${selectedId ?? binding?.accountId ?? "현재 계정"}`;
           if (limited)
             console.info(
-              `[aster] session ${agent.id}: 한도에 걸린 계정을 제외하고 연결 전환 (요청 재전송 없음)`,
+              `[aster] session ${agent.id}: 한도에 걸린 계정을 제외하고 연결 전환 ${route} (${resume ? "전환 뒤 이어가기 예정" : "요청 재전송 없음"})`,
             );
-          if (authenticationFailed)
+          else if (authenticationFailed)
             console.info(
-              `[aster] session ${agent.id}: 인증 실행 환경 새로고침 (요청 재전송 없음)`,
+              `[aster] session ${agent.id}: 인증 실행 환경 새로고침 ${route} (요청 재전송 없음)`,
             );
-          if (subscriptionFailed)
+          else if (subscriptionFailed)
             console.info(
-              `[aster] session ${agent.id}: 구독을 사용할 수 없는 계정을 제외하고 연결 전환 (요청 재전송 없음)`,
+              `[aster] session ${agent.id}: 구독을 사용할 수 없는 계정을 제외하고 연결 전환 ${route} (요청 재전송 없음)`,
+            );
+          else
+            console.info(
+              `[aster] session ${agent.id}: 여유 계정으로 연결 전환 ${route}`,
             );
           await runPaseo(
             settings.command,
@@ -564,6 +702,39 @@ export default function contribute(server: PluginServerContext) {
         } finally {
           refreshing.delete(agent.id);
         }
+        if (!resume) return;
+        const pause = (why: string) =>
+          console.info(`[aster] session ${agent.id}: 이어가기 생략 (${why})`);
+        // The continuation's own turn can hit a limit too; one real request gets one continuation.
+        if (continuedAfterLimit(timeline)) return pause("이미 한 번 이어감");
+        const previous = sameAccount(accounts, boundId);
+        const next = controller.bindings.get(agent.id)?.accountId;
+        if (
+          !next ||
+          !previous.length ||
+          previous.some((account) => account.id === next)
+        )
+          return pause("다른 계정으로 전환되지 않음");
+        signal.throwIfAborted();
+        if (!stillCurrent()) return pause("새 턴 시작");
+        if (controller.pendingPermission.has(agent.id))
+          return pause("권한 대기");
+        const reloaded = await paseo.agents.ref(agent.id).refresh();
+        signal.throwIfAborted();
+        if (!reloaded) return pause("세션 없음");
+        if (!["idle", "error"].includes(reloaded.agent.status))
+          return pause("작업 중");
+        if (reloaded.agent.pendingPermissions.length > 0)
+          return pause("권한 대기");
+        if (
+          reloaded.agent.lastUserMessageAt !== snapshot.agent.lastUserMessageAt
+        )
+          return pause("새 사용자 메시지");
+        if (!stillCurrent()) return pause("새 턴 시작");
+        await paseo.agents.ref(agent.id).send(LIMIT_CONTINUATION);
+        console.info(
+          `[aster] session ${agent.id}: 한도 전환 뒤 이어가기 메시지 전송 (${boundId} → ${next})`,
+        );
       },
     ),
   ];
