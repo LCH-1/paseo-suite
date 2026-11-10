@@ -17,6 +17,7 @@ import { createLocalPluginConnection } from "./legacy-credential-rpc";
 import { codexTokens, inspectCodexAccount } from "./codex-runtime.mjs";
 import { chooseCodexAccount, type CodexReading } from "./codex-policy";
 import { paseoHome, readSettings } from "./accounts";
+import { codexAccessFailure } from "./auth-recovery";
 import { runPaseo } from "./paseo";
 
 interface CodexAccount {
@@ -566,17 +567,12 @@ export function registerCodexRouting(server: PluginServerContext) {
         if (!codexProvider(agent.provider, providers)) return;
         const previous = bindings.get(agent.id);
         const accessFailure =
-          outcome.kind === "failed" &&
-          /401|402|403|429|authentication|unauthorized|quota|rate.?limit|usage.?limit|subscription|billing/i.test(
-            outcome.error.message,
-          );
+          outcome.kind === "failed"
+            ? codexAccessFailure(outcome.error.message)
+            : null;
         if (accessFailure && previous) {
           invalidate(previous.account.identity);
-          if (
-            /401|authentication|unauthorized/i.test(
-              outcome.kind === "failed" ? outcome.error.message : "",
-            )
-          )
+          if (accessFailure === "authentication")
             blockedHomes.set(previous.account.home, Date.now() + 60000);
           else blocked.set(previous.account.identity, Date.now() + 60000);
         }

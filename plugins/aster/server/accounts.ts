@@ -30,32 +30,51 @@ const registrySchema = z.object({
 });
 const windowSchema = z.object({
   id: z.string(),
-  usedPct: z.number().min(0).max(100).nullable(),
+  // The host passes the provider's utilization through; anything past the limit is a spent limit.
+  usedPct: z
+    .number()
+    .min(0)
+    .transform((used) => Math.min(used, 100))
+    .nullable(),
   resetsAt: z.string().nullable(),
 });
-export const reportsSchema = z.array(
-  z.object({
-    id: z.string(),
-    sourceId: z.string(),
-    account: z.object({ label: z.string().optional() }),
-    fetchedAt: z.string(),
-    successfulAt: z.string().optional(),
-    report: z.object({
-      status: z.string(),
-      error: z.string().optional(),
-      planLabel: z.string().optional(),
-      windows: z.array(windowSchema).optional(),
-      problem: z
-        .object({ kind: z.string(), expiresAt: z.string().optional() })
-        .optional(),
-    }),
+const reportSchema = z.object({
+  id: z.string(),
+  sourceId: z.string(),
+  account: z.object({ label: z.string().optional() }),
+  fetchedAt: z.string(),
+  successfulAt: z.string().optional(),
+  report: z.object({
+    status: z.string(),
+    error: z.string().optional(),
+    planLabel: z.string().optional(),
+    windows: z.array(windowSchema).optional(),
+    problem: z
+      .object({ kind: z.string(), expiresAt: z.string().optional() })
+      .optional(),
   }),
-);
+});
+export const reportsSchema = z.array(reportSchema);
 export const settingsSchema = z.object({
   command: commandSchema.default(defaultCommand),
   capacities: z.record(z.string(), z.number().positive()).default({}),
   profileUsageFallback: z.boolean().optional(),
+  continueAfterLimitSwitch: z.boolean().optional(),
 });
+
+/** One malformed report, often from another provider's source, must not hide every other account. */
+export function parseReports(value: unknown): z.infer<typeof reportsSchema> {
+  const entries = z.array(z.unknown()).parse(value);
+  const reports = entries.flatMap((entry) => {
+    const parsed = reportSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+  if (reports.length < entries.length)
+    console.warn(
+      `[aster] 형식이 맞지 않는 사용량 보고서 ${entries.length - reports.length}건을 제외하고 ${reports.length}건을 사용`,
+    );
+  return reports;
+}
 
 export interface Account {
   id: string;
@@ -517,6 +536,7 @@ export class UsageReader {
   } | null = null;
   private generation = 0;
   private forceRefresh = false;
+  private failed: { at: number; error: unknown } | null = null;
 
   constructor(
     private readonly run = readHostUsage,
@@ -526,6 +546,7 @@ export class UsageReader {
   invalidate() {
     this.generation++;
     this.cached = null;
+    this.failed = null;
     this.forceRefresh = true;
   }
 
@@ -533,6 +554,7 @@ export class UsageReader {
     this.lifetime.abort();
     this.generation++;
     this.cached = null;
+    this.failed = null;
   }
 
   async read(
@@ -543,6 +565,11 @@ export class UsageReader {
     signal.throwIfAborted();
     if (this.cached && this.now() - this.cached.at < 60_000)
       return this.cached.reports;
+    // Session opens run one at a time, so each would otherwise wait out its own failing
+    // lookup behind the previous one and run past the host's hook time limit.
+    const elapsed = this.failed ? this.now() - this.failed.at : -1;
+    if (this.failed && elapsed >= 0 && elapsed < 15_000)
+      throw this.failed.error;
     const generation = this.generation;
     if (!this.pending || this.pending.generation !== generation) {
       const request = {
@@ -550,26 +577,33 @@ export class UsageReader {
         task: Promise.resolve([] as z.infer<typeof reportsSchema>),
       };
       request.task = (async () => {
-        const reports = reportsSchema.parse(
-          JSON.parse(
-            await this.run(
-              command,
-              [
-                "usage",
-                "--json",
-                "--home",
-                paseoHome,
-                ...(this.forceRefresh ? ["--refresh"] : []),
-              ],
-              this.lifetime.signal,
+        try {
+          const reports = parseReports(
+            JSON.parse(
+              await this.run(
+                command,
+                [
+                  "usage",
+                  "--json",
+                  "--home",
+                  paseoHome,
+                  ...(this.forceRefresh ? ["--refresh"] : []),
+                ],
+                this.lifetime.signal,
+              ),
             ),
-          ),
-        );
-        if (generation === this.generation) {
-          this.cached = { at: this.now(), reports };
-          this.forceRefresh = false;
+          );
+          if (generation === this.generation) {
+            this.cached = { at: this.now(), reports };
+            this.failed = null;
+            this.forceRefresh = false;
+          }
+          return reports;
+        } catch (error) {
+          if (generation === this.generation && !this.lifetime.signal.aborted)
+            this.failed = { at: this.now(), error };
+          throw error;
         }
-        return reports;
       })().finally(() => {
         if (this.pending === request) this.pending = null;
       });

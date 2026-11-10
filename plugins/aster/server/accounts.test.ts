@@ -9,6 +9,7 @@ import {
   hasPreviousAccount,
   mapReports,
   needsLogin,
+  parseReports,
   reportsSchema,
   UsageReader,
   type Account,
@@ -621,12 +622,13 @@ test("무효화 이전의 진행 중 조회가 최신 결과를 덮거나 다음
 
 test("동일 세대는 조회를 공유하고 실패 뒤 재시도하며 취소된 호출은 캐시를 읽지 않는다", async () => {
   let calls = 0;
+  let clock = now;
   const reader = new UsageReader(
     async () => {
       if (++calls === 1) throw new Error("usage unavailable");
       return JSON.stringify([report()]);
     },
-    () => now,
+    () => clock,
   );
   const command = { file: "fixture-cli", args: [] };
   const signal = new AbortController().signal;
@@ -635,6 +637,7 @@ test("동일 세대는 조회를 공유하고 실패 뒤 재시도하며 취소�
   await assert.rejects(first, /usage unavailable/);
   await assert.rejects(second, /usage unavailable/);
   assert.equal(calls, 1);
+  clock += 15_000;
   assert.equal((await reader.read(command, signal)).length, 1);
   assert.equal(calls, 2);
   const canceled = new AbortController();
@@ -642,6 +645,127 @@ test("동일 세대는 조회를 공유하고 실패 뒤 재시도하며 취소�
   await assert.rejects(reader.read(command, canceled.signal), {
     name: "AbortError",
   });
+});
+
+test("실패한 조회는 잠시 그대로 돌려줘 줄 선 세션 열기가 각자 다시 기다리지 않는다", async () => {
+  let calls = 0;
+  let clock = now;
+  const reader = new UsageReader(
+    async () => {
+      calls++;
+      throw new Error("usage unavailable");
+    },
+    () => clock,
+  );
+  const command = { file: "fixture-cli", args: [] };
+  const signal = new AbortController().signal;
+  // Session opens are serialized, so each one reads only after the previous one failed.
+  for (const wait of [0, 1_000, 13_999]) {
+    clock = now + wait;
+    await assert.rejects(reader.read(command, signal), /usage unavailable/);
+  }
+  assert.equal(calls, 1);
+  clock = now + 15_000;
+  await assert.rejects(reader.read(command, signal), /usage unavailable/);
+  assert.equal(calls, 2);
+  // A login or limit change must not wait out an old failure.
+  reader.invalidate();
+  await assert.rejects(reader.read(command, signal), /usage unavailable/);
+  assert.equal(calls, 3);
+});
+
+test("무효화된 이전 조회의 실패는 새 조회를 막지 않는다", async () => {
+  const pending: Array<{
+    resolve: (value: string) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  const reader = new UsageReader(
+    async () =>
+      new Promise<string>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      }),
+    () => now,
+  );
+  const command = { file: "fixture-cli", args: [] };
+  const signal = new AbortController().signal;
+  const obsolete = assert.rejects(
+    reader.read(command, signal),
+    /usage unavailable/,
+  );
+  reader.invalidate();
+  pending[0].reject(new Error("usage unavailable"));
+  await obsolete;
+  const current = reader.read(command, signal);
+  assert.equal(pending.length, 2);
+  pending[1].resolve(JSON.stringify([report()]));
+  assert.equal((await current).length, 1);
+});
+
+test("형식이 어긋난 보고서 하나가 다른 계정의 조회를 막지 않는다", async () => {
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (message: string) => void warnings.push(message);
+  try {
+    const malformed = [
+      {
+        ...report(),
+        report: {
+          status: "available",
+          windows: [{ id: "weekly", usedPct: "many", resetsAt: null }],
+        },
+      },
+      {
+        id: "other:source",
+        sourceId: "other",
+        fetchedAt: 42,
+        account: {},
+        report: { status: "available" },
+      },
+      "not a report",
+    ];
+    const good = report("b@example.test", "claude:account.org-b");
+    const parsed = parseReports([
+      malformed[0],
+      good,
+      malformed[1],
+      malformed[2],
+    ]);
+    assert.deepEqual(
+      parsed.map((entry) => entry.id),
+      ["claude:account.org-b"],
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /3건을 제외하고 1건/);
+    warnings.length = 0;
+    assert.equal(parseReports([good]).length, 1);
+    assert.equal(warnings.length, 0);
+    const reader = new UsageReader(
+      async () => JSON.stringify([malformed[0], good]),
+      () => now,
+    );
+    const reports = await reader.read(
+      { file: "fixture-cli", args: [] },
+      new AbortController().signal,
+    );
+    assert.equal(reports.length, 1);
+    assert.throws(() => parseReports({ reports: [] }));
+  } finally {
+    console.warn = warn;
+  }
+});
+
+test("한도를 넘긴 사용률은 버리지 않고 소진으로 읽는다", () => {
+  const over = report();
+  over.report.windows[1].usedPct = 104.5;
+  const parsed = parseReports([over]);
+  assert.equal(parsed[0].report.windows?.[1].usedPct, 100);
+  assert.deepEqual(
+    mapReports(accounts, parsed, {}, now).map((entry) => entry.weekly.used),
+    [100],
+  );
+  assert.equal(selectAccount(mapReports(accounts, parsed, {}, now), now), null);
+  assert.equal(exhaustedUntil(accounts[0], parsed, now), now + 100 * 3_600_000);
+  assert.deepEqual(bootstrapAccounts(accounts, parsed, now), []);
 });
 
 test("공유 사용량 조회의 첫 대기자 취소는 다른 요청과 캐시를 취소하지 않는다", async () => {

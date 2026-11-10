@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { randomUUID } from "node:crypto";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import { LIMIT_CONTINUATION } from "./auth-recovery.ts";
 
 const fixtureAccount = {
   id: "fixture",
@@ -16,7 +17,12 @@ const actual = (file: string) =>
 
 /** Execute the actual before-hook with account/RPC dependencies replaced before import. */
 async function openFixture(
-  usage: "exhausted" | "available" | "unknown" | "partial-reset",
+  usage:
+    | "exhausted"
+    | "available"
+    | "unknown"
+    | "partial-reset"
+    | "two-available",
 ) {
   const now = Date.now();
   const recovered = {
@@ -26,7 +32,9 @@ async function openFixture(
     identity: "org-recovered|recovered",
   };
   const accounts =
-    usage === "partial-reset" ? [fixtureAccount, recovered] : [fixtureAccount];
+    usage === "partial-reset" || usage === "two-available"
+      ? [fixtureAccount, recovered]
+      : [fixtureAccount];
   const reports =
     usage === "unknown"
       ? []
@@ -77,9 +85,21 @@ async function openFixture(
       },
     });
   }
+  if (usage === "two-available")
+    reports.push({
+      ...structuredClone(reports[0]),
+      id: "claude:recovered.org-recovered",
+      account: { label: recovered.email },
+    });
   const initialReports = structuredClone(reports);
   const key = "__asterTest_" + randomUUID().replaceAll("-", "");
-  const shared = { reports, reload: async (..._args: unknown[]) => "" };
+  const sent: { agentId: string; text: string }[] = [];
+  const shared = {
+    reports: reports as typeof reports | null,
+    settings: {} as Record<string, unknown>,
+    snapshot: (_agentId: string): Record<string, unknown> => ({}),
+    reload: async (..._args: unknown[]) => "",
+  };
   (globalThis as any)[key] = shared;
   const noOp = "() => {}";
   const mock = new Map([
@@ -89,8 +109,8 @@ async function openFixture(
       export * from ${actual("./accounts.ts")};
       export const paseoHome="/fixture", stateDirectory="/fixture";
       export async function discoverAccounts(){return ${JSON.stringify(accounts)}}
-      export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{}}}
-      export class UsageReader{async read(){return globalThis[${JSON.stringify(key)}].reports} invalidate(){} dispose(){}}
+      export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{},...globalThis[${JSON.stringify(key)}].settings}}
+      export class UsageReader{async read(){const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){} dispose(){}}
     `,
     ],
     [
@@ -109,10 +129,7 @@ async function openFixture(
       "./server/subscription",
       "export class SubscriptionGuard{async filter(accounts){return accounts} dispose(){}} export const needsSubscriptionRecovery=()=>false",
     ],
-    [
-      "./server/auth-recovery",
-      `export {needsAuthenticationRecovery,needsLimitRecovery} from ${actual("./auth-recovery.ts")}`,
-    ],
+    ["./server/auth-recovery", `export * from ${actual("./auth-recovery.ts")}`],
     [
       "./server/paseo",
       `export const runPaseo=(...args)=>globalThis[${JSON.stringify(key)}].reload(...args)`,
@@ -182,10 +199,19 @@ async function openFixture(
     paseo: {
       config: { get: async () => ({ config: { providers: { claude: {} } } }) },
       agents: {
-        ref: () => ({
+        ref: (agentId: string) => ({
           refresh: async () => ({
-            agent: { status: "idle", pendingPermissions: [] },
+            agent: {
+              status: "idle",
+              pendingPermissions: [],
+              model: null,
+              lastUserMessageAt: null,
+              ...shared.snapshot(agentId),
+            },
           }),
+          send: async (text: string) => {
+            sent.push({ agentId, text });
+          },
         }),
       },
     },
@@ -220,29 +246,86 @@ async function openFixture(
   };
   const reloads: PluginSessionOpenRequest[] = [];
   shared.reload = async (_command, args: any) => {
-    assert.deepEqual(args.slice(0, 3), ["agent", "reload", request.agentId]);
+    assert.deepEqual(args.slice(0, 2), ["agent", "reload"]);
     const opened = await hook(
-      { request: { ...request, reason: "refresh" } },
+      { request: { ...request, agentId: args[2], reason: "refresh" } },
       context,
     );
     if (opened) reloads.push(opened);
     return "{}";
   };
+  const logs: string[] = [];
+  const info = console.info;
+  console.info = (message: string) => void logs.push(message);
   return {
     open: (overrides: Partial<PluginSessionOpenRequest> = {}) =>
       hook({ request: { ...request, ...overrides } }, context),
     initialReports,
-    setReports: (next: typeof reports) => {
+    /** Fresh copies of the starting reports, as a usage lookup at the current time would return. */
+    refreshReports: () => {
+      shared.reports = structuredClone(initialReports).map((entry) => ({
+        ...entry,
+        fetchedAt: new Date().toISOString(),
+        report: {
+          ...entry.report,
+          windows: entry.report.windows.map((window) => ({
+            ...window,
+            resetsAt: new Date(
+              Date.parse(window.resetsAt) + Date.now() - now,
+            ).toISOString(),
+          })),
+        },
+      }));
+    },
+    setReports: (next: typeof reports | null) => {
       shared.reports = next;
+    },
+    setSettings: (next: Record<string, unknown>) => {
+      shared.settings = next;
+    },
+    setSnapshot: (next: (agentId: string) => Record<string, unknown>) => {
+      shared.snapshot = next;
     },
     emit: async (name: string, payload: unknown) =>
       events.get(name)?.(payload, context),
+    /** One whole turn of `agentId` ending with `text` as the assistant's last message. */
+    turn: async (agentId: string, turnId: string, text: string) => {
+      const agent = { id: agentId, provider: "claude" };
+      await events.get("agent.turn_started")?.({ agent, turnId }, context);
+      await events.get("agent.turn_ended")?.(
+        {
+          agent,
+          turnId,
+          outcome: { kind: "completed" },
+          timeline: [
+            { type: "user_message", text: "요청" },
+            { type: "assistant_message", text },
+          ],
+        },
+        context,
+      );
+    },
     reloads,
+    sent,
+    logs,
     dispose: () => {
+      console.info = info;
       dispose();
       delete (globalThis as any)[key];
     },
   };
+}
+
+/** A reset time the way the CLI prints one that is less than a day away. */
+function resetsIn(milliseconds: number) {
+  return new Date(Date.now() + milliseconds)
+    .toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "Asia/Seoul",
+    })
+    .replace(/[  ]([AP]M)/i, (_, meridiem: string) => meridiem.toLowerCase());
 }
 
 test("확인된 전체 소진은 기존 Claude interactive 재개도 즉시 거절하고 history는 보존한다", async () => {
@@ -326,6 +409,215 @@ test("실제 CLI 한도 응답 뒤 부분 사용량 대안으로 연결만 바�
     });
     assert.equal(fixture.reloads.length, 1);
     assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    assert.equal(fixture.sent.length, 0);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+const logged = (fixture: { logs: string[] }, pattern: RegExp) =>
+  assert.ok(
+    fixture.logs.some((line) => pattern.test(line)),
+    `${pattern} not in\n${fixture.logs.join("\n")}`,
+  );
+
+test("한도 안내를 받은 계정은 60초가 지나도 안내된 초기화 시각까지 다시 배정하지 않는다", async (t) => {
+  const fixture = await openFixture("two-available");
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    await fixture.turn(
+      "fixture-agent",
+      "turn-1",
+      `You've hit your weekly limit · resets ${resetsIn(2 * 3_600_000)} (Asia/Seoul)`,
+    );
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    assert.equal(fixture.sent.length, 0);
+    for (const wait of [61_000, 3_600_000]) {
+      t.mock.timers.tick(wait);
+      fixture.refreshReports();
+      const opened = await fixture.open({
+        agentId: `later-${wait}`,
+        reason: "create",
+        env: {},
+      });
+      assert.equal(opened?.env.ASTER_ACCOUNT_ID, "recovered");
+    }
+    t.mock.timers.tick(3_600_000);
+    fixture.refreshReports();
+    const opened = await fixture.open({
+      agentId: "after-reset",
+      reason: "create",
+      env: {},
+    });
+    assert.equal(opened?.env.ASTER_ACCOUNT_ID, "fixture");
+    logged(fixture, /account fixture: 한도 차단 .*안내된 초기화 시각/);
+    logged(fixture, /연결 전환 fixture → recovered \(요청 재전송 없음\)/);
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: 이전 계정 한도·인증 차단 중\)/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("차단된 계정뿐이면 새 세션과 사전 점검을 막지 않고 CLI 확인 경로로 연다", async () => {
+  const fixture = await openFixture("available");
+  try {
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    await fixture.turn("fixture-agent", "turn-1", "Claude usage limit reached");
+    assert.equal(fixture.reloads.length, 0);
+    const created = await fixture.open({
+      agentId: "new-agent",
+      reason: "create",
+      env: {},
+    });
+    assert.equal(created?.env.ASTER_ACCOUNT_ID, "fixture");
+    assert.equal(
+      await fixture.open({
+        agentId: "probe",
+        reason: "create",
+        env: {},
+        preflight: true,
+      } as Partial<PluginSessionOpenRequest>),
+      undefined,
+    );
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    logged(fixture, /account fixture: 한도 차단 .*초기화 시각 없음, 점증 대기/);
+    logged(
+      fixture,
+      /session fixture-agent: 한도 감지, 전환 건너뜀 \(후보 없음\)/,
+    );
+    logged(
+      fixture,
+      /session new-agent: fixture \(차단 중인 계정뿐이라 CLI 확인 경로\)/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("사용량 조회가 실패해도 CLI 한도 안내는 계정을 차단한다", async () => {
+  const fixture = await openFixture("two-available");
+  try {
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    fixture.setReports(null);
+    await fixture.turn("fixture-agent", "turn-1", "Claude usage limit reached");
+    assert.equal(fixture.reloads.length, 0);
+    fixture.setReports(fixture.initialReports);
+    const created = await fixture.open({
+      agentId: "new-agent",
+      reason: "create",
+      env: {},
+    });
+    assert.equal(created?.env.ASTER_ACCOUNT_ID, "recovered");
+    logged(fixture, /account fixture: 한도 차단/);
+    logged(fixture, /한도 감지, 전환 건너뜀 \(후보 없음\)/);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("모델 계열 한도는 같은 계정의 다른 모델 세션을 옮기지 않는다", async () => {
+  const fixture = await openFixture("two-available");
+  try {
+    fixture.setSnapshot((agentId) => ({
+      model: agentId === "sonnet-agent" ? "claude-sonnet-5" : "claude-opus-4-8",
+    }));
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    await fixture.turn("fixture-agent", "turn-0", "완료했습니다.");
+    const sonnet = await fixture.open({
+      agentId: "sonnet-agent",
+      reason: "create",
+      env: {},
+    });
+    assert.equal(sonnet?.env.ASTER_ACCOUNT_ID, "fixture");
+    await fixture.turn(
+      "fixture-agent",
+      "turn-1",
+      `You've hit your Opus limit · resets ${resetsIn(2 * 3_600_000)} (Asia/Seoul)`,
+    );
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    await fixture.turn("sonnet-agent", "turn-2", "완료했습니다.");
+    assert.equal(fixture.reloads.length, 1);
+    // A session whose model is not known yet stays off the limited account.
+    const created = await fixture.open({
+      agentId: "new-agent",
+      reason: "create",
+      env: {},
+    });
+    assert.equal(created?.env.ASTER_ACCOUNT_ID, "recovered");
+    logged(fixture, /account fixture: 한도 차단 .*opus 모델 한정/);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("이어가기 설정을 켠 경우에만 한도 전환 뒤 이어가기 메시지를 한 번 보낸다", async (t) => {
+  const fixture = await openFixture("two-available");
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    fixture.setSettings({ continueAfterLimitSwitch: true });
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    await fixture.turn("fixture-agent", "turn-1", "Claude usage limit reached");
+    assert.equal(fixture.reloads.at(-1)?.env.ASTER_ACCOUNT_ID, "recovered");
+    assert.deepEqual(fixture.sent, [
+      { agentId: "fixture-agent", text: LIMIT_CONTINUATION },
+    ]);
+    logged(fixture, /연결 전환 fixture → recovered \(전환 뒤 이어가기 예정\)/);
+    logged(fixture, /이어가기 메시지 전송 \(fixture → recovered\)/);
+    // The continuation's own turn runs into the next limit: the session may move, nothing more is sent.
+    t.mock.timers.tick(6 * 60_000);
+    fixture.refreshReports();
+    const agent = { id: "fixture-agent", provider: "claude" };
+    await fixture.emit("agent.turn_started", { agent, turnId: "turn-2" });
+    await fixture.emit("agent.turn_ended", {
+      agent,
+      turnId: "turn-2",
+      outcome: { kind: "completed" },
+      timeline: [
+        { type: "user_message", text: "요청" },
+        { type: "assistant_message", text: "Claude usage limit reached" },
+        { type: "user_message", text: LIMIT_CONTINUATION },
+        { type: "assistant_message", text: "Claude usage limit reached" },
+      ],
+    });
+    assert.equal(fixture.reloads.length, 2);
+    assert.equal(fixture.reloads[1].env.ASTER_ACCOUNT_ID, "fixture");
+    assert.equal(fixture.sent.length, 1);
+    logged(fixture, /이어가기 생략 \(이미 한 번 이어감\)/);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("전환 사이에 사용자가 새 메시지를 보냈거나 취소된 턴이면 이어가기를 보내지 않는다", async () => {
+  const fixture = await openFixture("two-available");
+  try {
+    fixture.setSettings({ continueAfterLimitSwitch: true });
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    const agent = { id: "fixture-agent", provider: "claude" };
+    await fixture.emit("agent.turn_started", { agent, turnId: "turn-0" });
+    await fixture.emit("agent.turn_ended", {
+      agent,
+      turnId: "turn-0",
+      outcome: { kind: "canceled", reason: "interrupted" },
+      timeline: [
+        { type: "assistant_message", text: "Claude usage limit reached" },
+      ],
+    });
+    assert.equal(fixture.reloads.length, 0);
+    let refreshes = 0;
+    fixture.setSnapshot(() => ({
+      lastUserMessageAt: refreshes++ === 0 ? "before" : "after",
+    }));
+    await fixture.turn("fixture-agent", "turn-1", "Claude usage limit reached");
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.sent.length, 0);
+    logged(fixture, /이어가기 생략 \(새 사용자 메시지\)/);
   } finally {
     fixture.dispose();
   }
@@ -365,6 +657,7 @@ test("부분 사용량의 기존 정상 계정은 유지하고 권한 대기 중
       ],
     });
     assert.equal(fixture.reloads.length, 0);
+    logged(fixture, /한도 감지, 전환 건너뜀 \(권한 대기\)/);
   } finally {
     fixture.dispose();
   }

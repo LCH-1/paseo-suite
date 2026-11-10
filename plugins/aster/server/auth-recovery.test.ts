@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { needsAuthenticationRecovery, needsLimitRecovery } from "./auth-recovery.ts";
+import { codexAccessFailure, continuedAfterLimit, LIMIT_CONTINUATION, limitResetAt, limitSignal, modelFamily, needsAuthenticationRecovery, needsLimitRecovery } from "./auth-recovery.ts";
 
 const error = "Failed to authenticate: OAuth session expired and could not be refreshed";
 const failed = { kind: "failed", error: { message: error } };
@@ -45,4 +45,121 @@ test("응답 텍스트로 온 CLI 한도 안내를 감지하고 한도를 설명
   assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "The weekly limit reached by users is documented here." }]), false);
   assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: notice }, { type: "user_message", text: "continue" }]), false);
   assert.equal(needsLimitRecovery({ kind: "canceled" }, [{ type: "assistant_message", text: notice }]), false);
+});
+
+test("한도와 무관한 숫자·단어가 섞인 실패는 한도로 보지 않는다", () => {
+  const failure = (message: string, code?: string) => needsLimitRecovery({ kind: "failed", error: { message, code } });
+  for (const [message, code] of [
+    ["Claude Code process exited with code 4294967295", "4294967295"],
+    ["Claude Code process exited with code 429"],
+    ["connect ECONNREFUSED 127.0.0.1:4290"],
+    ["TypeError: Cannot read properties of undefined\n    at parse (file.ts:429:13)"],
+    ["request to http://127.0.0.1:4293/v1 failed after 4290ms"],
+    ["Context limit reached · /compact or /clear to continue"],
+    ["Budget limit reached ($5.00 of $5.00); stopping background agents."],
+    ["write failed: disk quota exceeded"],
+    ["quota exceeded (os error 122)"],
+    ["could not accelerate limited build"],
+    ["unexpected quotation mark at line 3"],
+  ] as const) assert.equal(failure(message, code), false, message);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "You've hit your fast limit" }]), false);
+});
+
+test("경계를 좁혀도 실제 한도 실패는 계속 감지한다", () => {
+  const failure = (message: string, code?: string) => needsLimitRecovery({ kind: "failed", error: { message, code } });
+  for (const [message, code] of [
+    ['API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your rate limit."}}'],
+    ["Request failed with status code 429"],
+    ["HTTP 429"],
+    ["429 Too Many Requests"],
+    ['{"error":{"code":429,"message":"Resource exhausted"}}'],
+    ["Claude run failed", "429"],
+    ["Claude run failed", "rate_limit_error"],
+    ["insufficient_quota"],
+    ["You exceeded your current quota, please check your plan and billing details."],
+    ["Claude usage limit reached"],
+    ["Rate limited. Please try again later."],
+    ["monthly spend limit exceeded"],
+    ["You've hit your weekly limit · resets Nov 14, 1pm (Asia/Seoul)"],
+    ["You've hit your 5-hour limit · resets 3pm (Asia/Seoul) · progress saved"],
+  ] as const) assert.equal(failure(message, code), true, message);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "You're out of usage credits · resets 3pm (Asia/Seoul)" }]), true);
+  assert.equal(needsLimitRecovery(completed, [{ type: "assistant_message", text: "You've reached your Fable limit. Fable requires usage credits." }]), true);
+});
+
+test("한도 안내에서 초기화 시각과 모델 계열을 읽는다", () => {
+  const at = Date.UTC(2026, 10, 10, 5, 0); // 14:00 in Asia/Seoul
+  const minute = 60_000;
+  assert.equal(limitResetAt("You've hit your 5-hour limit · resets 3pm (Asia/Seoul)", at), Date.UTC(2026, 10, 10, 6, 0) + minute);
+  assert.equal(limitResetAt("You've hit your 5-hour limit · resets 3:30pm (Asia/Seoul)", at), Date.UTC(2026, 10, 10, 6, 30) + minute);
+  // A time already past today means tomorrow: the CLI drops the date only within a day.
+  assert.equal(limitResetAt("You've hit your limit · resets 1pm (Asia/Seoul)", at), Date.UTC(2026, 10, 11, 4, 0) + minute);
+  assert.equal(limitResetAt("You've hit your weekly limit · resets Nov 14, 1pm (Asia/Seoul)", at), Date.UTC(2026, 10, 14, 4, 0) + minute);
+  assert.equal(limitResetAt("You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 12, 12am (Asia/Seoul)", at), Date.UTC(2026, 10, 11, 15, 0) + minute);
+  assert.equal(limitResetAt("You've hit your weekly limit · resets Nov 14, 9:15am (America/New_York)", at), Date.UTC(2026, 10, 14, 14, 15) + minute);
+  assert.equal(limitResetAt("You've hit your weekly limit · resets Jul 3, 9am (America/New_York)", Date.UTC(2026, 6, 1)), Date.UTC(2026, 6, 3, 13, 0) + minute);
+  assert.equal(limitResetAt("You've hit your weekly limit · resets Jan 2, 2027, 1pm (Asia/Seoul)", Date.UTC(2026, 11, 30)), Date.UTC(2027, 0, 2, 4, 0) + minute);
+  assert.equal(limitResetAt("You've hit your limit · resets 3pm", at, "Asia/Seoul"), Date.UTC(2026, 10, 10, 6, 0) + minute);
+  assert.equal(limitResetAt(`Claude usage limit reached|${Math.floor(at / 1000) + 3600}`, at), at + 3_600_000);
+  for (const unusable of [
+    "You've hit your weekly limit",
+    "You've hit your weekly limit · resets Nov 9, 1pm (Asia/Seoul)",
+    "You've hit your weekly limit · resets Dec 25, 1pm (Asia/Seoul)",
+    "You've hit your weekly limit · resets 3pm (Not/AZone)",
+    "You've hit your weekly limit · resets 13pm (Asia/Seoul)",
+    // Printed moments before it passed: this is not tomorrow's reset.
+    "You've hit your 5-hour limit · resets 1:55pm (Asia/Seoul)",
+    `Claude usage limit reached|${Math.floor(at / 1000) - 60}`,
+  ]) assert.equal(limitResetAt(unusable, at), null, unusable);
+
+  const weekly = limitSignal(completed, [{ type: "assistant_message", text: "You've hit your weekly limit · resets Nov 14, 1pm (Asia/Seoul)" }], at);
+  assert.deepEqual(weekly, { resetsAt: Date.UTC(2026, 10, 14, 4, 0) + minute, family: null });
+  assert.equal(limitSignal(completed, [{ type: "assistant_message", text: "You've hit your Opus limit · resets Nov 14, 1pm (Asia/Seoul)" }], at)?.family, "opus");
+  assert.equal(limitSignal(completed, [{ type: "assistant_message", text: "You've reached your Fable limit. Fable requires usage credits." }], at)?.family, "fable");
+  assert.deepEqual(limitSignal({ kind: "failed", error: { message: "API Error: 429 rate_limit_error" } }, [], at), { resetsAt: null, family: null });
+  assert.equal(limitSignal(completed, [{ type: "assistant_message", text: "작업을 마쳤습니다." }], at), null);
+  assert.equal(modelFamily("claude-opus-4-8[1m]"), "opus");
+  assert.equal(modelFamily("default"), null);
+  assert.equal(modelFamily(null), null);
+});
+
+test("Codex 실패는 계정 문제일 때만 접근 실패로 분류한다", () => {
+  for (const message of [
+    "unexpected status 401 Unauthorized: token expired",
+    "chatgpt authentication required to read rate limits",
+    "Authentication failed for the current account",
+  ]) assert.equal(codexAccessFailure(message), "authentication", message);
+  for (const message of [
+    "exceeded retry limit, last status: 429 Too Many Requests",
+    "unexpected status 403 Forbidden",
+    "unexpected status 402 Payment Required",
+    "Quota exceeded. Check your plan and billing details.",
+    "Usage limit reached. You've reached your usage limit. Increase your limits to continue using codex.",
+    "You've hit your usage limit. Try again in 3 days.",
+    "rate limit exceeded: slow down",
+    "error code: usage_limit_reached",
+    "Your subscription has expired",
+    "no active subscription for this account",
+    "billing hard limit reached",
+  ]) assert.equal(codexAccessFailure(message), "access", message);
+  for (const message of [
+    "codex process exited with code 4294967295",
+    "error sending request for url (http://127.0.0.1:4010/v1/responses)",
+    "stream disconnected before completion: line 429 column 3",
+    "listening on 0.0.0.0:14293 failed",
+    "MCP event subscription 'build' was not reserved before startup",
+    "MCP event subscription authentication changed during startup",
+    "failed to acknowledge subscription: transport closed",
+    "subscription consumer lagged behind its notifications",
+    "quota exceeded (os error 122)",
+    "context window exceeded",
+    "Codex turn failed",
+  ]) assert.equal(codexAccessFailure(message), null, message);
+});
+
+test("이어가기 메시지로 시작한 턴은 다시 이어가지 않는다", () => {
+  assert.equal(continuedAfterLimit([{ type: "user_message", text: "원래 요청" }, { type: "assistant_message", text: "You've hit your weekly limit" }]), false);
+  assert.equal(continuedAfterLimit([{ type: "user_message", text: "원래 요청" }, { type: "user_message", text: LIMIT_CONTINUATION }, { type: "assistant_message", text: "You've hit your weekly limit" }]), true);
+  assert.equal(continuedAfterLimit([{ type: "user_message", text: LIMIT_CONTINUATION }, { type: "assistant_message", text: "완료" }, { type: "user_message", text: "다음 요청" }]), false);
+  assert.equal(continuedAfterLimit([]), false);
 });
