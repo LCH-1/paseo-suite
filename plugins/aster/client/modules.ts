@@ -6,6 +6,7 @@ export interface MenuModuleMap {
   profileState: number;
   settings: number;
   browser: number;
+  sessions: number;
 }
 
 function parseExportModule(source: string, symbol: string, optional = false) {
@@ -45,6 +46,7 @@ export function parseMenuModules(source: string): MenuModuleMap {
     profileState: parseExportModule(source, "useAgentProfileFormState")!,
     settings: parseExportModule(source, "useSessionSettings")!,
     browser: parseExportModule(source, "useModelBrowser")!,
+    sessions: parseExportModule(source, "useSessionStore")!,
   };
 }
 

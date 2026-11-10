@@ -12,6 +12,7 @@ const source = [
   "__d(function(g,r,i,a,m,e,d){e.useAgentProfileFormState=function(){}},505,[]);",
   "__d(function(g,r,i,a,m,e,d){e.useSessionSettings=function(){}},406,[]);",
   "__d(function(g,r,i,a,m,e,d){e.useModelBrowser=function(){}},307,[]);",
+  "__d(function(g,r,i,a,m,e,d){e.useSessionStore=function(){}},208,[]);",
 ].join("\n");
 
 test("새 앱 번들의 고유한 export로 메뉴 ID를 확인하고 모호한 모듈을 거부한다", async () => {
@@ -23,6 +24,7 @@ test("새 앱 번들의 고유한 export로 메뉴 ID를 확인하고 모호한 
     profileState: 505,
     settings: 406,
     browser: 307,
+    sessions: 208,
   });
   const read: string[] = [];
   assert.deepEqual(
@@ -41,6 +43,7 @@ test("새 앱 번들의 고유한 export로 메뉴 ID를 확인하고 모호한 
       profileState: 505,
       settings: 406,
       browser: 307,
+      sessions: 208,
     },
   );
   assert.deepEqual(read, ["paseo://app/index-abcdef.js?v=2"]);
@@ -109,6 +112,7 @@ test("barrel 재수출과 다른 객체의 패치 코드를 실제 export 소유
     profileState: 505,
     settings: 406,
     browser: 307,
+    sessions: 208,
   });
 });
 
@@ -137,11 +141,20 @@ function harness(t: TestContext) {
   const modules: Record<number, any> = {
     901: { useAgentFormState: originalForm },
     802: { useAgentProfilePicker: originalProfiles },
-    703: { pluginRegistry: { getSnapshot: () => [] } },
+    703: {
+      pluginRegistry: { getSnapshot: () => [], subscribe: () => () => {} },
+    },
     604: { useAgentProfileFormCatalog: originalCatalog },
     505: { useAgentProfileFormState: originalProfileState },
     406: { useSessionSettings: originalSettings },
     307: { useModelBrowser: (options: any) => options },
+    208: {
+      useSessionStore: {
+        getState: () => ({ sessions: {} }),
+        setState() {},
+        subscribe: () => () => {},
+      },
+    },
   };
   const required: number[] = [];
   let fetches = 0;
@@ -197,7 +210,7 @@ test("여러 설치가 한 번만 번들을 분석하고 마지막 해제에서 
   const second = contribute();
   await h.lease!.ready;
   assert.equal(h.fetches, 1);
-  assert.deepEqual(h.required, [901, 802, 703, 604, 505, 406, 307]);
+  assert.deepEqual(h.required, [901, 802, 703, 604, 505, 406, 307, 208]);
   assert.notEqual(h.modules[901].useAgentFormState, h.originalForm);
   first();
   first();
@@ -378,7 +391,7 @@ test("marker 없는 실패 lease는 다른 구 owner가 남아 있어도 새 코
   const current = h.lease!;
   await current.ready;
   assert.notEqual(current, legacy.lease);
-  assert.equal(current.version, 10);
+  assert.equal(current.version, 11);
   assert.equal(h.fetches, 1);
   assert.equal(legacy.signal.aborted, true);
   assert.notEqual(h.modules[901].useAgentFormState, h.originalForm);
@@ -470,7 +483,7 @@ test("lease 8을 새 메뉴 lease로 교체하고 늦게 해제되는 owner를 �
   const release = contribute(),
     current = h.lease!;
   await current.ready;
-  assert.equal(current.version, 10);
+  assert.equal(current.version, 11);
   assert.equal(old.signal.aborted, true);
   old.first();
   old.second();

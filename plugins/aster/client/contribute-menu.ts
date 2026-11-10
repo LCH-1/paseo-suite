@@ -1,5 +1,6 @@
 import { installMenuPresentation } from "./menu";
 import { resolveMenuModules } from "./modules";
+import { installRuntimeModelPresentation } from "./runtime-model";
 
 interface MenuLease {
   version?: number;
@@ -28,7 +29,7 @@ export function contributeMenu() {
     }
   }
   const legacy =
-    runtime[key] && (runtime[key]?.version ?? 0) < 10
+    runtime[key] && (runtime[key]?.version ?? 0) < 11
       ? runtime[key]
       : undefined;
   const disposeLegacy = legacy?.dispose.bind(legacy);
@@ -41,7 +42,7 @@ export function contributeMenu() {
     const requireModule = runtime.__r;
     let restore: (() => void) | undefined;
     const lease: MenuLease = {
-      version: 10,
+      version: 11,
       owners: 0,
       ready: Promise.resolve(),
       retry() {
@@ -82,6 +83,7 @@ export function contributeMenu() {
           const profileState = requireModule(ids.profileState);
           const settings = requireModule(ids.settings);
           const browser = requireModule(ids.browser);
+          const store = requireModule(ids.sessions)?.useSessionStore;
           if (
             typeof form?.useAgentFormState !== "function" ||
             typeof profiles?.useAgentProfilePicker !== "function" ||
@@ -89,7 +91,11 @@ export function contributeMenu() {
             typeof catalog?.useAgentProfileFormCatalog !== "function" ||
             typeof profileState?.useAgentProfileFormState !== "function" ||
             typeof settings?.useSessionSettings !== "function" ||
-            typeof browser?.useModelBrowser !== "function"
+            typeof browser?.useModelBrowser !== "function" ||
+            typeof store?.getState !== "function" ||
+            typeof store?.setState !== "function" ||
+            typeof store?.subscribe !== "function" ||
+            typeof registry?.pluginRegistry?.subscribe !== "function"
           ) {
             throw new Error(
               "Aster: 현재 앱의 메뉴 확장 호환성을 확인할 수 없습니다.",
@@ -105,6 +111,23 @@ export function contributeMenu() {
             browser,
           );
           restore = menuRestore;
+          try {
+            const runtimeRestore = installRuntimeModelPresentation(
+              store,
+              registry.pluginRegistry,
+            );
+            restore = () => {
+              try {
+                runtimeRestore();
+              } finally {
+                menuRestore();
+              }
+            };
+          } catch (error) {
+            menuRestore();
+            restore = undefined;
+            throw error;
+          }
         })
         .catch((error: unknown) => {
           if (!currentRequest.signal.aborted) {
