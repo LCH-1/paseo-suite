@@ -25,13 +25,14 @@ import {
   putVault,
   readVault,
   recoverRenewal,
-  renewBeforeExpiryMs,
   renewVaultRecord,
+  renewWhenIdleBeforeExpiryMs,
   supersedes,
   vaultAllows,
   vaultStatus,
 } from "./token-vault";
 import { connectPeer } from "./peer-connection";
+import { readClaudeActivity } from "./claude-activity";
 import type {
   CredentialEnvelope,
   CredentialShareStatus,
@@ -353,11 +354,19 @@ export function registerCredentialSharing(
   const daemonRelay = new DaemonRelay({ home, enabled, connect: connectPeer });
   daemonRelay.start();
   const registrations: unknown[] = [
-    server.handle(rpc("aster.credentials.status", z.object({})), async (_, { paseo }) => {
+    server.handle(rpc("aster.credentials.status", z.object({ activity: z.boolean().optional() })), async (input, { paseo }) => {
+      // Only a leader with a token near its renewal asks, so other calls never read the agent list.
+      const activity = input.activity ? readClaudeActivity(paseo) : Promise.resolve({});
       // A renewal holds the queue for up to two minutes. A host that stops answering looks dead,
       // and another one would then spend the same refresh token.
       if (renewing && lastStatus)
-        return { ...lastStatus, renewing, daemonRelay: await daemonRelay.snapshot(), vault: vaultStatus(await readVault(home)) };
+        return {
+          ...lastStatus,
+          renewing,
+          daemonRelay: await daemonRelay.snapshot(),
+          vault: vaultStatus(await readVault(home)),
+          ...(await activity),
+        };
       return serial(async () => {
         renewApi = paseo as typeof renewApi;
         lastStatus = share.status(await store.read((await paseo.config.get()).config.providers ?? {}));
@@ -366,6 +375,7 @@ export function registerCredentialSharing(
           renewing,
           daemonRelay: await daemonRelay.snapshot(),
           vault: vaultStatus(await readVault(home)),
+          ...(await activity),
         };
       });
     }),
@@ -409,8 +419,9 @@ export function registerCredentialSharing(
           renewApi = paseo as typeof renewApi;
           const record = (await readVault(home)).find((entry) => entry.identity === input.identity);
           if (!record) throw Error("Settings Sync: 보관된 토큰이 없습니다.");
-          // The second of two leaders asking lands here: the first one has just renewed it.
-          if (!input.force && (record.expiresAt ?? 0) > Date.now() + renewBeforeExpiryMs + 60_000) return { status: "not-due" };
+          // The second of two leaders asking lands here: the first one has just renewed it. A leader
+          // may ask from the start of the idle window, when no Claude turn is running anywhere.
+          if (!input.force && (record.expiresAt ?? 0) > Date.now() + renewWhenIdleBeforeExpiryMs + 60_000) return { status: "not-due" };
           const providers = (await paseo.config.get()).config.providers ?? {};
           const root = providers.claude as ProviderEntry;
           renewing = input.identity;

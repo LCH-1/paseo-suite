@@ -6,6 +6,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CredentialState, SharedCredential } from "./credential-types";
+import { putVault } from "./token-vault";
 const now = 1700000000000;
 function record(): SharedCredential {
   return {
@@ -234,4 +235,58 @@ test("갱신 표시가 붙은 토큰도 저장 형식 검사를 통과해 프로
   assert.equal("vaultOrigin" in stripped, false);
   assert.equal((stripped.credential.claudeAiOauth as any).refreshToken, undefined);
   assert.doesNotThrow(() => parseBundle({ version: 1, records: [stripped] }));
+});
+
+function registered(home: string) {
+  const handlers = new Map<string, Function>();
+  const cleanups = registerCredentialSharing({ handle(contract: any, handler: any) { handlers.set(contract.name, handler); } } as any, home, () => {});
+  return { handlers, dispose: () => cleanups.forEach((dispose) => dispose()) };
+}
+
+test("작업 상태는 요청받았을 때만 데몬의 에이전트 목록에서 읽어 상태에 싣는다", async () => {
+  const { handlers, dispose } = registered(await mkdtemp(path.join(tmpdir(), "settings-sync-activity-")));
+  let lists = 0;
+  const context = {
+    paseo: {
+      config: { get: async () => ({ config: { providers: {} } }) },
+      agents: {
+        list: async () => {
+          lists++;
+          return { entries: [{ agent: { provider: "claude", status: "running" } }, { agent: { provider: "claude", status: "idle" } }] };
+        },
+      },
+    },
+  };
+  try {
+    const status = handlers.get("sync.credentials.status.request")!;
+    const plain = await status({}, context);
+    assert.equal("claudeRunning" in plain, false);
+    assert.equal(lists, 0);
+    assert.equal((await status({ activity: true }, context)).claudeRunning, 1);
+    assert.equal(lists, 1);
+  } finally {
+    dispose();
+  }
+});
+
+test("유휴 구간에 든 토큰은 갱신 요청을 받고 그보다 먼 토큰은 때가 아니라고 답한다", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "settings-sync-renew-window-"));
+  const { handlers, dispose } = registered(home);
+  const vaulted = (expiresAt: number) => {
+    const value = record();
+    value.expiresAt = expiresAt;
+    (value.credential.claudeAiOauth as Record<string, unknown>).expiresAt = expiresAt;
+    return value;
+  };
+  // A stand-in that exits at once and leaves the file alone: no real CLI, no network.
+  const context = { paseo: { config: { get: async () => ({ config: { providers: { claude: { command: [process.execPath, "-e", ""] } } } }), patch: async () => {} } } };
+  try {
+    const renew = handlers.get("sync.credentials.vault.renew.request")!;
+    await putVault(home, vaulted(Date.now() + 40 * 60_000), { restrict: async () => {} });
+    assert.equal((await renew({ identity: record().identity }, context)).status, "unchanged");
+    await putVault(home, vaulted(Date.now() + 3 * 3_600_000), { restrict: async () => {} });
+    assert.equal((await renew({ identity: record().identity }, context)).status, "not-due");
+  } finally {
+    dispose();
+  }
 });

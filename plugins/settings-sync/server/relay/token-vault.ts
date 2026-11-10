@@ -221,6 +221,8 @@ export interface VaultPeerStatus {
   accounts: string[];
   declined: string[];
   renewing?: string | null;
+  /** Claude agents mid-turn on that host; only when asked, and never from older versions. */
+  claudeRunning?: number;
 }
 /** Same order as supersedes, so a host never refuses what it was chosen to receive. */
 const beats = (entry: VaultEntryStatus, best: VaultEntryStatus) => {
@@ -251,8 +253,43 @@ export function planTransfers(peers: readonly VaultPeerStatus[]) {
   });
 }
 
+/** The deadline: from here on a token is renewed whatever is running. */
 export const renewBeforeExpiryMs = 15 * 60_000;
+/**
+ * Renewing revokes the old access token at once, and every request still using it fails until the
+ * new one reaches its host. So before the deadline a renewal waits for a moment when no host
+ * using the account is in the middle of a Claude turn.
+ */
+export const renewWhenIdleBeforeExpiryMs = 60 * 60_000;
 const aloneGraceMs = 10 * 60_000;
+// One pass ahead, so the first pass inside the window already has an answer.
+const activityLeadMs = 2 * 60_000;
+
+export interface RenewalPlan {
+  identity: string;
+  chain: string;
+  /** Null when every host holding the token has failed to renew it. */
+  serverId: string | null;
+  expiresAt: number;
+  /** "due" at the deadline, "idle" early with nothing running, "busy" early and held back. */
+  reason: "due" | "idle" | "busy";
+  /** Claude agents mid-turn on the hosts using the account that said; null when none did. */
+  running: number | null;
+}
+
+/**
+ * Hosts that do not report what is running, older versions or a daemon that did not answer, are
+ * left out rather than counted as busy: the deadline renews for them as before, and an early
+ * renewal is no worse a moment for them than that one. Without a single report there is nothing
+ * to go on, so the renewal waits for the deadline.
+ */
+function runningFor(peers: readonly VaultPeerStatus[], identity: string) {
+  const reported = peers.filter(
+    (peer) => peer.accounts.includes(identity) && !peer.declined.includes(identity) && typeof peer.claudeRunning === "number",
+  );
+  return reported.length ? reported.reduce((sum, peer) => sum + peer.claudeRunning!, 0) : null;
+}
+
 /**
  * Two daemons briefly leading pick the same host, whose queue then turns the second request into
  * a no-op. Waiting while alone matters only for an expired token: another host may have renewed
@@ -264,10 +301,10 @@ export function planRenewals(
   now: number,
   aloneMs: number | null,
   failed: (identity: string, chain: string, serverId: string) => boolean = () => false,
-) {
+): RenewalPlan[] {
   return identitiesOf(peers).flatMap((identity) => {
     const best = newestOf(peers, identity)!;
-    if (best.expiresAt > now + renewBeforeExpiryMs) return [];
+    if (best.expiresAt > now + renewWhenIdleBeforeExpiryMs) return [];
     if (aloneMs !== null && aloneMs < aloneGraceMs && best.expiresAt <= now) return [];
     if (peers.some((peer) => peer.renewing === identity)) return [];
     const holders = peers.filter(
@@ -281,7 +318,17 @@ export function planRenewals(
     const chosen = holders
       .filter((peer) => !failed(identity, best.chain, peer.serverId))
       .sort((a, b) => order.indexOf(a.serverId) - order.indexOf(b.serverId))[0];
-    return [{ identity, chain: best.chain, serverId: chosen?.serverId ?? null }];
+    const running = runningFor(peers, identity);
+    const reason = best.expiresAt <= now + renewBeforeExpiryMs ? "due" : running === 0 ? "idle" : "busy";
+    return [{ identity, chain: best.chain, serverId: chosen?.serverId ?? null, expiresAt: best.expiresAt, reason, running }];
+  });
+}
+
+/** Status calls read the agent list only while some token is close to its idle window. */
+export function wantsActivity(peers: readonly VaultPeerStatus[], now: number) {
+  return identitiesOf(peers).some((identity) => {
+    const { expiresAt } = newestOf(peers, identity)!;
+    return expiresAt > now + renewBeforeExpiryMs && expiresAt <= now + renewWhenIdleBeforeExpiryMs + activityLeadMs;
   });
 }
 
@@ -301,21 +348,29 @@ export interface VaultSyncState {
   retryAt: Map<string, number>;
   failed: Map<string, Set<string>>;
   aloneSince: number | null;
+  /** Whether the next pass asks every host what is running. */
+  askActivity: boolean;
+  /** When a held-back renewal may be logged again, by account. */
+  heldLogAt: Map<string, number>;
 }
 const renewRetryMs = 10 * 60_000;
 const rejectedRetryMs = 60 * 60_000;
+const heldLogMs = 10 * 60_000;
 
-async function loadStatuses(ready: readonly RelayPeer[]) {
+async function loadStatuses(ready: readonly RelayPeer[], activity: boolean) {
   const answers = await Promise.all(
     ready.map(async (peer) => {
-      const status = (await call(peer, "status", {}).catch(() => null)) as {
+      // Older hosts drop the unknown field and answer as before.
+      const status = (await call(peer, "status", activity ? { activity: true } : {}).catch(() => null)) as {
         publicKey?: string;
         vault?: VaultEntryStatus[];
         accounts?: { identity: string }[];
         declined?: string[];
         renewing?: string | null;
+        claudeRunning?: unknown;
       } | null;
       if (!status?.publicKey || !Array.isArray(status.vault)) return [];
+      const running = status.claudeRunning;
       return [
         {
           serverId: peer.serverId,
@@ -324,11 +379,23 @@ async function loadStatuses(ready: readonly RelayPeer[]) {
           accounts: (status.accounts ?? []).map((account) => account.identity),
           declined: status.declined ?? [],
           renewing: status.renewing ?? null,
+          ...(typeof running === "number" && Number.isInteger(running) && running >= 0 ? { claudeRunning: running } : {}),
         } satisfies VaultPeerStatus,
       ];
     }),
   );
   return answers.flat();
+}
+
+const timeLeft = (expiresAt: number, now: number) =>
+  expiresAt <= now ? "이미 만료" : `만료까지 ${Math.ceil((expiresAt - now) / 60_000)}분`;
+function heldMessage(item: RenewalPlan, now: number) {
+  const why = item.running === null ? "작업 상태를 알려 준 호스트 없음" : `실행 중인 Claude 작업 ${item.running}개`;
+  return `[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 보류: ${why} (${timeLeft(item.expiresAt, now)})`;
+}
+function renewingMessage(item: RenewalPlan, now: number) {
+  const why = item.reason === "idle" ? "유휴 시점" : item.running ? `만료 임박, 실행 중인 Claude 작업 ${item.running}개` : "만료 임박";
+  return `[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신: ${why} (${timeLeft(item.expiresAt, now)})`;
 }
 
 async function transfer(ready: readonly RelayPeer[], peers: readonly VaultPeerStatus[], log: (message: string) => void) {
@@ -357,26 +424,44 @@ export async function syncVaults(
 ) {
   const log = context.log ?? console.log;
   const { state, now } = context;
-  let peers = await loadStatuses(ready);
+  const activity = state.askActivity;
+  let peers = await loadStatuses(ready, activity);
   if (!peers.length) return { moved: 0, renewed: 0 };
   let moved = await transfer(ready, peers, log);
-  if (moved) peers = await loadStatuses(ready);
+  if (moved) peers = await loadStatuses(ready, activity);
+  state.askActivity = wantsActivity(peers, now);
   const alone = context.known > 1 && ready.length <= 1;
   state.aloneSince = alone ? (state.aloneSince ?? now) : null;
   let renewed = 0;
+  let sentRenewal = false;
   const isFailed = (identity: string, chain: string, serverId: string) =>
     state.failed.get(`${identity}:${chain}`)?.has(serverId) === true;
   for (const item of planRenewals(peers, context.order, now, state.aloneSince === null ? null : now - state.aloneSince, isFailed)) {
     // By token, not account: a new login must not sit out the wait of the one it replaced.
     const key = `${item.identity}:${item.chain}`;
+    if (item.reason === "busy") {
+      // Not before the hosts were asked: until then none of them could say it was idle.
+      if (activity && now >= (state.heldLogAt.get(item.identity) ?? 0)) {
+        state.heldLogAt.set(item.identity, now + heldLogMs);
+        log(heldMessage(item, now));
+      }
+      continue;
+    }
+    // A renewal can take minutes, and what was idle before it may not be now: the next pass looks again.
+    if (item.reason === "idle" && sentRenewal) continue;
     if (now < (state.retryAt.get(key) ?? 0)) continue;
+    // An early attempt that went nowhere waits, but never past the deadline.
+    const retryAt = item.reason === "idle" ? Math.min(now + renewRetryMs, item.expiresAt - renewBeforeExpiryMs) : now + renewRetryMs;
     if (!item.serverId) {
       state.failed.delete(key);
-      state.retryAt.set(key, now + renewRetryMs);
+      state.retryAt.set(key, retryAt);
       continue;
     }
     const markFailed = () => state.failed.set(key, new Set([...(state.failed.get(key) ?? []), item.serverId!]));
     const peer = ready.find((entry) => entry.serverId === item.serverId)!;
+    state.heldLogAt.delete(item.identity);
+    log(renewingMessage(item, now));
+    sentRenewal = true;
     try {
       const result = (await call(peer, "vault.renew", { identity: item.identity }, 180_000)) as { status?: string; failure?: string | null };
       if (result?.status === "renewed" || result?.status === "recovered") {
@@ -387,7 +472,13 @@ export async function syncVaults(
       } else if (result?.status === "rejected") {
         state.retryAt.set(key, now + rejectedRetryMs);
         log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰이 거부되었습니다. 다시 로그인이 필요합니다.`);
-      } else if (result?.status !== "not-due") {
+      } else if (result?.status === "not-due") {
+        // An older host renews only at the deadline; asking it every minute until then is pointless.
+        if (item.reason === "idle") {
+          state.retryAt.set(key, retryAt);
+          log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 건너뜀: ${item.serverId.slice(0, 12)}가 아직 갱신할 때가 아니라고 답함`);
+        }
+      } else {
         markFailed();
         log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 실패 (${item.serverId.slice(0, 12)}): ${result?.status ?? "unknown"} ${result?.failure ?? ""}`.trim());
       }
@@ -396,6 +487,10 @@ export async function syncVaults(
       log(`[settings-sync] ${item.identity.slice(0, 6)} 토큰 갱신 요청 실패 (${item.serverId.slice(0, 12)}): ${error instanceof Error ? error.name : "unknown"}`);
     }
   }
-  if (renewed) moved += await transfer(ready, await loadStatuses(ready), log);
+  if (renewed) {
+    const after = await loadStatuses(ready, false);
+    state.askActivity = wantsActivity(after, now);
+    moved += await transfer(ready, after, log);
+  }
   return { moved, renewed };
 }

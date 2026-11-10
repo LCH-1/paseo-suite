@@ -18,6 +18,7 @@ import {
   syncVaults,
   vaultAllows,
   vaultStatus,
+  wantsActivity,
   type VaultPeerStatus,
 } from "./token-vault";
 
@@ -245,7 +246,10 @@ test("a에서 로그인하고 b에 복제된 뒤 a가 꺼지면 켜지는 c는 b
 
 const now = 1_000_000;
 const due = now + 60_000;
-const renewalTargets = (...args: Parameters<typeof planRenewals>) => planRenewals(...args).map(({ identity: id, serverId }) => ({ identity: id, serverId }));
+const renewalTargets = (...args: Parameters<typeof planRenewals>) =>
+  planRenewals(...args)
+    .filter((item) => item.reason !== "busy")
+    .map(({ identity: id, serverId }) => ({ identity: id, serverId }));
 test("만료가 임박하면 순서상 첫 호스트 한 곳에만 갱신을 맡긴다", () => {
   const peers = [status("win", [["c", due]]), status("linux2", [["c", due]]), status("linux1", [["c", due]])];
   assert.deepEqual(renewalTargets(peers, ["linux1", "linux2", "win"], now, null), [{ identity, serverId: "linux1" }]);
@@ -272,9 +276,16 @@ test("혼자 켜져 있고 토큰이 이미 만료됐으면 다른 호스트를 
   assert.deepEqual(renewalTargets([status("a", [["c", due]])], ["a"], now, 60_000), [{ identity, serverId: "a" }]);
 });
 
-function fleet(initial: Record<string, { chain: string; expiresAt: number } | null>, renewTo?: { chain: string; expiresAt: number }, renewStatus = "renewed") {
+/** `running` answers only hosts listed in it, and only when asked; the rest act like older versions. */
+function fleet(
+  initial: Record<string, { chain: string; expiresAt: number } | null>,
+  renewTo?: { chain: string; expiresAt: number },
+  renewStatus = "renewed",
+  running: Record<string, number> = {},
+) {
   const held = new Map(Object.entries(initial));
   const calls: string[] = [];
+  const asked: string[] = [];
   const peer = (serverId: string) => ({
     serverId,
     client: {
@@ -282,7 +293,14 @@ function fleet(initial: Record<string, { chain: string; expiresAt: number } | nu
         calls.push(method.replace("sync.credentials.", "").replace(".request", "") + ":" + serverId);
         if (method.includes("status")) {
           const entry = held.get(serverId);
-          return { publicKey: "key-" + serverId, accounts: [{ identity }], declined: [], vault: entry ? [{ identity, ...entry }] : [] };
+          if (input?.activity) asked.push(serverId);
+          return {
+            publicKey: "key-" + serverId,
+            accounts: [{ identity }],
+            declined: [],
+            vault: entry ? [{ identity, ...entry }] : [],
+            ...(input?.activity && serverId in running ? { claudeRunning: running[serverId] } : {}),
+          };
         }
         if (method.includes("export")) return { entry: held.get(serverId) };
         if (method.includes("receive")) { held.set(serverId, input.entry); return { changed: true }; }
@@ -291,9 +309,16 @@ function fleet(initial: Record<string, { chain: string; expiresAt: number } | nu
       },
     },
   });
-  return { peers: Object.keys(initial).map(peer), held, calls };
+  return { peers: Object.keys(initial).map(peer), held, calls, asked, running };
 }
-const context = (order: string[], known = order.length) => ({ order, known, now, state: { retryAt: new Map<string, number>(), failed: new Map<string, Set<string>>(), aloneSince: null }, log: () => {} });
+const context = (order: string[], known = order.length) => ({
+  order,
+  known,
+  now,
+  state: { retryAt: new Map<string, number>(), failed: new Map<string, Set<string>>(), aloneSince: null, askActivity: false, heldLogAt: new Map<string, number>() },
+  log: (_message: string) => {},
+});
+const renewCalls = (f: ReturnType<typeof fleet>) => f.calls.filter((call) => call.startsWith("vault.renew"));
 
 test("한 번의 처리로 뒤처진 호스트를 채우고 갱신한 뒤 새 토큰까지 다시 복제한다", async () => {
   const f = fleet({ a: { chain: "c1", expiresAt: due }, b: { chain: "c1", expiresAt: due }, c: null }, { chain: "c2", expiresAt: now + 8 * 3_600_000 });
@@ -375,4 +400,150 @@ test("거부된 토큰의 대기가 새 로그인을 막지 않는다", async ()
   f.held.set("a", { chain: "fresh-login", expiresAt: due + 1000 });
   await syncVaults(f.peers, ctx);
   assert.equal(f.calls.filter((call) => call.startsWith("vault.renew")).length, 2);
+});
+
+const early = now + 40 * 60_000;
+const plan = (peers: VaultPeerStatus[], order: string[], at = now) =>
+  planRenewals(peers, order, at, null).map(({ serverId, reason, running }) => ({ serverId, reason, running }));
+
+test("만료 60분 안이고 그 계정을 쓰는 호스트가 모두 쉬면 미리 갱신한다", () => {
+  const peers = [status("a", [["c", early]], { claudeRunning: 0 }), status("b", [["c", early]], { claudeRunning: 0 })];
+  assert.deepEqual(plan(peers, ["b", "a"]), [{ serverId: "b", reason: "idle", running: 0 }]);
+  assert.deepEqual(plan([status("a", [["c", now + 61 * 60_000]], { claudeRunning: 0 })], ["a"]), []);
+});
+
+test("만료 60분 안이라도 Claude 작업이 진행 중인 호스트가 있으면 보류한다", () => {
+  const peers = [status("a", [["c", early]], { claudeRunning: 0 }), status("b", [["c", early]], { claudeRunning: 2 })];
+  assert.deepEqual(plan(peers, ["a", "b"]), [{ serverId: "a", reason: "busy", running: 2 }]);
+});
+
+test("그 계정을 쓰지 않거나 로그아웃한 호스트의 작업은 따지지 않는다", () => {
+  const peers = [
+    status("a", [["c", early]], { claudeRunning: 0 }),
+    status("other", [], { accounts: [], claudeRunning: 4 }),
+    status("out", [], { declined: [identity], claudeRunning: 3 }),
+  ];
+  assert.deepEqual(plan(peers, ["a"]), [{ serverId: "a", reason: "idle", running: 0 }]);
+});
+
+test("만료 15분 안에서는 작업이 진행 중이어도 지금처럼 갱신한다", () => {
+  const peers = [status("a", [["c", due]], { claudeRunning: 3 }), status("b", [["c", due]])];
+  assert.deepEqual(plan(peers, ["a", "b"]), [{ serverId: "a", reason: "due", running: 3 }]);
+  const deadline = now + 15 * 60_000;
+  assert.deepEqual(plan([status("a", [["c", deadline]], { claudeRunning: 1 })], ["a"]), [{ serverId: "a", reason: "due", running: 1 }]);
+});
+
+test("작업 상태를 알리지 않는 옛 버전 호스트가 섞여도 15분 마감선은 그대로다", () => {
+  // Left out of the count: the host that did report decides.
+  const mixed = [status("old", [["c", early]]), status("new", [["c", early]], { claudeRunning: 0 })];
+  assert.deepEqual(plan(mixed, ["old", "new"]), [{ serverId: "old", reason: "idle", running: 0 }]);
+  const busy = [status("old", [["c", early]]), status("new", [["c", early]], { claudeRunning: 1 })];
+  assert.deepEqual(plan(busy, ["old", "new"]), [{ serverId: "old", reason: "busy", running: 1 }]);
+  // Nobody reported, so nothing says it is idle: the deadline renews it as before.
+  const old = [status("old1", [["c", early]]), status("old2", [["c", early]])];
+  assert.deepEqual(plan(old, ["old1", "old2"]), [{ serverId: "old1", reason: "busy", running: null }]);
+  assert.deepEqual(plan(old, ["old1", "old2"], early - 15 * 60_000), [{ serverId: "old1", reason: "due", running: null }]);
+  assert.deepEqual(renewalTargets(busy, ["old", "new"], early - 14 * 60_000, null), [{ identity, serverId: "old" }]);
+});
+
+test("다른 호스트가 갱신 중이면 유휴 구간에서도 같은 토큰을 맡기지 않는다", () => {
+  const peers = [status("a", [["c", early]], { renewing: identity, claudeRunning: 0 }), status("b", [["c", early]], { claudeRunning: 0 })];
+  assert.deepEqual(plan(peers, ["b", "a"]), []);
+});
+
+test("유휴 구간에 가까운 토큰이 있을 때만 작업 상태를 묻는다", () => {
+  assert.equal(wantsActivity([status("a", [["c", now + 3 * 3_600_000]])], now), false);
+  assert.equal(wantsActivity([status("a", [["c", now + 61 * 60_000]])], now), true);
+  assert.equal(wantsActivity([status("a", [["c", early]])], now), true);
+  // Renewed or waited on whatever runs, so asking would only cost.
+  assert.equal(wantsActivity([status("a", [["c", due]])], now), false);
+  assert.equal(wantsActivity([status("a", [["c", now - 3_600_000]])], now), false);
+});
+
+test("유휴 구간에서만 작업 상태를 묻고 모두 쉬는 순간 갱신한 뒤 다시 묻지 않는다", async () => {
+  const f = fleet(
+    { a: { chain: "c1", expiresAt: early }, b: { chain: "c1", expiresAt: early } },
+    { chain: "c2", expiresAt: now + 8 * 3_600_000 },
+    "renewed",
+    { a: 0, b: 1 },
+  );
+  const logs: string[] = [];
+  const ctx = { ...context(["a", "b"]), log: (message: string) => void logs.push(message) };
+  await syncVaults(f.peers, ctx);
+  assert.equal(f.asked.length, 0);
+  assert.equal(logs.length, 0);
+  await syncVaults(f.peers, { ...ctx, now: now + 60_000 });
+  assert.deepEqual([...f.asked].sort(), ["a", "b"]);
+  assert.deepEqual(renewCalls(f), []);
+  assert.deepEqual(logs, [`[settings-sync] ${identity.slice(0, 6)} 토큰 갱신 보류: 실행 중인 Claude 작업 1개 (만료까지 39분)`]);
+  f.running.b = 0;
+  await syncVaults(f.peers, { ...ctx, now: now + 120_000 });
+  assert.deepEqual(renewCalls(f), ["vault.renew:a"]);
+  assert.ok(logs.includes(`[settings-sync] ${identity.slice(0, 6)} 토큰 갱신: 유휴 시점 (만료까지 38분)`));
+  for (const serverId of ["a", "b"]) assert.equal(f.held.get(serverId)?.chain, "c2");
+  const asked = f.asked.length;
+  await syncVaults(f.peers, { ...ctx, now: now + 180_000 });
+  assert.equal(f.asked.length, asked);
+});
+
+test("보류 로그는 계정마다 10분에 한 줄이고 마감선에서는 작업 중이어도 갱신한다", async () => {
+  const f = fleet({ a: { chain: "c", expiresAt: now + 30 * 60_000 } }, { chain: "c2", expiresAt: now + 8 * 3_600_000 }, "renewed", { a: 2 });
+  const logs: string[] = [];
+  const ctx = { ...context(["a"]), log: (message: string) => void logs.push(message) };
+  ctx.state.askActivity = true;
+  for (let minute = 0; minute < 15; minute++) await syncVaults(f.peers, { ...ctx, now: now + minute * 60_000 });
+  assert.equal(logs.filter((line) => line.includes("보류")).length, 2);
+  assert.deepEqual(renewCalls(f), []);
+  await syncVaults(f.peers, { ...ctx, now: now + 15 * 60_000 });
+  assert.deepEqual(renewCalls(f), ["vault.renew:a"]);
+  assert.ok(logs.includes(`[settings-sync] ${identity.slice(0, 6)} 토큰 갱신: 만료 임박, 실행 중인 Claude 작업 2개 (만료까지 15분)`));
+});
+
+test("이른 갱신을 받지 않는 옛 버전 호스트에는 마감선까지만 다시 묻지 않는다", async () => {
+  const f = fleet({ old: { chain: "c", expiresAt: now + 20 * 60_000 }, new: { chain: "c", expiresAt: now + 20 * 60_000 } }, undefined, "not-due", { new: 0 });
+  const ctx = context(["old", "new"]);
+  ctx.state.askActivity = true;
+  await syncVaults(f.peers, ctx);
+  await syncVaults(f.peers, { ...ctx, now: now + 60_000 });
+  assert.deepEqual(renewCalls(f), ["vault.renew:old"]);
+  // The deadline, not the usual ten minutes later.
+  await syncVaults(f.peers, { ...ctx, now: now + 5 * 60_000 });
+  assert.deepEqual(renewCalls(f), ["vault.renew:old", "vault.renew:old"]);
+});
+
+test("유휴 갱신은 한 번의 처리에 하나만 하고 마감선에 걸린 토큰은 그대로 이어서 갱신한다", async () => {
+  const second = "b".repeat(64);
+  const renews: string[] = [];
+  const host = (secondExpiresAt: number) => ({
+    serverId: "a",
+    client: {
+      async invokePluginRpc(_: string, method: string, input: any) {
+        if (method.includes("status"))
+          return {
+            publicKey: "k",
+            accounts: [{ identity }, { identity: second }],
+            declined: [],
+            claudeRunning: 0,
+            vault: [{ identity, chain: "c1", expiresAt: early }, { identity: second, chain: "c2", expiresAt: secondExpiresAt }],
+          };
+        if (method.includes("renew")) {
+          renews.push(input.identity);
+          return { status: "unchanged" };
+        }
+        throw new Error("unexpected " + method);
+      },
+    },
+  });
+  const ctx = context(["a"]);
+  ctx.state.askActivity = true;
+  // What was idle before a renewal that took a while is looked at again on the next pass.
+  await syncVaults([host(early)], ctx);
+  assert.deepEqual(renews, [identity]);
+  await syncVaults([host(early)], { ...ctx, now: now + 60_000 });
+  assert.deepEqual(renews, [identity, second]);
+  renews.length = 0;
+  const fresh = context(["a"]);
+  fresh.state.askActivity = true;
+  await syncVaults([host(due)], fresh);
+  assert.deepEqual(renews, [identity, second]);
 });
