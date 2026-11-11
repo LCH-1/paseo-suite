@@ -1378,3 +1378,205 @@ test("5시간 한도 안내는 보고서에 5시간 창이 없어도 계정 전�
     }
   }
 });
+
+test("한도로 거절된 모델 변경은 세션 모델로 기억하지 않아 조회가 늦은 다음 재개도 실행 중인 원래 모델로 판정해 계정을 유지한다", async (t) => {
+  const fixture = await openFixture("fable");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    reports[0].report.windows[0].usedPct = 10;
+    reports[1].report.windows[0].usedPct = 60;
+    reports[1].report.windows[1].usedPct = 100;
+    fixture.setReports(reports);
+    // A Sonnet conversation sits on A, which has more weekly room.
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    // Every account's Fable limit is spent: the change is refused and the session keeps Sonnet.
+    await assert.rejects(
+      fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")),
+      /모든 Claude 계정의 Fable 한도가 소진/,
+    );
+    // B's Fable limit resets early, and the host is slow to say which model the session runs.
+    const early = structuredClone(reports);
+    early[1].report.windows[1].usedPct = 0;
+    fixture.setReports(early);
+    fixture.setSnapshot(() => ({ model: "claude-sonnet-5" }));
+    fixture.setGate(() => new Promise(() => {}));
+    const resumed = fixture.open();
+    for (let turn = 0; turn < 5; turn++)
+      await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(2_000);
+    assert.equal((await resumed)?.env.ASTER_ACCOUNT_ID, "fixture");
+    assert.equal(fixture.lookups(), 1);
+    assert.ok(!fixture.logs.some((line) => /이전 계정 Fable/.test(line)));
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("모델 변경을 한도로 거절한 계정은 사용량에 여유가 보여도 다시 고르지 않고 그 모델로만 차단해 이후 새 대화도 그 모델이면 피한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    // A's usage lags behind the refusal: its Fable limit still shows more room than B's.
+    reports[0].report.windows[0].usedPct = 10;
+    reports[0].report.windows[1].usedPct = 80;
+    reports[1].report.windows[0].usedPct = 50;
+    reports[1].report.windows[1].usedPct = 95;
+    fixture.setReports(reports);
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    assert.equal(
+      (await fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    // The block covers Fable alone: a new Fable conversation avoids A, a Sonnet one still takes it.
+    assert.equal(
+      (
+        await fixture.open(
+          withModel(
+            { agentId: "fable-agent", reason: "create", env: {} },
+            "claude-fable-5-2",
+          ),
+        )
+      )?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    assert.equal(
+      (
+        await fixture.open(
+          withModel(
+            { agentId: "sonnet-agent", reason: "create", env: {} },
+            "claude-sonnet-5",
+          ),
+        )
+      )?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("기본 모델로 바꾸는 변경을 한도로 거절한 계정은 그 다시 열기에서만 뒤로 미루고 CLI 확인 경로에서도 다른 계정을 먼저 쓰며 다른 계정이 없으면 그 계정으로 연다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    reports[0].report.windows[0].usedPct = 10;
+    reports[0].report.windows[1].usedPct = 0;
+    reports[1].report.windows[0].usedPct = 50;
+    reports[1].report.windows[1].usedPct = 0;
+    fixture.setReports(reports);
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    assert.equal(
+      (await fixture.open(changeModel("claude-sonnet-5", null)))?.env
+        .ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    // The default model names no family to block: a new conversation still goes to A, with more room.
+    assert.equal(
+      (await fixture.open({ agentId: "new-agent", reason: "create", env: {} }))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    // Usage that scores nothing goes through the CLI's own check, and there too B goes first.
+    const partial = structuredClone(reports);
+    for (const entry of partial)
+      entry.report.windows = [
+        {
+          id: "five_hour",
+          usedPct: 10,
+          resetsAt: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+      ];
+    fixture.setReports(partial);
+    assert.equal(
+      (
+        await fixture.open({
+          ...changeModel("claude-sonnet-5", null),
+          agentId: "partial-agent",
+        })
+      )?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    logged(fixture, throughCli);
+    // With B spent the reopen goes back to A, where the CLI checks the limit itself.
+    const spent = structuredClone(reports);
+    spent[1].report.windows[0].usedPct = 100;
+    fixture.setReports(spent);
+    assert.equal(
+      (
+        await fixture.open({
+          ...changeModel("claude-sonnet-5", null),
+          agentId: "last-agent",
+        })
+      )?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    logged(
+      fixture,
+      /session last-agent: fixture \(모델 변경을 거절한 계정뿐이라 CLI 확인 경로\)/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("사용량 조회가 실패한 모델 변경 다시 열기도 원래 계정으로 열되 새 모델을 세션 모델로 기억하고 거절한 계정을 그 모델로 차단한다", async (t) => {
+  const fixture = await openFixture("fable");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    // A's usage lags behind the refusal and still shows the most room for Fable.
+    reports[0].report.windows[0].usedPct = 0;
+    reports[0].report.windows[1].usedPct = 0;
+    reports[1].report.windows[0].usedPct = 70;
+    reports[1].report.windows[1].usedPct = 0;
+    fixture.setReports(reports);
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    // Without usage nothing tells the accounts apart: the session reopens where it was, on Fable.
+    fixture.setReports(null);
+    assert.equal(
+      (await fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    fixture.setReports(reports);
+    assert.equal(
+      (
+        await fixture.open(
+          withModel(
+            { agentId: "fable-agent", reason: "create", env: {} },
+            "claude-fable-5-2",
+          ),
+        )
+      )?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    // The host is slow to name the session's model: the Fable it now runs stands in for it.
+    fixture.setGate(() => new Promise(() => {}));
+    const resumed = fixture.open();
+    for (let turn = 0; turn < 5; turn++)
+      await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(2_000);
+    assert.equal((await resumed)?.env.ASTER_ACCOUNT_ID, "recovered");
+    assert.equal(fixture.lookups(), 1);
+  } finally {
+    fixture.dispose();
+  }
+});

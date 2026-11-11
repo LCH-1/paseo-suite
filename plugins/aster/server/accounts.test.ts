@@ -1767,3 +1767,122 @@ test("주간 창의 초기화가 지났으면 사용량을 0으로 지어내지 
   passed.report.windows[0].usedPct = 100;
   assert.deepEqual(bootstrapAccounts(accounts, [passed], now), []);
 });
+
+test("점수에 쓰는 보고서보다 새 부분 보고서의 모델 창 값이 이겨 소진·조기 초기화가 점수와 상태 화면에 똑같이 보이고 그 보고서만 값 없이 밝힌 모델 창은 미확인으로 남는다", () => {
+  const resetsAt = now + 6 * 24 * 3_600_000;
+  const scored = (fable: number | null) => ({
+    ...modelReport(fable, 30),
+    id: "claude-profiles:account.org-a",
+    sourceId: "claude-profiles",
+    fetchedAt: new Date(now - 2 * 60_000).toISOString(),
+  });
+  // The newest report cannot be scored, its weekly window has no value, but names Fable's.
+  const partial = (fable: number) => {
+    const entry = modelReport(fable, 30);
+    entry.report.windows![0].usedPct = null;
+    return entry;
+  };
+  for (const order of [
+    [scored(40), partial(100)],
+    [partial(100), scored(40)],
+  ]) {
+    const [reading] = mapReports(accounts, order, {}, now);
+    assert.equal(reading.fetchedAt, now - 2 * 60_000);
+    assert.equal(reading.weekly.used, 30);
+    assert.deepEqual(reading.models, { fable: { used: 100, resetsAt } });
+    assert.equal(
+      selectAccount([reading], now, new Map(), undefined, "fable"),
+      null,
+    );
+    assert.equal(
+      selectAccount([reading], now, new Map(), undefined, "sonnet")?.id,
+      "a",
+    );
+    assert.deepEqual(exhaustedModels(accounts[0], order, now), [
+      { family: "fable", resetsAt },
+    ]);
+  }
+  // The other way round the newer value is an early reset.
+  const [reset] = mapReports(accounts, [scored(100), partial(40)], {}, now);
+  assert.deepEqual(reset.models, { fable: { used: 40, resetsAt } });
+  assert.equal(
+    selectAccount([reset], now, new Map(), undefined, "fable")?.id,
+    "a",
+  );
+  assert.deepEqual(
+    exhaustedModels(accounts[0], [scored(100), partial(40)], now),
+    [],
+  );
+  // A newer report that leaves the window out does not turn the scored one's unknown into no limit.
+  const lacking = partial(0);
+  lacking.report.windows = lacking.report.windows!.filter(
+    (window) => window.id === "weekly",
+  );
+  const [unknown] = mapReports(accounts, [scored(null), lacking], {}, now);
+  assert.deepEqual(unknown.models, { fable: null });
+  assert.deepEqual(rankAccounts([unknown], now, new Map(), "fable"), []);
+});
+
+test("소진된 창의 복귀 시각은 같은 시각 보고서 중 늦은 초기화를 쓰고 최신 보고서가 시각 없이 소진만 보이면 그 전 소진 보고서의 시각을 이어 쓰되 그 사이 여유나 지난 초기화가 보였으면 잇지 않는다", () => {
+  const hours = (count: number) => now + count * 3_600_000;
+  const entry = (
+    source: string,
+    ago: number,
+    windows: { id: string; usedPct: number | null; resetsAt: number | null }[],
+  ) =>
+    reportsSchema.parse([
+      {
+        ...report(),
+        id: `${source}:account.org-a`,
+        sourceId: source,
+        fetchedAt: new Date(now - ago).toISOString(),
+        report: {
+          status: "available",
+          windows: windows.map((window) => ({
+            ...window,
+            resetsAt:
+              window.resetsAt === null
+                ? null
+                : new Date(window.resetsAt).toISOString(),
+          })),
+        },
+      },
+    ])[0];
+  const weekly = (usedPct: number | null, resetsAt: number | null) => [
+    { id: "weekly", usedPct, resetsAt },
+  ];
+  // Two sources at the same time, both spent: the later reset, as before window merging.
+  const early = entry("claude", 0, weekly(100, hours(10)));
+  const late = entry("claude-windows", 0, weekly(100, hours(20)));
+  for (const order of [
+    [early, late],
+    [late, early],
+  ])
+    assert.equal(exhaustedUntil(accounts[0], order, now), hours(20));
+  // The newest report shows the limit spent without a reset: the older confirmed reset still holds.
+  const blind = entry("claude", 0, weekly(100, null));
+  const known = entry("claude-windows", 60_000, weekly(100, hours(30)));
+  for (const order of [
+    [blind, known],
+    [known, blind],
+  ])
+    assert.equal(exhaustedUntil(accounts[0], order, now), hours(30));
+  const fable = (usedPct: number, resetsAt: number | null) => [
+    { id: "weekly", usedPct: 20, resetsAt: hours(50) },
+    { id: "weekly_model_fable", usedPct, resetsAt },
+  ];
+  const models = [
+    entry("claude", 0, fable(100, null)),
+    entry("claude-windows", 60_000, fable(100, hours(40))),
+  ];
+  assert.deepEqual(exhaustedModels(accounts[0], models, now), [
+    { family: "fable", resetsAt: hours(40) },
+  ]);
+  assert.equal(exhaustedUntil(accounts[0], models, now, "fable"), hours(40));
+  // Room in between means the limit reset since, so that older reset belongs to an earlier one.
+  const between = entry("claude-profiles", 30_000, weekly(40, hours(5)));
+  assert.equal(exhaustedUntil(accounts[0], [blind, between, known], now), null);
+  // A spent window whose reset passed is most likely lifted; an older reset does not stretch it.
+  const passed = entry("claude", 0, weekly(100, hours(-1)));
+  assert.equal(exhaustedUntil(accounts[0], [passed, known], now), null);
+});
