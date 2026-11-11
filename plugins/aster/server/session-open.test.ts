@@ -63,6 +63,8 @@ async function openFixture(
           },
         ];
   if (usage === "partial-reset") {
+    // A report without a five-hour window is complete (that limit is gone), so the incomplete
+    // answer left is one missing its weekly window: it scores nothing and only the CLI can check it.
     reports[0].report.windows = [
       {
         id: "weekly",
@@ -78,9 +80,9 @@ async function openFixture(
         status: "available",
         windows: [
           {
-            id: "weekly",
+            id: "five_hour",
             usedPct: 0,
-            resetsAt: new Date(now + 86400000).toISOString(),
+            resetsAt: new Date(now + 3600000).toISOString(),
           },
         ],
       },
@@ -121,6 +123,8 @@ async function openFixture(
     reports: reports as typeof reports | null,
     settings: {} as Record<string, unknown>,
     snapshot: (_agentId: string): Record<string, unknown> => ({}),
+    /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
+    reloadRequest: {} as Record<string, unknown>,
     reload: async (..._args: unknown[]) => "",
     status: null as
       | null
@@ -274,7 +278,14 @@ async function openFixture(
   shared.reload = async (_command, args: any) => {
     assert.deepEqual(args.slice(0, 2), ["agent", "reload"]);
     const opened = await hook(
-      { request: { ...request, agentId: args[2], reason: "refresh" } },
+      {
+        request: {
+          ...request,
+          ...shared.reloadRequest,
+          agentId: args[2],
+          reason: "refresh",
+        },
+      },
       context,
     );
     if (opened) reloads.push(opened);
@@ -311,6 +322,9 @@ async function openFixture(
     },
     setSnapshot: (next: (agentId: string) => Record<string, unknown>) => {
       shared.snapshot = next;
+    },
+    setReloadRequest: (next: Record<string, unknown>) => {
+      shared.reloadRequest = next;
     },
     emit: async (name: string, payload: unknown) =>
       events.get(name)?.(payload, context),
@@ -398,19 +412,55 @@ test("사용량이 미확인인 기존 계정은 전체 소진으로 오인하�
   }
 });
 
-test("5시간 창이 없어도 기존 소진 대화를 주간 한도가 복구된 계정으로 재개한다", async () => {
+const logged = (fixture: { logs: string[] }, pattern: RegExp) =>
+  assert.ok(
+    fixture.logs.some((line) => pattern.test(line)),
+    `${pattern} not in\n${fixture.logs.join("\n")}`,
+  );
+const throughCli = /불완전하거나 만료된 사용량을 CLI 정상 확인 경로로 재개/;
+
+test("주간 창이 빠진 불완전한 사용량뿐인 계정으로도 기존 소진 대화를 CLI 정상 확인 경로로 재개한다", async () => {
   const fixture = await openFixture("partial-reset");
   try {
     const opened = await fixture.open();
     assert.equal(opened?.env.ASTER_ACCOUNT_ID, "recovered");
     assert.equal(opened?.env.CLAUDE_CONFIG_DIR, "/recovered");
     assert.equal(await fixture.open({ purpose: "history" }), undefined);
+    logged(fixture, throughCli);
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: 이전 계정 한도 소진\)/,
+    );
   } finally {
     fixture.dispose();
   }
 });
 
-test("실제 CLI 한도 응답 뒤 부분 사용량 대안으로 연결만 바꾸고 사용자 요청을 재전송하지 않는다", async () => {
+test("Claude가 5시간 한도를 없애 주간 창만 남은 보고서는 불완전한 응답이 아니라서 CLI 확인 경로 없이 점수로 기존 소진 대화를 주간 여유 계정에 재개한다", async () => {
+  const fixture = await openFixture("partial-reset");
+  try {
+    const weeklyOnly = structuredClone(fixture.initialReports);
+    weeklyOnly[1].report.windows = [
+      {
+        id: "weekly",
+        usedPct: 0,
+        resetsAt: new Date(Date.now() + 86400000).toISOString(),
+      },
+    ];
+    fixture.setReports(weeklyOnly);
+    const opened = await fixture.open();
+    assert.equal(opened?.env.ASTER_ACCOUNT_ID, "recovered");
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: 이전 계정 한도 소진\)/,
+    );
+    assert.ok(!fixture.logs.some((line) => throughCli.test(line)));
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("실제 CLI 한도 응답 뒤 주간 창이 빠진 부분 사용량 계정으로 CLI 확인 경로를 거쳐 연결만 바꾸고 사용자 요청을 재전송하지 않는다", async () => {
   const fixture = await openFixture("partial-reset");
   try {
     const seeded = structuredClone(fixture.initialReports[0]);
@@ -441,16 +491,11 @@ test("실제 CLI 한도 응답 뒤 부분 사용량 대안으로 연결만 바�
     assert.equal(fixture.reloads.length, 1);
     assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
     assert.equal(fixture.sent.length, 0);
+    logged(fixture, throughCli);
   } finally {
     fixture.dispose();
   }
 });
-
-const logged = (fixture: { logs: string[] }, pattern: RegExp) =>
-  assert.ok(
-    fixture.logs.some((line) => pattern.test(line)),
-    `${pattern} not in\n${fixture.logs.join("\n")}`,
-  );
 
 test("한도 안내를 받은 계정은 60초가 지나도 안내된 초기화 시각까지 다시 배정하지 않는다", async (t) => {
   const fixture = await openFixture("two-available");
@@ -654,21 +699,32 @@ test("전환 사이에 사용자가 새 메시지를 보냈거나 취소된 턴�
   }
 });
 
-test("부분 사용량의 기존 정상 계정은 유지하고 권한 대기 중인 대화는 전환하지 않는다", async () => {
+test("주간 창이 빠진 부분 사용량의 기존 정상 계정은 유지하고 권한 대기 중인 대화는 전환하지 않는다", async () => {
   const fixture = await openFixture("partial-reset");
   try {
     const healthy = structuredClone(fixture.initialReports);
-    healthy[0].report.windows[0].usedPct = 0;
+    healthy[0].report.windows = [
+      {
+        id: "five_hour",
+        usedPct: 0,
+        resetsAt: new Date(Date.now() + 3600000).toISOString(),
+      },
+    ];
     fixture.setReports(healthy);
     assert.equal(
       (await fixture.open())?.env.ASTER_ACCOUNT_ID,
       fixtureAccount.id,
     );
+    // Neither account scores, and an existing conversation is not moved through the CLI check.
+    assert.ok(
+      !fixture.logs.some((line) => /session fixture-agent:/.test(line)),
+      fixture.logs.join("\n"),
+    );
     const seeded = structuredClone(healthy[0]);
     seeded.report.windows.push({
-      id: "five_hour",
+      id: "weekly",
       usedPct: 0,
-      resetsAt: new Date(Date.now() + 3600000).toISOString(),
+      resetsAt: new Date(Date.now() + 86400000).toISOString(),
     });
     fixture.setReports([seeded]);
     await fixture.open();
@@ -855,6 +911,59 @@ test("모델을 밝히지 않은 한도 오류도 최신 사용량이 그 모델
     );
     await fixture.turn("sonnet-agent", "turn-2", "완료했습니다.");
     assert.equal(fixture.reloads.length, 1);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("기본 모델 세션(model=null)의 재개는 본체가 모델을 모르므로 실행 중 모델로 Fable 소진 계정을 피한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    fixture.setReports([fixture.initialReports[0]]);
+    assert.equal(
+      (await fixture.open(withModel({}, null)))?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    fixture.setReports(fixture.initialReports);
+    fixture.setSnapshot(() => ({
+      model: null,
+      runtimeInfo: { model: "claude-fable-5-2" },
+    }));
+    assert.equal(
+      (await fixture.open(withModel({}, null)))?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("기본 모델 세션은 본체가 reload 요청에 model=null을 넣어도 턴 종료가 고른 Fable 계열로 다시 열려 정상 턴마다 reload를 반복하지 않는다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    // No model in the session's config: the provider default runs, and only the runtime names it.
+    fixture.setSnapshot(() => ({
+      model: null,
+      runtimeInfo: { model: "claude-fable-5-2" },
+    }));
+    // The host's refresh request carries the stored model, which is null for the default.
+    fixture.setReloadRequest({ model: null });
+    // The session sits on A, opened before A's Fable limit showed spent.
+    const before = structuredClone(fixture.initialReports[0]);
+    before.report.windows[1].usedPct = 90;
+    fixture.setReports([before]);
+    assert.equal(
+      (await fixture.open(withModel({}, null)))?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    fixture.setReports(fixture.initialReports);
+    await fixture.turn("fixture-agent", "turn-1", "완료했습니다.");
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal((fixture.reloads[0] as { model?: string | null }).model, null);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    await fixture.turn("fixture-agent", "turn-2", "완료했습니다.");
+    assert.equal(fixture.reloads.length, 1);
+    logged(fixture, /여유 계정으로 연결 전환 fixture → recovered/);
   } finally {
     fixture.dispose();
   }
