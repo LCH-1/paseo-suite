@@ -325,6 +325,24 @@ test("모델 5시간 창도 그 모델 차단의 조기 초기화를 판단한�
   assert.equal(controller.isBlocked("a", start + 2 * minute, "fable"), false);
 });
 
+test("한도 안내 전에 조회된 사용량은 소진 뒤 여유를 보여도 그 안내의 차단을 풀지 않고 안내 뒤의 여유만 조기 초기화로 본다", () => {
+  const controller = new Controller();
+  const resetsAt = start + 3 * 24 * 60 * minute;
+  controller.limitAccount("a", start, { resetsAt });
+  const at = (fetchedAt: number, weekly: number): AccountUsage => ({
+    ...usage("a", fetchedAt),
+    fiveHour: null,
+    weekly: { used: weekly, resetsAt },
+  });
+  // Both lookups are older than the notice, which came after the room the second one saw.
+  controller.choose("s", [at(start - 2 * minute, 100)], start);
+  controller.choose("s", [at(start - minute, 0)], start + minute);
+  assert.equal(controller.isBlocked("a", start + minute), true);
+  const later = start + 10 * minute;
+  assert.equal(controller.choose("s", [at(later, 0)], later)?.id, "a");
+  assert.equal(controller.isBlocked("a", later), false);
+});
+
 test("현재 계정 유지를 끄면 10분 유지와 20% 우위 없이 가장 여유로운 계정을 고른다", () => {
   const controller = new Controller();
   controller.bind("s", "a", start);

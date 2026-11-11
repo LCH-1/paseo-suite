@@ -126,6 +126,8 @@ async function openFixture(
     /** How many times an agent was looked up, and what holds a lookup's answer back. */
     lookups: 0,
     gate: null as null | ((agentId: string) => Promise<void> | undefined),
+    /** What holds a usage lookup's answer back. */
+    usageGate: null as null | (() => Promise<void> | undefined),
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
     reloadRequest: {} as Record<string, unknown>,
     reload: async (..._args: unknown[]) => "",
@@ -146,7 +148,7 @@ async function openFixture(
       export const paseoHome="/fixture", stateDirectory="/fixture";
       export async function discoverAccounts(){return ${JSON.stringify(accounts)}}
       export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{},...globalThis[${JSON.stringify(key)}].settings}}
-      export class UsageReader{async read(){const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){} dispose(){}}
+      export class UsageReader{async read(){await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){} dispose(){}}
     `,
     ],
     [
@@ -336,6 +338,9 @@ async function openFixture(
     lookups: () => shared.lookups,
     setGate: (next: typeof shared.gate) => {
       shared.gate = next;
+    },
+    setUsageGate: (next: typeof shared.usageGate) => {
+      shared.usageGate = next;
     },
     emit: async (name: string, payload: unknown) =>
       events.get(name)?.(payload, context),
@@ -1576,6 +1581,208 @@ test("사용량 조회가 실패한 모델 변경 다시 열기도 원래 계정
     t.mock.timers.tick(2_000);
     assert.equal((await resumed)?.env.ASTER_ACCOUNT_ID, "recovered");
     assert.equal(fixture.lookups(), 1);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+/** Holds the next usage lookups until `release`; `reached` says one of them is waiting. */
+function holdUsage(fixture: {
+  setUsageGate: (gate: () => Promise<void>) => void;
+}) {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const state = { reached: false, release: () => release() };
+  fixture.setUsageGate(() => {
+    state.reached = true;
+    return held;
+  });
+  return state;
+}
+const settle = async () => {
+  for (let turn = 0; turn < 5; turn++)
+    await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("모델 변경 다시 열기에서 계정을 고르는 동안 턴이 시작되면 본체가 다시 열기를 취소하므로 새 계정에 바인딩하지 않아 그 턴의 한도 안내는 실제 계정을 막고 다른 계정은 막지 않는다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    // A has more weekly room for the Sonnet conversation; B has the room for Fable.
+    reports[0].report.windows[0].usedPct = 10;
+    reports[0].report.windows[1].usedPct = 80;
+    reports[1].report.windows[0].usedPct = 50;
+    reports[1].report.windows[1].usedPct = 0;
+    fixture.setReports(reports);
+    fixture.setSnapshot(() => ({ model: "claude-sonnet-5" }));
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    // The usage lookup is slow, and a turn starts on the Sonnet session on A meanwhile.
+    const usage = holdUsage(fixture);
+    const reopened = fixture.open(
+      changeModel("claude-sonnet-5", "claude-fable-5-2"),
+    );
+    await settle();
+    assert.ok(usage.reached);
+    const agent = { id: "fixture-agent", provider: "claude" };
+    await fixture.emit("agent.turn_started", { agent, turnId: "raced" });
+    fixture.setUsageGate(null);
+    usage.release();
+    // Should the host open it after all, the session stays on A, where its binding says it is.
+    assert.equal((await reopened)?.env.ASTER_ACCOUNT_ID, "fixture");
+    logged(fixture, /계정 선택 중 턴 시작, .* recovered 배정 보류/);
+    // That turn ran on A and hits A's limit: A is blocked, not B, and the session moves to B.
+    await fixture.emit("agent.turn_ended", {
+      agent,
+      turnId: "raced",
+      outcome: { kind: "completed" },
+      timeline: [
+        { type: "user_message", text: "요청" },
+        {
+          type: "assistant_message",
+          text: `You've hit your limit · resets ${resetsIn(2 * 3_600_000)} (Asia/Seoul)`,
+        },
+      ],
+    });
+    logged(fixture, /account fixture: 한도 차단 .*안내된 초기화 시각/);
+    assert.ok(
+      !fixture.logs.some((line) => /account recovered: 한도 차단/.test(line)),
+    );
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    assert.equal(
+      (
+        await fixture.open(
+          withModel(
+            { agentId: "sonnet-agent", reason: "create", env: {} },
+            "claude-sonnet-5",
+          ),
+        )
+      )?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("모델 변경 다시 열기 중에 시작했다가 끝난 턴은 본체의 다시 열기를 막지 않으므로 새 계정에 그대로 바인딩한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    reports[0].report.windows[0].usedPct = 10;
+    reports[0].report.windows[1].usedPct = 80;
+    reports[1].report.windows[0].usedPct = 50;
+    reports[1].report.windows[1].usedPct = 0;
+    fixture.setReports(reports);
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    const usage = holdUsage(fixture);
+    const reopened = fixture.open(
+      changeModel("claude-sonnet-5", "claude-fable-5-2"),
+    );
+    await settle();
+    assert.ok(usage.reached);
+    const agent = { id: "fixture-agent", provider: "claude" };
+    await fixture.emit("agent.turn_started", { agent, turnId: "short" });
+    await fixture.emit("agent.turn_ended", {
+      agent,
+      turnId: "short",
+      outcome: { kind: "canceled", reason: "interrupted" },
+      timeline: [],
+    });
+    fixture.setUsageGate(null);
+    usage.release();
+    assert.equal((await reopened)?.env.ASTER_ACCOUNT_ID, "recovered");
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: Fable 모델 변경이 계정 한도로 거절됨\)/,
+    );
+    // The session is bound to B now: B's limit notice blocks B.
+    await fixture.turn(
+      "fixture-agent",
+      "turn-2",
+      `You've hit your limit · resets ${resetsIn(2 * 3_600_000)} (Asia/Seoul)`,
+    );
+    logged(fixture, /account recovered: 한도 차단 .*안내된 초기화 시각/);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("사용량 조회가 실패한 모델 변경 다시 열기 중에 턴이 시작되면 새 모델을 세션 모델로 기억하지 않는다", async (t) => {
+  const fixture = await openFixture("fable");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    // A's Fable limit is spent, so only the session's model tells A and B apart.
+    reports[0].report.windows[0].usedPct = 10;
+    reports[0].report.windows[1].usedPct = 100;
+    reports[1].report.windows[0].usedPct = 60;
+    reports[1].report.windows[1].usedPct = 0;
+    fixture.setReports(reports);
+    assert.equal(
+      (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    fixture.setReports(null);
+    const usage = holdUsage(fixture);
+    const reopened = fixture.open(
+      changeModel("claude-sonnet-5", "claude-fable-5-2"),
+    );
+    await settle();
+    assert.ok(usage.reached);
+    const agent = { id: "fixture-agent", provider: "claude" };
+    await fixture.emit("agent.turn_started", { agent, turnId: "raced" });
+    fixture.setUsageGate(null);
+    usage.release();
+    assert.equal((await reopened)?.env.ASTER_ACCOUNT_ID, "fixture");
+    await fixture.emit("agent.turn_ended", {
+      agent,
+      turnId: "raced",
+      outcome: { kind: "canceled", reason: "interrupted" },
+      timeline: [],
+    });
+    // The session still runs Sonnet; with the host slow to say so, the remembered model decides.
+    fixture.setReports(reports);
+    fixture.setGate(() => new Promise(() => {}));
+    const resumed = fixture.open();
+    await settle();
+    t.mock.timers.tick(2_000);
+    assert.equal((await resumed)?.env.ASTER_ACCOUNT_ID, "fixture");
+    assert.equal(fixture.lookups(), 1);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("modelChange가 없는 세션 열기는 턴이 진행 중으로 보여도 기존처럼 고른 계정에 바인딩한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    fixture.setReports([fixture.initialReports[0]]);
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    fixture.setReports(fixture.initialReports);
+    await fixture.emit("agent.turn_started", {
+      agent: { id: "fixture-agent", provider: "claude" },
+      turnId: "running",
+    });
+    // An older host reopens the session on Fable without saying it is a model change.
+    assert.equal(
+      (await fixture.open(withModel({ reason: "refresh" }, "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: 이전 계정 Fable 한도 소진\)/,
+    );
   } finally {
     fixture.dispose();
   }
