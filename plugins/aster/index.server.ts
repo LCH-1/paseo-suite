@@ -17,9 +17,11 @@ import {
   mapReports,
   paseoHome,
   readSettings,
+  spentAccounts,
   stateDirectory,
   UsageReader,
   type Account,
+  type SpentAccount,
 } from "./server/accounts";
 import { join } from "node:path";
 import { accountKey, RoutingCache } from "./server/routing-cache";
@@ -55,6 +57,25 @@ class AccountUnavailable extends Error {}
 
 const familyName = (family: string) =>
   family.charAt(0).toUpperCase() + family.slice(1);
+
+/**
+ * How a refusal names the limits that hold every account: the session's model limit, the accounts'
+ * own limits by their window, or both when the accounts are held by different ones.
+ */
+function spentLimitsName(spent: SpentAccount[], family: string | null) {
+  const own = [
+    spent.some((account) => account.fiveHour) ? "5시간" : null,
+    spent.some((account) => account.weekly) ? "주간" : null,
+  ].filter((name) => name !== null);
+  return [
+    family && spent.some((account) => account.model)
+      ? `${familyName(family)} 한도`
+      : null,
+    own.length ? `사용 한도(${own.join("·")})` : null,
+  ]
+    .filter((name) => name !== null)
+    .join(" 또는 ");
+}
 
 /** The lookup's answer, "failed", or "late" when it does not answer within `ms`. */
 function settleWithin<T>(task: Promise<T>, ms: number) {
@@ -489,18 +510,34 @@ export default function contribute(server: PluginServerContext) {
               return preserved;
             }
             const readings = mapReports(eligible, reports, settings.capacities);
-            const unavailableMessage = () => {
-              const resetAt = exhaustedAccountsResetAt(eligible, reports);
-              if (resetAt !== null)
-                return `Aster: 모든 Claude 계정의 사용 한도가 소진되었습니다. 가장 빠른 초기화는 ${clock(resetAt)}(한국시간)입니다. 초기화 후 자동으로 다시 선택됩니다.`;
-              return readings.length === 0
-                ? NO_USAGE_READINGS
-                : NO_SELECTABLE_ACCOUNT;
+            const nothingSelectable = () =>
+              readings.length === 0 ? NO_USAGE_READINGS : NO_SELECTABLE_ACCOUNT;
+            /**
+             * The refusal when usage confirms every account spent for a session on `family`, else
+             * null: the limits that hold the accounts, when the first account returns, and what
+             * to do about it. A refused model change needs no advice about its model: the host
+             * keeps the session on the model it ran.
+             */
+            const spentRefusal = (family: string | null, changing = false) => {
+              const spent =
+                spentAccounts(eligible, reports, Date.now(), family) ??
+                (family ? spentAccounts(eligible, reports) : null);
+              if (!spent) return null;
+              const resetAt = Math.min(
+                ...spent.map((account) => account.resetAt),
+              );
+              const notice = `Aster: 모든 Claude 계정의 ${spentLimitsName(spent, family)}가 소진되었습니다. 가장 빠른 초기화는 ${clock(resetAt)}(한국시간)입니다.`;
+              if (!spent.some((account) => account.model))
+                return notice + " 초기화 후 자동으로 다시 선택됩니다.";
+              if (changing) return notice;
+              // An account held by the model's limit alone opens another model right away.
+              return (
+                notice +
+                (spent.some((account) => !account.fiveHour && !account.weekly)
+                  ? " 다른 모델을 선택하거나 초기화 후 다시 시도하세요."
+                  : " 초기화 후 다시 시도하세요.")
+              );
             };
-            const modelSpentMessage = (family: string, resetAt: number) =>
-              `Aster: 모든 Claude 계정의 ${familyName(family)} 한도가 소진되었습니다. 가장 빠른 초기화는 ${clock(resetAt)}(한국시간)입니다.`;
-            const pickAnotherModel =
-              " 다른 모델을 선택하거나 초기화 후 다시 시도하세요.";
             if (preflight) {
               // A block only ranks accounts, so a blocked one still counts as startable.
               if (
@@ -524,16 +561,7 @@ export default function contribute(server: PluginServerContext) {
                 )
               )
                 return;
-              const modelResetAt = named
-                ? exhaustedAccountsResetAt(eligible, reports, Date.now(), named)
-                : null;
-              throw new Error(
-                named &&
-                modelResetAt !== null &&
-                exhaustedAccountsResetAt(eligible, reports) === null
-                  ? modelSpentMessage(named, modelResetAt) + pickAnotherModel
-                  : unavailableMessage(),
-              );
+              throw new Error(spentRefusal(named) ?? nothingSelectable());
             }
             let family: string | null;
             if (change) family = changedTo;
@@ -658,45 +686,25 @@ export default function contribute(server: PluginServerContext) {
                         : "여유 계정 우선";
             signal.throwIfAborted();
             if (!selectedId) {
-              // A refused model change is refused again only when usage confirms every account
-              // spent for the new model; the host then keeps the session as it was.
-              const changeResetAt = change
-                ? exhaustedAccountsResetAt(
-                    eligible,
-                    reports,
-                    Date.now(),
-                    family,
-                  )
-                : null;
-              if (change && changeResetAt !== null)
-                throw new AccountUnavailable(
-                  family
-                    ? modelSpentMessage(family, changeResetAt)
-                    : unavailableMessage(),
-                );
-              if (exhaustedAccountsResetAt(eligible, reports) !== null)
-                throw new AccountUnavailable(unavailableMessage());
-              // Every account spent only this model's limit: the accounts still serve other models,
-              // so an existing conversation keeps opening and a new one is told what to change.
-              const modelResetAt = family
-                ? exhaustedAccountsResetAt(
-                    eligible,
-                    reports,
-                    Date.now(),
-                    family,
-                  )
-                : null;
-              if (
-                family &&
-                modelResetAt !== null &&
-                request.reason === "create"
-              )
-                throw new AccountUnavailable(
-                  modelSpentMessage(family, modelResetAt) + pickAnotherModel,
-                );
+              // A refused model change is refused again, and a new conversation is refused, when
+              // usage confirms every account spent for the model asked for; the host keeps a
+              // changed session as it was. An existing conversation is refused only when no account
+              // has room of its own: held by its model's limit alone it keeps opening, so its model
+              // can still be changed.
+              const refusal = spentRefusal(
+                change || request.reason === "create" ? family : null,
+                change !== null,
+              );
+              if (refusal) throw new AccountUnavailable(refusal);
               if (request.reason !== "create") {
                 console.warn(
-                  modelResetAt !== null
+                  family &&
+                    exhaustedAccountsResetAt(
+                      eligible,
+                      reports,
+                      Date.now(),
+                      family,
+                    ) !== null
                     ? `[aster] session ${request.agentId}: 모든 계정의 ${family} 한도 소진, 기존 환경으로 재개`
                     : `[aster] session ${request.agentId}: 선택 가능한 사용량 정보 없음, 기존 환경으로 재개`,
                 );
@@ -704,7 +712,7 @@ export default function contribute(server: PluginServerContext) {
                 remember(family);
                 return preserved;
               }
-              throw new Error(unavailableMessage());
+              throw new Error(nothingSelectable());
             }
             const account = accounts.find((entry) => entry.id === selectedId)!;
             if (overtaken()) {

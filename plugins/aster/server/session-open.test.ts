@@ -392,10 +392,13 @@ function resetsIn(milliseconds: number) {
 test("확인된 전체 소진은 기존 Claude interactive 재개도 즉시 거절하고 history는 보존한다", async () => {
   const fixture = await openFixture("exhausted");
   try {
-    await assert.rejects(fixture.open(), /모든 Claude 계정의 사용 한도가 소진/);
+    await assert.rejects(
+      fixture.open(),
+      /모든 Claude 계정의 사용 한도\(5시간·주간\)가 소진/,
+    );
     await assert.rejects(
       fixture.open({ reason: "refresh" }),
-      /모든 Claude 계정의 사용 한도가 소진/,
+      /모든 Claude 계정의 사용 한도\(5시간·주간\)가 소진/,
     );
     assert.equal(await fixture.open({ purpose: "history" }), undefined);
   } finally {
@@ -1060,7 +1063,8 @@ test("모든 계정에서 새 모델 한도나 계정 전체 한도가 사용량
         ?.env.ASTER_ACCOUNT_ID,
       "fixture",
     );
-    // One account spent its Fable limit, the other its weekly one: the earliest return is named.
+    // One account spent its Fable limit, the other its weekly one: both are named, with the
+    // earliest return.
     const mixed = structuredClone(fixture.initialReports);
     const soon = new Date(Date.now() + 2 * 86_400_000).toISOString();
     mixed[1].report.windows[0] = { id: "weekly", usedPct: 100, resetsAt: soon };
@@ -1068,13 +1072,173 @@ test("모든 계정에서 새 모델 한도나 계정 전체 한도가 사용량
     await assert.rejects(
       fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")),
       {
-        message: `Aster: 모든 Claude 계정의 Fable 한도가 소진되었습니다. 가장 빠른 초기화는 ${koreanClock(soon)}(한국시간)입니다.`,
+        message: `Aster: 모든 Claude 계정의 Fable 한도 또는 사용 한도(주간)가 소진되었습니다. 가장 빠른 초기화는 ${koreanClock(soon)}(한국시간)입니다.`,
       },
     );
     logged(
       fixture,
       /세션 열기 거절 \(refresh\) · Aster: 모든 Claude 계정의 Fable 한도가 소진/,
     );
+    logged(
+      fixture,
+      /세션 열기 거절 \(refresh\) · Aster: 모든 Claude 계정의 Fable 한도 또는 사용 한도\(주간\)가 소진/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("소진 거절 문구는 계정을 막는 한도를 모델·5시간·주간으로 구분하고 계정마다 막는 한도가 모두 풀리는 시각 중 가장 이른 시각을 두 자리 시·초 없이 알린다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const [in2h, in3h, in30h, in50h, in90h, in100h, in140h] = [
+      2, 3, 30, 50, 90, 100, 140,
+    ].map((hours) => new Date(Date.now() + hours * 3_600_000).toISOString());
+    const window = (id: string, usedPct: number, resetsAt: string) => ({
+      id,
+      usedPct,
+      resetsAt,
+    });
+    /** Usage as account A and account B report it. */
+    const use = (...windows: ReturnType<typeof window>[][]) =>
+      fixture.setReports(
+        fixture.initialReports.map((entry, index) => ({
+          ...structuredClone(entry),
+          report: { status: "available", windows: windows[index] },
+        })),
+      );
+    let created = 0;
+    const create = (model: string | null, preflight = false) =>
+      fixture.open(
+        withModel(
+          {
+            agentId: `new-${++created}`,
+            reason: "create",
+            env: {},
+            ...(preflight ? { preflight } : {}),
+          } as Partial<PluginSessionOpenRequest>,
+          model,
+        ),
+      );
+    const change = () =>
+      fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2"));
+    const told = (limits: string, resetsAt: string, advice = "") => ({
+      message: `Aster: 모든 Claude 계정의 ${limits}가 소진되었습니다. 가장 빠른 초기화는 ${koreanClock(resetsAt)}(한국시간)입니다.${advice}`,
+    });
+    const returnsItself = " 초기화 후 자동으로 다시 선택됩니다.";
+    const otherModel = " 다른 모델을 선택하거나 초기화 후 다시 시도하세요.";
+    const afterReset = " 초기화 후 다시 시도하세요.";
+    assert.match(
+      told("Fable 한도", in90h).message,
+      /가장 빠른 초기화는 \d{1,2}\. \d{1,2}\. 오[전후] \d{2}:\d{2}\(한국시간\)입니다\.$/,
+    );
+
+    // The Fable limit alone holds both accounts: the first of the two to lift is named, and
+    // another model still opens.
+    use(
+      [window("weekly", 59, in100h), window("weekly_model_fable", 100, in140h)],
+      [window("weekly", 10, in100h), window("weekly_model_fable", 100, in90h)],
+    );
+    await assert.rejects(
+      create("claude-fable-5-2"),
+      told("Fable 한도", in90h, otherModel),
+    );
+    await assert.rejects(
+      create("claude-fable-5-2", true),
+      told("Fable 한도", in90h, otherModel),
+    );
+    await assert.rejects(change(), told("Fable 한도", in90h));
+    assert.ok(await create("claude-sonnet-5"));
+
+    // The five-hour limit alone: a model change is not told its model is spent.
+    use(
+      [window("five_hour", 100, in3h), window("weekly", 40, in100h)],
+      [window("five_hour", 100, in2h), window("weekly", 50, in100h)],
+    );
+    for (const refused of [() => create(null), change, () => fixture.open()])
+      await assert.rejects(
+        refused,
+        told("사용 한도(5시간)", in2h, returnsItself),
+      );
+
+    // The weekly limit alone, on accounts that have no five-hour limit.
+    use([window("weekly", 100, in50h)], [window("weekly", 100, in30h)]);
+    for (const refused of [
+      () => create(null),
+      () => create("claude-fable-5-2"),
+      change,
+    ])
+      await assert.rejects(
+        refused,
+        told("사용 한도(주간)", in30h, returnsItself),
+      );
+
+    // One account is held by its five-hour limit, the other by its weekly one.
+    use(
+      [window("five_hour", 100, in2h), window("weekly", 40, in100h)],
+      [window("weekly", 100, in30h)],
+    );
+    await assert.rejects(
+      create(null),
+      told("사용 한도(5시간·주간)", in2h, returnsItself),
+    );
+
+    // An account returns when the last of its spent limits lifts: A only with its weekly limit,
+    // after B.
+    use(
+      [window("five_hour", 100, in2h), window("weekly", 100, in50h)],
+      [window("weekly", 100, in30h)],
+    );
+    await assert.rejects(
+      create(null),
+      told("사용 한도(5시간·주간)", in30h, returnsItself),
+    );
+
+    // A is held by its Fable limit, B by its five-hour limit: both are named, with B's return.
+    use(
+      [window("weekly", 59, in100h), window("weekly_model_fable", 100, in140h)],
+      [
+        window("five_hour", 100, in3h),
+        window("weekly", 10, in100h),
+        window("weekly_model_fable", 0, in140h),
+      ],
+    );
+    await assert.rejects(
+      change(),
+      told("Fable 한도 또는 사용 한도(5시간)", in3h),
+    );
+    await assert.rejects(
+      create("claude-fable-5-2"),
+      told("Fable 한도 또는 사용 한도(5시간)", in3h, otherModel),
+    );
+    assert.equal(
+      (await create("claude-sonnet-5"))?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+
+    // Every account's weekly limit is spent and A's Fable limit too. A Fable session waits for
+    // B's weekly limit, as A's Fable limit lifts later still; nothing opens another model now.
+    // A session of an unknown model, and an existing conversation, wait for A's weekly limit.
+    use(
+      [window("weekly", 100, in30h), window("weekly_model_fable", 100, in140h)],
+      [window("weekly", 100, in50h), window("weekly_model_fable", 0, in140h)],
+    );
+    await assert.rejects(
+      create("claude-fable-5-2"),
+      told("Fable 한도 또는 사용 한도(주간)", in50h, afterReset),
+    );
+    await assert.rejects(
+      change(),
+      told("Fable 한도 또는 사용 한도(주간)", in50h),
+    );
+    for (const refused of [
+      () => create(null),
+      () => fixture.open(withModel({}, "claude-fable-5-2")),
+    ])
+      await assert.rejects(
+        refused,
+        told("사용 한도(주간)", in30h, returnsItself),
+      );
   } finally {
     fixture.dispose();
   }
@@ -1782,6 +1946,106 @@ test("modelChange가 없는 세션 열기는 턴이 진행 중으로 보여도 �
     logged(
       fixture,
       /session fixture-agent: recovered \(이전 fixture, 사유: 이전 계정 Fable 한도 소진\)/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+/**
+ * A Sonnet conversation on A whose change to Fable the hook answered with B, after which a turn
+ * started before the host reopened the session: the host gave the reopen up, so the session kept
+ * running Sonnet on A, and nothing tells Aster. The turn then ended normally.
+ */
+async function reopenGivenUpAfterHook() {
+  const fixture = await openFixture("fable");
+  const reports = structuredClone(fixture.initialReports);
+  // A has more weekly room for the Sonnet conversation; B has the room for Fable.
+  reports[0].report.windows[0].usedPct = 10;
+  reports[0].report.windows[1].usedPct = 80;
+  reports[1].report.windows[0].usedPct = 50;
+  reports[1].report.windows[1].usedPct = 0;
+  fixture.setReports(reports);
+  fixture.setSnapshot(() => ({ model: "claude-sonnet-5" }));
+  assert.equal(
+    (await fixture.open(withModel({}, "claude-sonnet-5")))?.env
+      .ASTER_ACCOUNT_ID,
+    "fixture",
+  );
+  assert.equal(
+    (await fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")))
+      ?.env.ASTER_ACCOUNT_ID,
+    "recovered",
+  );
+  await fixture.turn("fixture-agent", "raced", "완료했습니다.");
+  // Aster takes the session to sit on B already, so the turn's end reloads nothing.
+  assert.equal(fixture.reloads.length, 0);
+  return fixture;
+}
+
+test("본체가 훅 뒤에 시작된 턴 때문에 모델 변경 다시 열기를 취소해도 다음 세션 열기는 바인딩한 계정으로 열려 실제 계정과 다시 맞는다", async () => {
+  const fixture = await reopenGivenUpAfterHook();
+  try {
+    // Whatever opens the session next opens it where the binding says, although A scores higher
+    // for Sonnet: from then on the session runs on the account Aster takes it to run on.
+    for (const reason of ["refresh", "resume"] as const)
+      assert.equal(
+        (await fixture.open(withModel({ reason }, "claude-sonnet-5")))?.env
+          .ASTER_ACCOUNT_ID,
+        "recovered",
+      );
+    // So a limit notice blocks the account the turn really ran on, and the session moves off it.
+    await fixture.turn(
+      "fixture-agent",
+      "turn-2",
+      `You've hit your limit · resets ${resetsIn(2 * 3_600_000)} (Asia/Seoul)`,
+    );
+    logged(fixture, /account recovered: 한도 차단 .*안내된 초기화 시각/);
+    assert.ok(
+      !fixture.logs.some((line) => /account fixture: 한도 차단/.test(line)),
+    );
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "fixture");
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("본체가 취소한 모델 변경을 다시 시도하면 바인딩한 계정으로 열고 그 계정에 잘못 건 모델 차단은 그 모델의 정상 턴 뒤에 풀려 새 대화도 다시 받는다", async () => {
+  const fixture = await reopenGivenUpAfterHook();
+  try {
+    // The session still runs on A, which refuses Fable again. Aster takes B for the account that
+    // refused and blocks it for Fable, yet B is all that is left to open on: the session lands
+    // where the first answer sent it, and the CLI checks the limit there.
+    assert.equal(
+      (await fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(모델 변경을 거절한 계정뿐이라 CLI 확인 경로\)/,
+    );
+    // This time the host reopens it. A Fable turn that ends normally on B lifts the block.
+    fixture.setSnapshot(() => ({ model: "claude-fable-5-2" }));
+    await fixture.turn("fixture-agent", "turn-2", "완료했습니다.");
+    logged(fixture, /account recovered: 정상 응답 확인, 한도 차단 해제/);
+    assert.equal(fixture.reloads.length, 0);
+    assert.equal(
+      (
+        await fixture.open(
+          withModel(
+            { agentId: "fable-agent", reason: "create", env: {} },
+            "claude-fable-5-2",
+          ),
+        )
+      )?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    assert.ok(
+      !fixture.logs.some((line) =>
+        /session fable-agent: .*CLI 확인 경로/.test(line),
+      ),
     );
   } finally {
     fixture.dispose();

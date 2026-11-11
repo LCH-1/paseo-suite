@@ -16,6 +16,7 @@ import {
   windowLimit,
   exhaustedModels,
   exhaustedSurfaces,
+  spentAccounts,
   type Account,
 } from "./accounts.ts";
 import { createHash } from "node:crypto";
@@ -1710,6 +1711,95 @@ test("5시간만 소진되면 5시간 초기화까지, 주간만 소진되면 �
   const readings = mapReports(accounts, [fable], {}, now);
   assert.equal(rankAccounts(readings, now).length, 1);
   assert.equal(rankAccounts(readings, now, new Map(), "fable").length, 0);
+});
+
+test("모든 계정이 소진이면 계정마다 막는 한도를 모델·5시간·주간으로 나누고 그 한도들이 모두 풀리는 시각을 그 계정의 복귀 시각으로 본다", () => {
+  const other: Account = {
+    id: "b",
+    home: "/fixture/b",
+    email: "b@example.test",
+    identity: "org-b|b@example.test",
+  };
+  const both = [...accounts, other];
+  const hours = (count: number) => now + count * 3_600_000;
+  const window = (id: string, usedPct: number, resetsAt: number | null) => ({
+    id,
+    usedPct,
+    resetsAt: resetsAt === null ? null : new Date(resetsAt).toISOString(),
+  });
+  const entry = (
+    windows: ReturnType<typeof window>[],
+    label?: string,
+    id?: string,
+  ) =>
+    reportsSchema.parse([
+      { ...report(label, id), report: { status: "available", windows } },
+    ])[0];
+  // A spent its five-hour and Fable limits and has weekly room; B spent its weekly limit.
+  const first = entry([
+    window("five_hour", 100, hours(2)),
+    window("weekly", 40, hours(100)),
+    window("weekly_model_fable", 100, hours(140)),
+  ]);
+  const second = entry(
+    [
+      window("weekly", 100, hours(30)),
+      window("weekly_model_fable", 0, hours(140)),
+    ],
+    other.email!,
+    "claude:account.org-b",
+  );
+  const heldByOwn = [
+    { resetAt: hours(2), model: false, fiveHour: true, weekly: false },
+    { resetAt: hours(30), model: false, fiveHour: false, weekly: true },
+  ];
+  // A Fable session waits for A's Fable limit, so B returns first.
+  assert.deepEqual(spentAccounts(both, [first, second], now, "fable"), [
+    { resetAt: hours(140), model: true, fiveHour: true, weekly: false },
+    heldByOwn[1],
+  ]);
+  assert.equal(
+    exhaustedAccountsResetAt(both, [first, second], now, "fable"),
+    hours(30),
+  );
+  // Another model's session, or one of an unknown model, is held by the accounts' own limits only.
+  assert.deepEqual(spentAccounts(both, [first, second], now), heldByOwn);
+  assert.deepEqual(
+    spentAccounts(both, [first, second], now, "sonnet"),
+    heldByOwn,
+  );
+  assert.equal(exhaustedAccountsResetAt(both, [first, second], now), hours(2));
+  // The Claude Code surface's limit is the account's own, by its window; a model's five-hour
+  // limit is the model's.
+  const scoped = entry([
+    window("weekly", 10, hours(100)),
+    window("weekly_surface_code", 100, hours(50)),
+    window("five_hour_model_fable", 100, hours(3)),
+  ]);
+  assert.deepEqual(spentAccounts(accounts, [scoped], now, "fable"), [
+    { resetAt: hours(50), model: true, fiveHour: false, weekly: true },
+  ]);
+  assert.deepEqual(spentAccounts(accounts, [scoped], now), [
+    { resetAt: hours(50), model: false, fiveHour: false, weekly: true },
+  ]);
+  // One account with room, or a spent limit that names no reset ahead, confirms nothing.
+  const roomy = entry(
+    [window("weekly", 99, hours(30))],
+    other.email!,
+    "claude:account.org-b",
+  );
+  assert.equal(spentAccounts(both, [first, roomy], now, "fable"), null);
+  for (const resetsAt of [null, now - 1]) {
+    const unknown = entry([
+      window("weekly", 100, hours(30)),
+      window("weekly_model_fable", 100, resetsAt),
+    ]);
+    assert.equal(spentAccounts(accounts, [unknown], now, "fable"), null);
+    assert.deepEqual(spentAccounts(accounts, [unknown], now), [
+      { resetAt: hours(30), model: false, fiveHour: false, weekly: true },
+    ]);
+  }
+  assert.equal(spentAccounts([], [], now), null);
 });
 
 test("세션 모델 창의 값이 비었거나 초기화가 지났거나 시각 없이 사용 중이면 그 모델 세션은 점수 대신 CLI 확인 후보가 되고 다른 모델은 점수로 고른다", () => {
