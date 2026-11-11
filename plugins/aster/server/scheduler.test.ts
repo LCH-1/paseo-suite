@@ -131,3 +131,52 @@ test("세션 종료 시 부하·권한·바인딩을 해제한다", () => {
   assert.equal(controller.busy.size, 0);
   assert.equal(controller.pendingPermission.size, 0);
 });
+
+/** An account the way Claude reports it since the five-hour limit went away. */
+function weeklyOnly(id: string, weeklyUsed: number, fable?: number | null): AccountUsage {
+  return {
+    id,
+    fiveHour: null,
+    weekly: { used: weeklyUsed, resetsAt: now + 100 * hour },
+    models: fable === undefined ? {} : { fable: fable === null ? null : { used: fable, resetsAt: now + 100 * hour } },
+    fetchedAt: now,
+    capacity: 1,
+  };
+}
+
+test("5시간 한도가 없는 계정은 주간 잔여만으로 점수를 매긴다", () => {
+  assert.deepEqual(rankAccounts([weeklyOnly("a", 60), weeklyOnly("b", 10)], now).map((entry) => entry.account.id), ["b", "a"]);
+  // A spent weekly limit still rules the account out.
+  assert.equal(selectAccount([weeklyOnly("a", 100)], now), null);
+  // Without a five-hour limit nothing caps the weekly rate.
+  const limited = { ...weeklyOnly("c", 10), fiveHour: { used: 99, resetsAt: now + hour } };
+  assert.equal(selectAccount([limited, weeklyOnly("d", 10)], now)?.id, "d");
+});
+
+test("세션 모델의 주간 한도가 소진된 계정은 그 세션 후보에서 빠지고 다른 모델과 모델 미상 세션에는 남는다", () => {
+  const accounts = [weeklyOnly("a", 0, 100), weeklyOnly("b", 50, 0)];
+  assert.equal(selectAccount(accounts, now, new Map(), undefined, "fable")?.id, "b");
+  assert.equal(selectAccount(accounts, now, new Map(), undefined, "sonnet")?.id, "a");
+  assert.equal(selectAccount(accounts, now)?.id, "a");
+  assert.equal(selectAccount([weeklyOnly("a", 0, 100)], now, new Map(), undefined, "fable"), null);
+});
+
+test("점수는 전체 주간과 모델 주간 여유율 중 작은 값으로 계산한다", () => {
+  const [a] = rankAccounts([weeklyOnly("a", 10, 80)], now, new Map(), "fable");
+  assert.equal(a.score, Math.min(a.weeklyRate, a.modelRate));
+  assert.equal(a.score, 20 / 100);
+  assert.equal(selectAccount([weeklyOnly("a", 10, 80), weeklyOnly("b", 40, 40)], now, new Map(), undefined, "fable")?.id, "b");
+});
+
+test("모델 창 값이 비어 있으면 그 모델 세션에서만 점수를 만들지 않는다", () => {
+  assert.deepEqual(rankAccounts([weeklyOnly("a", 10, null)], now, new Map(), "fable"), []);
+  assert.equal(rankAccounts([weeklyOnly("a", 10, null)], now, new Map(), "opus").length, 1);
+});
+
+test("유지 시간 내라도 세션 모델의 한도가 소진된 현재 계정은 버린다", () => {
+  const accounts = [weeklyOnly("a", 59, 100), weeklyOnly("b", 0, 0)];
+  const current = { accountId: "a", switchedAt: now - 1 };
+  assert.equal(selectAccount([weeklyOnly("a", 59, 0), weeklyOnly("b", 0, 0)], now, new Map(), current, "fable")?.id, "a");
+  assert.equal(selectAccount(accounts, now, new Map(), current, "fable")?.id, "b");
+  assert.equal(selectAccount(accounts, now, new Map(), current, "sonnet")?.id, "a");
+});

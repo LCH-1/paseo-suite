@@ -185,3 +185,67 @@ test("차단 뒤 새로 시작된 사용량 창은 초기화 시각 없는 차�
     later + 1000 + 5 * minute,
   );
 });
+
+test("시각 있는 차단은 사용량이 소진을 보인 뒤 100% 미만을 새로 보이면 예정보다 일찍 초기화된 것으로 풀린다", () => {
+  const controller = new Controller();
+  const resetsAt = start + 3 * 24 * 60 * minute;
+  controller.limitAccount("a", start, { resetsAt });
+  controller.limitAccount("c", start, { resetsAt });
+  const at = (
+    id: string,
+    fetchedAt: number,
+    weekly: number,
+    fable = 0,
+  ): AccountUsage => ({
+    ...usage(id, fetchedAt),
+    fiveHour: null,
+    weekly: { used: weekly, resetsAt },
+    models: { fable: { used: fable, resetsAt } },
+  });
+  // The lookup made right before the block shows the limit spent.
+  controller.choose(
+    "s",
+    [at("a", start - minute, 100), at("c", start - minute, 100, 100)],
+    start,
+  );
+  assert.equal(controller.isBlocked("a", start), true);
+  // The same report again proves nothing new.
+  controller.choose("s", [at("a", start - minute, 100)], start + minute);
+  assert.equal(controller.isBlocked("a", start + minute), true);
+  const later = start + 10 * minute;
+  assert.equal(
+    controller.choose("s", [at("a", later, 0), at("c", later, 0, 100)], later)
+      ?.id,
+    "a",
+  );
+  assert.equal(controller.isBlocked("a", later), false);
+  // An account-wide block also waits for the model limit its notice may have meant.
+  assert.equal(controller.isBlocked("c", later), true);
+});
+
+test("모델 차단은 그 모델 창의 조기 초기화로만 풀리고 계정 전체 창의 여유로는 풀리지 않는다", () => {
+  const controller = new Controller();
+  const resetsAt = start + 3 * 24 * 60 * minute;
+  controller.limitAccount("a", start, { resetsAt, family: "fable" });
+  const fable = (fetchedAt: number, used: number): AccountUsage => ({
+    ...usage("a", fetchedAt),
+    fiveHour: null,
+    models: { fable: { used, resetsAt } },
+  });
+  controller.choose("s", [fable(start - minute, 100)], start, "fable");
+  const later = start + 10 * minute;
+  controller.choose(
+    "s",
+    [{ ...usage("a", later), fiveHour: null }],
+    later,
+    "fable",
+  );
+  assert.equal(controller.isBlocked("a", later, "fable"), true);
+  assert.equal(controller.isBlocked("a", later, "sonnet"), false);
+  const reset = later + minute;
+  assert.equal(
+    controller.choose("s", [fable(reset, 0)], reset, "fable")?.id,
+    "a",
+  );
+  assert.equal(controller.isBlocked("a", reset, "fable"), false);
+});

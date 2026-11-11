@@ -1,4 +1,4 @@
-import { selectAccount, type AccountUsage, type Binding, type WindowUsage } from "./scheduler.ts";
+import { modelUsage, selectAccount, type AccountUsage, type Binding, type WindowUsage } from "./scheduler.ts";
 
 /** What a limit notice says about the block it calls for. */
 export interface AccountLimit {
@@ -16,6 +16,25 @@ interface LimitBlock {
   level: number;
   /** Ends at the time the notice named, rather than after a backoff step. */
   timed: boolean;
+  /** When a usage report last showed the limit this block covers as spent. */
+  spentAt?: number;
+}
+
+/**
+ * Whether a reading shows the limit a block covers as spent (true), as having room (false), or
+ * cannot tell (null). A model's block covers that model's weekly limit; an account-wide block
+ * covers every limit the report names, since its notice did not say which one it hit.
+ */
+function spent(reading: AccountUsage, scope: string): boolean | null {
+  if (scope !== "") {
+    const model = modelUsage(reading, scope);
+    return model === undefined || model === null ? null : model.used >= 100;
+  }
+  // No five-hour window means no such limit; a model limit without a value is unknown.
+  const models = Object.values(reading.models ?? {});
+  const windows = [reading.weekly, ...(reading.fiveHour ? [reading.fiveHour] : []), ...models];
+  if (windows.some((window) => window !== null && window.used >= 100)) return true;
+  return models.some((window) => window === null) ? null : false;
 }
 
 const hold = 60_000;
@@ -40,16 +59,19 @@ export class Controller {
     return result;
   }
 
-  /** Blocks only rank accounts: `includeBlocked` is the last resort when nothing else can be chosen. */
+  /**
+   * Blocks only rank accounts: `includeBlocked` is the last resort when nothing else can be chosen.
+   * `family` is the session's model family: it narrows model blocks and brings in that model's limit.
+   */
   choose(agentId: string, readings: AccountUsage[], now: number, family?: string | null, includeBlocked = false) {
-    this.observe(readings);
+    this.observe(readings, now);
     const loads = new Map<string, number>();
     for (const [otherId, binding] of this.bindings) {
       if (otherId !== agentId && (this.busy.has(otherId) || (this.reservations.get(otherId) ?? 0) > now)) {
         loads.set(binding.accountId, (loads.get(binding.accountId) ?? 0) + 1);
       }
     }
-    return selectAccount(includeBlocked ? readings : readings.filter((reading) => !this.isBlocked(reading.id, now, family)), now, loads, this.bindings.get(agentId));
+    return selectAccount(includeBlocked ? readings : readings.filter((reading) => !this.isBlocked(reading.id, now, family)), now, loads, this.bindings.get(agentId), family);
   }
 
   bind(agentId: string, accountId: string, now: number) {
@@ -116,13 +138,26 @@ export class Controller {
     return released;
   }
 
-  /** A usage window that began after a backoff block shows the limit behind it has reset. */
-  private observe(readings: AccountUsage[]) {
+  /**
+   * A report fetched after the block that shows its limit with room again, after an earlier report
+   * showed that limit spent, means the limit lifted ahead of the named reset: the provider reset it
+   * early. Usage that never showed the limit spent may lag behind the CLI, so it releases nothing.
+   * A usage window that began after a backoff block also shows the limit behind it has reset.
+   */
+  private observe(readings: AccountUsage[], now: number) {
     for (const reading of readings) {
-      const block = this.limits.get(reading.id)?.get("");
-      if (!block || block.timed || reading.fetchedAt <= block.since) continue;
-      const began = (window: WindowUsage, hours: number) => window.resetsAt !== null && window.resetsAt - hours * hour > block.since;
-      if (began(reading.fiveHour, 5) || began(reading.weekly, 168)) this.limits.get(reading.id)!.delete("");
+      const scopes = this.limits.get(reading.id);
+      for (const [scope, block] of scopes ?? []) {
+        if (block.until > now) {
+          const state = spent(reading, scope);
+          if (state) block.spentAt = Math.max(block.spentAt ?? reading.fetchedAt, reading.fetchedAt);
+          else if (state === false && block.spentAt !== undefined && reading.fetchedAt > block.spentAt && reading.fetchedAt > block.since)
+            block.until = now;
+        }
+        if (scope !== "" || block.timed || reading.fetchedAt <= block.since) continue;
+        const began = (window: WindowUsage | null, hours: number) => window !== null && window.resetsAt !== null && window.resetsAt - hours * hour > block.since;
+        if (began(reading.fiveHour, 5) || began(reading.weekly, 168)) scopes!.delete("");
+      }
     }
   }
 

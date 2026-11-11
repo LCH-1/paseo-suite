@@ -104,8 +104,10 @@ function describeLimit(text: string, now: number): LimitSignal {
   return { resetsAt: limitResetAt(line, now), family: modelFamily(/\b(?:opus|sonnet|haiku|fable)\b(?=[^\n·|]{0,20}\blimit\b)/i.exec(line)?.[0]) };
 }
 
+/** The family a model ID belongs to (`claude-<family>-…`), or the known family an alias names. */
 export function modelFamily(model: string | null | undefined) {
-  return /opus|sonnet|haiku|fable/i.exec(model ?? "")?.[0].toLowerCase() ?? null;
+  const id = (model ?? "").trim().toLowerCase();
+  return /(?:^|[^a-z])claude-([a-z]+)(?![a-z])/.exec(id)?.[1] ?? /opus|sonnet|haiku|fable/.exec(id)?.[0] ?? null;
 }
 
 /** The limit a turn ran into, or null when the turn did not end on one. */
