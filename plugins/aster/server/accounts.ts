@@ -699,18 +699,31 @@ export function accountShares(
   return { fiveHour: share("five_hour"), weekly: share("weekly") };
 }
 
+/** The spent limits that keep one account from a session, as its usage reports confirm them. */
+export interface SpentAccount {
+  /** When the account serves the session again: the latest reset among the limits that block it. */
+  resetAt: number;
+  /** A limit of the session's own model is spent. */
+  model: boolean;
+  /** A five-hour limit of the account's own is spent. */
+  fiveHour: boolean;
+  /** A weekly limit of the account's own is spent. */
+  weekly: boolean;
+}
+
 /**
- * A partial report can prove exhaustion even when it cannot produce a routing score.
+ * What blocks each account when usage confirms every one of them spent, or null as soon as one is
+ * not. A partial report can prove exhaustion even when it cannot produce a routing score.
  * With `family`, a spent limit of that model counts as exhaustion too.
  */
-export function exhaustedAccountsResetAt(
+export function spentAccounts(
   accounts: Account[],
   reports: z.infer<typeof reportsSchema>,
   now = Date.now(),
   family?: string | null,
-) {
+): SpentAccount[] | null {
   if (!accounts.length) return null;
-  const resets: number[] = [];
+  const spent: SpentAccount[] = [];
   for (const account of accounts) {
     const current = matchingReports(account, reports).filter(
       (entry) =>
@@ -730,14 +743,33 @@ export function exhaustedAccountsResetAt(
       (window) => limitsSession(window.id, family) && window.usedPct === 100,
     );
     if (!exhausted.length) return null;
-    const accountResets = exhausted.map((window) =>
-      Date.parse(window.resetsAt ?? ""),
-    );
-    if (accountResets.some((at) => !Number.isFinite(at) || at <= now))
-      return null;
-    resets.push(Math.max(...accountResets));
+    const resets = exhausted.map((window) => Date.parse(window.resetsAt ?? ""));
+    if (resets.some((at) => !Number.isFinite(at) || at <= now)) return null;
+    const limits = exhausted.map((window) => windowLimit(window.id)!);
+    const own = (period: LimitPeriod) =>
+      limits.some((limit) => limit.family === null && limit.period === period);
+    spent.push({
+      resetAt: Math.max(...resets),
+      model: limits.some((limit) => limit.family !== null),
+      fiveHour: own("five_hour"),
+      weekly: own("weekly"),
+    });
   }
-  return Math.min(...resets);
+  return spent;
+}
+
+/**
+ * When the first of the accounts serves a session again, if usage confirms them all spent: each
+ * account returns when the last of the limits that block it lifts.
+ */
+export function exhaustedAccountsResetAt(
+  accounts: Account[],
+  reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
+  family?: string | null,
+) {
+  const spent = spentAccounts(accounts, reports, now, family);
+  return spent && Math.min(...spent.map((account) => account.resetAt));
 }
 
 /**
