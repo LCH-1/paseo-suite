@@ -167,7 +167,8 @@ export default function contribute(server: PluginServerContext) {
     readings.some((reading) => Object.keys(reading.models ?? {}).length > 0);
   /**
    * The model family a session opens on: the host's request names the model when it can, a reload
-   * Aster started itself carries the family it chose for, and otherwise the stored agent tells.
+   * Aster started itself carries the family it chose for, and otherwise the running agent tells,
+   * read in the same order as at the end of a turn so both choose for the same model.
    * Without any of them the model's own limits are left out of the choice.
    */
   const sessionFamily = async (
@@ -176,8 +177,10 @@ export default function contribute(server: PluginServerContext) {
     readings: ReturnType<typeof mapReports>,
     accounts: Account[],
   ) => {
+    // A null model is the provider's default, which only the running session can name.
     const requested = (request as { model?: string | null }).model;
-    if (requested !== undefined) return modelFamily(requested);
+    const named = typeof requested === "string" ? modelFamily(requested) : null;
+    if (named) return named;
     if (reloadFamilies.has(request.agentId))
       return reloadFamilies.get(request.agentId) ?? null;
     const now = Date.now();
@@ -192,8 +195,8 @@ export default function contribute(server: PluginServerContext) {
       2_000,
     );
     return (
-      modelFamily(current?.agent.model) ??
-      modelFamily(current?.agent.runtimeInfo?.model)
+      modelFamily(current?.agent.runtimeInfo?.model) ??
+      modelFamily(current?.agent.model)
     );
   };
   const clock = (at: number) =>
