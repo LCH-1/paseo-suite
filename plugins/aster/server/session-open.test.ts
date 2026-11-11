@@ -123,6 +123,9 @@ async function openFixture(
     reports: reports as typeof reports | null,
     settings: {} as Record<string, unknown>,
     snapshot: (_agentId: string): Record<string, unknown> => ({}),
+    /** How many times an agent was looked up, and what holds a lookup's answer back. */
+    lookups: 0,
+    gate: null as null | ((agentId: string) => Promise<void> | undefined),
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
     reloadRequest: {} as Record<string, unknown>,
     reload: async (..._args: unknown[]) => "",
@@ -230,15 +233,19 @@ async function openFixture(
       config: { get: async () => ({ config: { providers: { claude: {} } } }) },
       agents: {
         ref: (agentId: string) => ({
-          refresh: async () => ({
-            agent: {
-              status: "idle",
-              pendingPermissions: [],
-              model: null,
-              lastUserMessageAt: null,
-              ...shared.snapshot(agentId),
-            },
-          }),
+          refresh: async () => {
+            shared.lookups++;
+            await shared.gate?.(agentId);
+            return {
+              agent: {
+                status: "idle",
+                pendingPermissions: [],
+                model: null,
+                lastUserMessageAt: null,
+                ...shared.snapshot(agentId),
+              },
+            };
+          },
           send: async (text: string) => {
             sent.push({ agentId, text });
           },
@@ -325,6 +332,10 @@ async function openFixture(
     },
     setReloadRequest: (next: Record<string, unknown>) => {
       shared.reloadRequest = next;
+    },
+    lookups: () => shared.lookups,
+    setGate: (next: typeof shared.gate) => {
+      shared.gate = next;
     },
     emit: async (name: string, payload: unknown) =>
       events.get(name)?.(payload, context),
@@ -772,8 +783,11 @@ test("5시간 창이 없어진 실측 보고서로도 계정 상태를 자동 �
     assert.deepEqual(
       (await fixture.status()).map((row) => [row.id, row.status]),
       [
-        ["fixture", `사용 가능 · Fable 한도 소진(${when} 이후 복귀)`],
-        ["recovered", "자동 분배 중"],
+        [
+          "fixture",
+          `사용 가능 · 주간 59% · Fable 한도 소진 · ${when} 이후 복귀`,
+        ],
+        ["recovered", "자동 분배 중 · 주간 0%"],
       ],
     );
     const created = await fixture.open({
@@ -966,5 +980,401 @@ test("기본 모델 세션은 본체가 reload 요청에 model=null을 넣어도
     logged(fixture, /여유 계정으로 연결 전환 fixture → recovered/);
   } finally {
     fixture.dispose();
+  }
+});
+
+/** A reopen the host makes after an account limit refused a model change (`setAgentModel`). */
+const changeModel = (
+  from: string | null,
+  to: string | null,
+  overrides: Partial<PluginSessionOpenRequest> = {},
+) =>
+  ({
+    reason: "refresh",
+    ...overrides,
+    model: to,
+    modelChange: { from, to },
+  }) as Partial<PluginSessionOpenRequest>;
+/** Windows of a fixture report, values as the host may send them. */
+const windowsOf = (entry: { report: { windows: unknown[] } }) =>
+  entry.report.windows as {
+    id: string;
+    label?: string;
+    usedPct: number | null;
+    resetsAt: string | null;
+  }[];
+
+test("계정 한도로 거절된 모델 변경을 다시 여는 요청(modelChange)은 10분 유지·20% 우위 없이 새 모델 여유가 큰 계정을 고르고 이전 본체 요청은 기존 유지 규칙을 따른다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const reports = structuredClone(fixture.initialReports);
+    reports[0].report.windows[0].usedPct = 20;
+    reports[0].report.windows[1].usedPct = 90;
+    reports[1].report.windows[0].usedPct = 60;
+    fixture.setReports([reports[0]]);
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    fixture.setReports(reports);
+    // Without the field, as from an older host, the hold keeps the account: its Fable limit has room.
+    assert.equal(
+      (await fixture.open(withModel({ reason: "refresh" }, "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    const changed = await fixture.open(
+      changeModel("claude-sonnet-5", "claude-fable-5-2"),
+    );
+    assert.equal(changed?.env.ASTER_ACCOUNT_ID, "recovered");
+    assert.deepEqual((changed as { modelChange?: unknown }).modelChange, {
+      from: "claude-sonnet-5",
+      to: "claude-fable-5-2",
+    });
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: Fable 모델 변경이 계정 한도로 거절됨\)/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("모든 계정에서 새 모델 한도나 계정 전체 한도가 사용량으로 확인된 소진이면 모델 변경 다시 열기를 가장 빠른 초기화 시각과 함께 거절한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const spent = structuredClone(fixture.initialReports);
+    spent[1].report.windows[1].usedPct = 100;
+    fixture.setReports(spent);
+    await assert.rejects(
+      fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")),
+      {
+        message: `Aster: 모든 Claude 계정의 Fable 한도가 소진되었습니다. 가장 빠른 초기화는 ${koreanClock(spent[0].report.windows[1].resetsAt)}(한국시간)입니다.`,
+      },
+    );
+    // The same reopen from an older host, without the field, still opens the conversation.
+    assert.equal(
+      (await fixture.open(withModel({ reason: "refresh" }, "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    // One account spent its Fable limit, the other its weekly one: the earliest return is named.
+    const mixed = structuredClone(fixture.initialReports);
+    const soon = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    mixed[1].report.windows[0] = { id: "weekly", usedPct: 100, resetsAt: soon };
+    fixture.setReports(mixed);
+    await assert.rejects(
+      fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")),
+      {
+        message: `Aster: 모든 Claude 계정의 Fable 한도가 소진되었습니다. 가장 빠른 초기화는 ${koreanClock(soon)}(한국시간)입니다.`,
+      },
+    );
+    logged(
+      fixture,
+      /세션 열기 거절 \(refresh\) · Aster: 모든 Claude 계정의 Fable 한도가 소진/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("사용량을 모르거나 불완전하면 모델 변경 다시 열기를 거절하지 않고 기존 규칙과 CLI 확인 경로로 연다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    fixture.setReports(null);
+    assert.equal(
+      (await fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    const blank = structuredClone(fixture.initialReports);
+    for (const entry of blank) windowsOf(entry)[1].usedPct = null;
+    fixture.setReports(blank);
+    assert.ok(
+      (await fixture.open(changeModel("claude-sonnet-5", "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+    );
+    logged(fixture, throughCli);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("기본 모델로 바꾸는 모델 변경 다시 열기도 유지 규칙 없이 계정 전체 여유로 고른다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    fixture.setReports([fixture.initialReports[0]]);
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    fixture.setReports(fixture.initialReports);
+    assert.equal(
+      (await fixture.open(withModel({ reason: "refresh" }, null)))?.env
+        .ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    assert.equal(
+      (await fixture.open(changeModel("claude-fable-5-2", null)))?.env
+        .ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("사전 점검도 요청한 모델의 계열로 판정해 모든 계정의 그 모델 한도가 소진되면 거절하고 다른 모델과 기본 모델은 통과시킨다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const spent = structuredClone(fixture.initialReports);
+    spent[1].report.windows[1].usedPct = 100;
+    fixture.setReports(spent);
+    const probe = (model: string | null) =>
+      fixture.open(
+        withModel(
+          {
+            agentId: "probe",
+            reason: "create",
+            env: {},
+            preflight: true,
+          } as Partial<PluginSessionOpenRequest>,
+          model,
+        ),
+      );
+    await assert.rejects(
+      probe("claude-fable-5-2"),
+      /모든 Claude 계정의 Fable 한도가 소진되었습니다/,
+    );
+    assert.equal(await probe("claude-sonnet-5"), undefined);
+    assert.equal(await probe(null), undefined);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("세션 모델이 계정 선택을 바꾸지 않는 세션 열기와 턴 종료는 에이전트를 조회하지 않고 바꿀 때만 조회한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const clean = structuredClone(fixture.initialReports);
+    clean[0].report.windows[1].usedPct = 0;
+    fixture.setReports(clean);
+    fixture.setSnapshot(() => ({ model: "claude-fable-5-2" }));
+    // Every model lands on the same account, so the model the host leaves out is not needed.
+    assert.equal(
+      (await fixture.open(withModel({}, null)))?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    await fixture.turn("fixture-agent", "turn-1", "완료했습니다.");
+    assert.equal(fixture.lookups(), 0);
+    // The account's Fable limit runs out: now the model decides, and is looked up once.
+    const spent = structuredClone(clean);
+    spent[1].report.windows[1].usedPct = 100;
+    fixture.setReports(spent);
+    await fixture.turn("fixture-agent", "turn-2", "완료했습니다.");
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "fixture");
+    // The model lookup, and the status check before the reload.
+    assert.equal(fixture.lookups(), 2);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("에이전트 조회가 2초 안에 답하지 않으면 잠시 다음 세션 열기는 기다리지 않고 마지막으로 알려진 모델로 판정해 재개가 몰려도 대기가 쌓이지 않는다", async (t) => {
+  const fixture = await openFixture("fable");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const before = structuredClone(fixture.initialReports);
+    before[0].report.windows[0].usedPct = 0;
+    before[0].report.windows[1].usedPct = 90;
+    before[1].report.windows[0].usedPct = 95;
+    fixture.setReports(before);
+    fixture.setSnapshot(() => ({ model: "claude-fable-5-2" }));
+    // The host names the model of this one: Fable, with room on A for now.
+    assert.equal(
+      (await fixture.open(withModel({ agentId: "named" }, "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    const after = structuredClone(before);
+    after[0].report.windows[1].usedPct = 100;
+    fixture.setReports(after);
+    fixture.setGate((agentId) =>
+      agentId.startsWith("resume-") ? new Promise(() => {}) : undefined,
+    );
+    const settled = async (task: Promise<unknown>) => {
+      let done = false;
+      task.then(
+        () => (done = true),
+        () => (done = true),
+      );
+      for (let turn = 0; turn < 5; turn++)
+        await new Promise((resolve) => setImmediate(resolve));
+      return done;
+    };
+    const first = fixture.open({ agentId: "resume-1" });
+    assert.equal(await settled(first), false);
+    t.mock.timers.tick(2_000);
+    // Unanswered, the model stays unknown.
+    assert.equal((await first)?.env.ASTER_ACCOUNT_ID, "fixture");
+    const second = fixture.open({ agentId: "resume-2" });
+    assert.equal(await settled(second), true);
+    assert.equal(fixture.lookups(), 2);
+    // Meanwhile a turn end uses the model the host named for the session.
+    await fixture.turn("named", "turn-1", "완료했습니다.");
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    // A while later lookups wait again.
+    t.mock.timers.tick(15_000);
+    const third = fixture.open({ agentId: "resume-3" });
+    assert.equal(await settled(third), false);
+    t.mock.timers.tick(2_000);
+    await third;
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("계정 상태는 5시간 창이 있으면 5시간·주간 사용률을, 없으면 주간 사용률만 두 자리 시각과 함께 보이고 주간 정보가 있으면 첫 사용 안내를 내지 않는다", async () => {
+  const fixture = await openFixture("two-available");
+  try {
+    const at = (hours: number) =>
+      new Date(Date.now() + hours * 3_600_000).toISOString();
+    const shortReset = at(2);
+    const status = async (...windows: unknown[][]) => {
+      fixture.setReports(
+        fixture.initialReports.map((entry, index) => ({
+          ...structuredClone(entry),
+          report: {
+            status: "available",
+            windows: windows[index] as typeof entry.report.windows,
+          },
+        })),
+      );
+      return (await fixture.status()).map((row) => [row.id, row.status]);
+    };
+    assert.deepEqual(
+      await status(
+        [
+          { id: "five_hour", usedPct: 31, resetsAt: at(3) },
+          { id: "weekly", usedPct: 59, resetsAt: at(100) },
+        ],
+        [
+          { id: "five_hour", usedPct: 100, resetsAt: shortReset },
+          { id: "weekly", usedPct: 40, resetsAt: at(100) },
+        ],
+      ),
+      [
+        ["fixture", "자동 분배 중 · 5시간 31% · 주간 59%"],
+        [
+          "recovered",
+          `한도 소진 · 5시간 100% · 주간 40% · ${koreanClock(shortReset)} 이후 자동 복귀`,
+        ],
+      ],
+    );
+    assert.match(
+      koreanClock(shortReset),
+      /^\d{1,2}\. \d{1,2}\. 오[전후] \d{2}:\d{2}$/,
+    );
+    // Usage the CLI still has to confirm.
+    assert.deepEqual(
+      await status(
+        [
+          { id: "five_hour", usedPct: null, resetsAt: null },
+          { id: "weekly", usedPct: 40, resetsAt: at(100) },
+        ],
+        [{ id: "five_hour", usedPct: 20, resetsAt: at(3) }],
+      ),
+      [
+        ["fixture", "사용 가능 · 주간 40%"],
+        ["recovered", "사용 가능 · 5시간 20% · 첫 사용 후 사용량 표시"],
+      ],
+    );
+    const chatReset = at(50);
+    const codeReset = at(30);
+    assert.deepEqual(
+      await status(
+        [
+          { id: "weekly", usedPct: 59, resetsAt: at(100) },
+          {
+            id: "weekly_surface_chat",
+            label: "Weekly · Chat",
+            usedPct: 100,
+            resetsAt: chatReset,
+          },
+        ],
+        [
+          { id: "weekly", usedPct: 10, resetsAt: at(100) },
+          {
+            id: "weekly_surface_code",
+            label: "Weekly · Code",
+            usedPct: 100,
+            resetsAt: codeReset,
+          },
+        ],
+      ),
+      [
+        [
+          "fixture",
+          `자동 분배 중 · 주간 59% · Chat 한도 소진(자동 분배 미반영) · ${koreanClock(chatReset)} 이후 복귀`,
+        ],
+        [
+          "recovered",
+          `한도 소진 · 주간 10% · ${koreanClock(codeReset)} 이후 자동 복귀`,
+        ],
+      ],
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("5시간 한도 안내는 보고서에 5시간 창이 없어도 계정 전체를 안내 시각까지 차단하고 모델 한도로 추정하지 않는다", async () => {
+  for (const [notice, accountWide] of [
+    [
+      `You've hit your 5-hour limit · resets ${resetsIn(2 * 3_600_000)} (Asia/Seoul)`,
+      true,
+    ],
+    [
+      "API Error: 429 This request would exceed your account's rate limit. Please try again later.",
+      false,
+    ],
+  ] as const) {
+    const fixture = await openFixture("fable");
+    try {
+      fixture.setSnapshot(() => ({ model: "claude-fable-5-2" }));
+      const reports = structuredClone(fixture.initialReports);
+      reports[0].report.windows[0].usedPct = 30;
+      reports[1].report.windows[0].usedPct = 80;
+      const before = structuredClone(reports[0]);
+      before.report.windows[1].usedPct = 90;
+      fixture.setReports([before]);
+      assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+      fixture.setReports(reports);
+      const agent = { id: "fixture-agent", provider: "claude" };
+      await fixture.emit("agent.turn_started", { agent, turnId: "turn-1" });
+      await fixture.emit("agent.turn_ended", {
+        agent,
+        turnId: "turn-1",
+        outcome: { kind: "failed", error: { message: notice } },
+        timeline: [],
+      });
+      assert.equal(fixture.reloads.length, 1);
+      assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+      assert.equal(
+        fixture.logs.some((line) => /fable 모델 한정/.test(line)),
+        !accountWide,
+        notice,
+      );
+      // A Sonnet session would sit on A, which has more weekly room, unless the whole account is blocked.
+      const sonnet = await fixture.open(
+        withModel(
+          { agentId: "sonnet-agent", reason: "create", env: {} },
+          "claude-sonnet-5",
+        ),
+      );
+      assert.equal(
+        sonnet?.env.ASTER_ACCOUNT_ID,
+        accountWide ? "recovered" : "fixture",
+        notice,
+      );
+    } finally {
+      fixture.dispose();
+    }
   }
 });

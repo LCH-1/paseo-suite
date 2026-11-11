@@ -13,7 +13,9 @@ import {
   reportsSchema,
   UsageReader,
   windowFamily,
+  windowLimit,
   exhaustedModels,
+  exhaustedSurfaces,
   type Account,
 } from "./accounts.ts";
 import { createHash } from "node:crypto";
@@ -74,7 +76,7 @@ test("주간 창이 빠진 보고서만 불완전한 응답으로 보고 점수 
   );
 });
 
-test("5시간 창이 있는데 값이 비어 있으면 한도 폐지가 아닌 불완전한 응답이라 0으로 채우지 않는다", () => {
+test("5시간 창이 있는데 값이 비어 있으면 한도 폐지가 아닌 불완전한 응답이라 0으로 채우지 않고 주간 여유가 확인되면 CLI 확인 후보로 남긴다", () => {
   const blank = reportsSchema.parse([
     {
       ...report(),
@@ -88,7 +90,24 @@ test("5시간 창이 있는데 값이 비어 있으면 한도 폐지가 아닌 �
     },
   ]);
   assert.deepEqual(mapReports(accounts, blank, {}, now), []);
-  assert.deepEqual(bootstrapAccounts(accounts, blank, now), []);
+  assert.deepEqual(
+    bootstrapAccounts(accounts, blank, now).map((account) => account.id),
+    ["a"],
+  );
+  // Without a confirmed window of the account's own there is nothing to check through the CLI.
+  const nothing = reportsSchema.parse([
+    {
+      ...report(),
+      report: {
+        ...report().report,
+        windows: [
+          { id: "five_hour", usedPct: null, resetsAt: null },
+          { id: "weekly", usedPct: null, resetsAt: null },
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(bootstrapAccounts(accounts, nothing, now), []);
 });
 
 test("불완전한 창이라도 확인된 한도가 소진되거나 오래되면 시작하지 않는다", () => {
@@ -1390,4 +1409,361 @@ test("예정보다 일찍 초기화된 최신 보고서가 같은 계정의 이�
     assert.equal(exhaustedUntil(accounts[0], order, now, "fable"), null);
     assert.deepEqual(exhaustedModels(accounts[0], order, now), []);
   }
+});
+
+test("창 ID를 <기간>_(model|surface)_<대상>으로 읽어 기간과 모델 계열을 정하고 Claude Code 표면만 모든 세션의 한도로 본다", () => {
+  assert.deepEqual(windowLimit("five_hour"), {
+    period: "five_hour",
+    family: null,
+  });
+  assert.deepEqual(windowLimit("weekly"), { period: "weekly", family: null });
+  assert.deepEqual(windowLimit("weekly_model_fable"), {
+    period: "weekly",
+    family: "fable",
+  });
+  assert.deepEqual(windowLimit("five_hour_model_fable"), {
+    period: "five_hour",
+    family: "fable",
+  });
+  assert.deepEqual(windowLimit("weekly_model_claude-opus-4-8"), {
+    period: "weekly",
+    family: "opus",
+  });
+  // The host suffixes an id that would collide with another.
+  assert.deepEqual(windowLimit("weekly_model_fable_2"), {
+    period: "weekly",
+    family: "fable",
+  });
+  for (const id of [
+    "weekly_surface_code",
+    "weekly_surface_claude_code",
+    "weekly_surface_claude-code",
+  ])
+    assert.deepEqual(windowLimit(id), { period: "weekly", family: null }, id);
+  assert.deepEqual(windowLimit("five_hour_surface_code"), {
+    period: "five_hour",
+    family: null,
+  });
+  for (const id of [
+    "weekly_surface_chat",
+    "weekly_surface_cowork",
+    "weekly_model_fable_pro",
+    "monthly_model_fable",
+    "seven_day",
+    "weekly_scoped",
+  ])
+    assert.equal(windowLimit(id), null, id);
+  assert.equal(windowFamily("five_hour_model_fable"), "fable");
+  assert.equal(windowFamily("weekly_surface_code"), null);
+});
+
+test("모델 5시간 창은 5시간 기간으로 그 모델 세션의 점수에 들어가고 소진되면 그 모델 세션만 그 초기화까지 제외한다", () => {
+  const resetsAt = now + 2 * 3_600_000;
+  const entry = modelReport(10, 10);
+  entry.report.windows!.push({
+    id: "five_hour_model_fable",
+    usedPct: 100,
+    resetsAt: new Date(resetsAt).toISOString(),
+  });
+  const [reading] = mapReports(accounts, [entry], {}, now);
+  assert.deepEqual(reading.limits, [
+    { family: "fable", hours: 5, usage: { used: 100, resetsAt } },
+  ]);
+  assert.equal(
+    selectAccount([reading], now, new Map(), undefined, "fable"),
+    null,
+  );
+  assert.equal(
+    selectAccount([reading], now, new Map(), undefined, "sonnet")?.id,
+    "a",
+  );
+  assert.equal(exhaustedUntil(accounts[0], [entry], now), null);
+  assert.equal(exhaustedUntil(accounts[0], [entry], now, "fable"), resetsAt);
+  assert.equal(
+    exhaustedAccountsResetAt(accounts, [entry], now, "fable"),
+    resetsAt,
+  );
+  assert.deepEqual(exhaustedModels(accounts[0], [entry], now), [
+    { family: "fable", resetsAt },
+  ]);
+});
+
+test("Claude Code 표면 한도는 모든 세션의 한도로 반영하고 다른 표면 한도는 분배에서 무시하되 상태 표시용으로 알린다", () => {
+  const resetsAt = now + 3 * 24 * 3_600_000;
+  const surface = (id: string, label: string) => {
+    const entry = modelReport(0, 10);
+    entry.report.windows!.push({
+      id,
+      label,
+      usedPct: 100,
+      resetsAt: new Date(resetsAt).toISOString(),
+    });
+    return entry;
+  };
+  const code = surface("weekly_surface_code", "Weekly · Code");
+  assert.deepEqual(
+    rankAccounts(mapReports(accounts, [code], {}, now), now),
+    [],
+  );
+  assert.equal(exhaustedUntil(accounts[0], [code], now), resetsAt);
+  assert.equal(exhaustedAccountsResetAt(accounts, [code], now), resetsAt);
+  assert.deepEqual(bootstrapAccounts(accounts, [code], now), []);
+  assert.deepEqual(exhaustedSurfaces(accounts[0], [code], now), []);
+  const chat = surface("weekly_surface_chat", "Weekly · Chat");
+  assert.equal(
+    rankAccounts(mapReports(accounts, [chat], {}, now), now).length,
+    1,
+  );
+  assert.equal(exhaustedUntil(accounts[0], [chat], now), null);
+  assert.equal(exhaustedAccountsResetAt(accounts, [chat], now), null);
+  assert.deepEqual(exhaustedSurfaces(accounts[0], [chat], now), [
+    { name: "Chat", resetsAt },
+  ]);
+});
+
+test("같은 계정의 더 최신 보고서에 모델 창이 없거나 값이 비어도 다른 출처에서 확인된 소진을 가리지 않고 새 값이 있으면 조기 초기화로 본다", () => {
+  const resetsAt = now + 6 * 24 * 3_600_000;
+  const older = {
+    ...modelReport(100, 30),
+    id: "claude-windows:account.org-a",
+    sourceId: "claude-windows",
+    fetchedAt: new Date(now - 60_000).toISOString(),
+  };
+  const lacking = modelReport(0, 30);
+  lacking.report.windows = lacking.report.windows!.filter(
+    (window) => window.id === "weekly",
+  );
+  const blank = modelReport(null, 30);
+  for (const newest of [lacking, blank])
+    for (const order of [
+      [older, newest],
+      [newest, older],
+    ]) {
+      assert.equal(exhaustedUntil(accounts[0], order, now, "fable"), resetsAt);
+      assert.deepEqual(exhaustedModels(accounts[0], order, now), [
+        { family: "fable", resetsAt },
+      ]);
+      const [reading] = mapReports(accounts, order, {}, now);
+      assert.equal(reading.fetchedAt, now);
+      assert.deepEqual(reading.models, { fable: { used: 100, resetsAt } });
+      assert.equal(
+        selectAccount([reading], now, new Map(), undefined, "fable"),
+        null,
+      );
+      assert.equal(
+        exhaustedAccountsResetAt(accounts, order, now, "fable"),
+        resetsAt,
+      );
+      assert.deepEqual(
+        bootstrapAccounts(accounts, order, now, undefined, "fable"),
+        [],
+      );
+    }
+  // A newer value below 100% is an early reset.
+  const reset = modelReport(20, 30);
+  for (const order of [
+    [older, reset],
+    [reset, older],
+  ]) {
+    assert.equal(exhaustedUntil(accounts[0], order, now, "fable"), null);
+    assert.deepEqual(exhaustedModels(accounts[0], order, now), []);
+    assert.equal(
+      mapReports(accounts, order, {}, now)[0].models?.fable?.used,
+      20,
+    );
+  }
+  // The account's own window too: a newer report naming it without a value does not hide it.
+  const spentWeekly = {
+    ...older,
+    report: {
+      ...older.report,
+      windows: [
+        {
+          id: "weekly",
+          usedPct: 100,
+          resetsAt: new Date(resetsAt).toISOString(),
+        },
+      ],
+    },
+  };
+  const blankWeekly = reportsSchema.parse([
+    {
+      ...report(),
+      report: {
+        status: "available",
+        windows: [{ id: "weekly", usedPct: null, resetsAt: null }],
+      },
+    },
+  ])[0];
+  assert.equal(
+    exhaustedUntil(accounts[0], [spentWeekly, blankWeekly], now),
+    resetsAt,
+  );
+  assert.equal(
+    exhaustedAccountsResetAt(accounts, [spentWeekly, blankWeekly], now),
+    resetsAt,
+  );
+});
+
+test("5시간 창이 없는 최신 보고서는 그 한도가 없어진 것이라 이전 보고서의 5시간 소진을 되살리지 않고 값만 빈 5시간 창은 이전 값으로 채운다", () => {
+  const shortReset = now + 2 * 3_600_000;
+  const older = {
+    ...report(),
+    id: "claude-windows:account.org-a",
+    sourceId: "claude-windows",
+    fetchedAt: new Date(now - 60_000).toISOString(),
+  };
+  older.report.windows[0] = {
+    id: "five_hour",
+    usedPct: 100,
+    resetsAt: new Date(shortReset).toISOString(),
+  };
+  const lifted = report();
+  lifted.report.windows = lifted.report.windows.filter(
+    (window) => window.id === "weekly",
+  );
+  for (const order of [
+    [older, lifted],
+    [lifted, older],
+  ]) {
+    assert.equal(exhaustedUntil(accounts[0], order, now), null);
+    assert.equal(exhaustedAccountsResetAt(accounts, order, now), null);
+    const [reading] = mapReports(accounts, order, {}, now);
+    assert.equal(reading.fiveHour, null);
+    assert.equal(selectAccount([reading], now)?.id, "a");
+  }
+  const blank = reportsSchema.parse([
+    {
+      ...report(),
+      report: {
+        ...report().report,
+        windows: [
+          { id: "five_hour", usedPct: null, resetsAt: null },
+          report().report.windows[1],
+        ],
+      },
+    },
+  ])[0];
+  assert.equal(exhaustedUntil(accounts[0], [older, blank], now), shortReset);
+  assert.equal(
+    exhaustedAccountsResetAt(accounts, [older, blank], now),
+    shortReset,
+  );
+  // The incomplete newer report scores nothing; the older complete one shows the limit spent.
+  assert.equal(
+    selectAccount(mapReports(accounts, [older, blank], {}, now), now),
+    null,
+  );
+});
+
+test("5시간만 소진되면 5시간 초기화까지, 주간만 소진되면 주간 초기화까지, 모델 창만 소진되면 그 모델 세션만 제외한다", () => {
+  const other: Account = {
+    id: "b",
+    home: "/fixture/b",
+    email: "b@example.test",
+    identity: "org-b|b@example.test",
+  };
+  const shortReset = now + 2 * 3_600_000;
+  const weeklyReset = now + 100 * 3_600_000;
+  const shortSpent = report();
+  shortSpent.report.windows[0] = {
+    id: "five_hour",
+    usedPct: 100,
+    resetsAt: new Date(shortReset).toISOString(),
+  };
+  assert.equal(exhaustedUntil(accounts[0], [shortSpent], now), shortReset);
+  assert.equal(
+    exhaustedAccountsResetAt(accounts, [shortSpent], now),
+    shortReset,
+  );
+  assert.deepEqual(
+    rankAccounts(mapReports(accounts, [shortSpent], {}, now), now),
+    [],
+  );
+  const weeklySpent = report();
+  weeklySpent.report.windows[1].usedPct = 100;
+  assert.equal(exhaustedUntil(accounts[0], [weeklySpent], now), weeklyReset);
+  assert.equal(
+    exhaustedAccountsResetAt(accounts, [weeklySpent], now),
+    weeklyReset,
+  );
+  assert.deepEqual(
+    rankAccounts(mapReports(accounts, [weeklySpent], {}, now), now),
+    [],
+  );
+  // Across accounts the earliest return counts.
+  const otherSpent = report(other.email!, "claude:account.org-b");
+  otherSpent.report.windows[1].usedPct = 100;
+  assert.equal(
+    exhaustedAccountsResetAt(
+      [...accounts, other],
+      [shortSpent, otherSpent],
+      now,
+    ),
+    shortReset,
+  );
+  const fable = modelReport(100, 10);
+  const fableReset = now + 6 * 24 * 3_600_000;
+  assert.equal(exhaustedUntil(accounts[0], [fable], now), null);
+  assert.equal(exhaustedUntil(accounts[0], [fable], now, "fable"), fableReset);
+  assert.equal(exhaustedAccountsResetAt(accounts, [fable], now), null);
+  const readings = mapReports(accounts, [fable], {}, now);
+  assert.equal(rankAccounts(readings, now).length, 1);
+  assert.equal(rankAccounts(readings, now, new Map(), "fable").length, 0);
+});
+
+test("세션 모델 창의 값이 비었거나 초기화가 지났거나 시각 없이 사용 중이면 그 모델 세션은 점수 대신 CLI 확인 후보가 되고 다른 모델은 점수로 고른다", () => {
+  for (const window of [
+    { usedPct: null, resetsAt: null },
+    { usedPct: 30, resetsAt: new Date(now - 1).toISOString() },
+    { usedPct: 100, resetsAt: new Date(now - 1).toISOString() },
+    { usedPct: 30, resetsAt: null },
+    { usedPct: 30, resetsAt: "invalid" },
+  ]) {
+    const entry = modelReport(0, 10);
+    entry.report.windows![1] = { id: "weekly_model_fable", ...window };
+    const readings = mapReports(accounts, [entry], {}, now);
+    assert.equal(readings.length, 1);
+    assert.deepEqual(rankAccounts(readings, now, new Map(), "fable"), []);
+    assert.equal(rankAccounts(readings, now, new Map(), "sonnet").length, 1);
+    assert.deepEqual(
+      bootstrapAccounts(accounts, [entry], now, undefined, "fable").map(
+        (account) => account.id,
+      ),
+      ["a"],
+      JSON.stringify(window),
+    );
+    assert.deepEqual(
+      bootstrapAccounts(accounts, [entry], now, undefined, "sonnet"),
+      [],
+    );
+    assert.equal(
+      exhaustedAccountsResetAt(accounts, [entry], now, "fable"),
+      null,
+    );
+  }
+  // A spent limit is not an incomplete one.
+  assert.deepEqual(
+    bootstrapAccounts(
+      accounts,
+      [modelReport(100, 10)],
+      now,
+      undefined,
+      "fable",
+    ),
+    [],
+  );
+});
+
+test("주간 창의 초기화가 지났으면 사용량을 0으로 지어내지 않고 5시간 여유가 확인되면 CLI 확인 후보로 남긴다", () => {
+  const passed = report();
+  passed.report.windows[1].resetsAt = new Date(now - 1).toISOString();
+  assert.deepEqual(mapReports(accounts, [passed], {}, now), []);
+  assert.deepEqual(
+    bootstrapAccounts(accounts, [passed], now).map((account) => account.id),
+    ["a"],
+  );
+  // The five-hour window spent: confirmed, so the CLI path does not go around it.
+  passed.report.windows[0].usedPct = 100;
+  assert.deepEqual(bootstrapAccounts(accounts, [passed], now), []);
 });

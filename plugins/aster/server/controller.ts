@@ -1,4 +1,7 @@
-import { modelUsage, selectAccount, type AccountUsage, type Binding, type WindowUsage } from "./scheduler.ts";
+import { sessionLimits, selectAccount, type AccountUsage, type Binding, type ExtraLimit } from "./scheduler.ts";
+
+/** The length of the window a limit notice names: the five-hour (session) limit or a weekly one. */
+export type LimitPeriod = "five_hour" | "weekly";
 
 /** What a limit notice says about the block it calls for. */
 export interface AccountLimit {
@@ -6,6 +9,8 @@ export interface AccountLimit {
   resetsAt?: number | null;
   /** The model family the limit is confined to; without one it covers the whole account. */
   family?: string | null;
+  /** Which window the notice named, when it named one. */
+  period?: LimitPeriod | null;
   /** When the turn that hit the limit began. */
   startedAt?: number;
 }
@@ -18,23 +23,38 @@ interface LimitBlock {
   timed: boolean;
   /** When a usage report last showed the limit this block covers as spent. */
   spentAt?: number;
+  /** The window the notice named; null when it named none. */
+  period: LimitPeriod | null;
+}
+
+const periodHours = { five_hour: 5, weekly: 168 } as const;
+
+/**
+ * The limits of a reading a block covers. A model's block covers that model's limits; an
+ * account-wide block covers the account's own. A notice that named no window may have meant
+ * any limit the report names, so its block covers every model's limit as well.
+ */
+function covered(reading: AccountUsage, scope: string, period: LimitPeriod | null): ExtraLimit[] {
+  const models: ExtraLimit[] = [
+    ...Object.entries(reading.models ?? {}).map(([family, usage]) => ({ family, hours: 168, usage })),
+    ...(reading.limits ?? []).filter((limit) => limit.family !== null),
+  ];
+  const limits = scope !== "" ? models.filter((limit) => limit.family === scope)
+    : [...sessionLimits(reading), ...(period === null ? models : [])];
+  return period === null ? limits : limits.filter((limit) => limit.hours === periodHours[period]);
 }
 
 /**
  * Whether a reading shows the limit a block covers as spent (true), as having room (false), or
- * cannot tell (null). A model's block covers that model's weekly limit; an account-wide block
- * covers every limit the report names, since its notice did not say which one it hit.
+ * cannot tell (null): a limit without a value, or a report that does not name the limit at all.
+ * A five-hour block whose window has gone from the report keeps its own end: the window going
+ * away says nothing about the notice, and a five-hour reset is never far off.
  */
-function spent(reading: AccountUsage, scope: string): boolean | null {
-  if (scope !== "") {
-    const model = modelUsage(reading, scope);
-    return model === undefined || model === null ? null : model.used >= 100;
-  }
-  // No five-hour window means no such limit; a model limit without a value is unknown.
-  const models = Object.values(reading.models ?? {});
-  const windows = [reading.weekly, ...(reading.fiveHour ? [reading.fiveHour] : []), ...models];
-  if (windows.some((window) => window !== null && window.used >= 100)) return true;
-  return models.some((window) => window === null) ? null : false;
+function spent(reading: AccountUsage, scope: string, period: LimitPeriod | null): boolean | null {
+  const limits = covered(reading, scope, period);
+  if (limits.some((limit) => limit.usage !== null && limit.usage.used >= 100)) return true;
+  if (!limits.length) return null;
+  return limits.some((limit) => limit.usage === null) ? null : false;
 }
 
 const hold = 60_000;
@@ -62,8 +82,9 @@ export class Controller {
   /**
    * Blocks only rank accounts: `includeBlocked` is the last resort when nothing else can be chosen.
    * `family` is the session's model family: it narrows model blocks and brings in that model's limit.
+   * `keep: false` drops the hold on the session's current account and the margin a switch needs.
    */
-  choose(agentId: string, readings: AccountUsage[], now: number, family?: string | null, includeBlocked = false) {
+  choose(agentId: string, readings: AccountUsage[], now: number, family?: string | null, includeBlocked = false, keep = true) {
     this.observe(readings, now);
     const loads = new Map<string, number>();
     for (const [otherId, binding] of this.bindings) {
@@ -71,7 +92,7 @@ export class Controller {
         loads.set(binding.accountId, (loads.get(binding.accountId) ?? 0) + 1);
       }
     }
-    return selectAccount(includeBlocked ? readings : readings.filter((reading) => !this.isBlocked(reading.id, now, family)), now, loads, this.bindings.get(agentId), family);
+    return selectAccount(includeBlocked ? readings : readings.filter((reading) => !this.isBlocked(reading.id, now, family)), now, loads, this.bindings.get(agentId), family, keep);
   }
 
   bind(agentId: string, accountId: string, now: number) {
@@ -105,7 +126,7 @@ export class Controller {
     // A later notice without a time does not shorten a reset the CLI already named.
     const kept = !named && previous !== undefined && previous.timed && previous.until > now;
     const until = named ? limit.resetsAt! : kept ? previous.until : now + backoff[level];
-    scopes.set(limit.family ?? "", { since: now, until, level, timed: named || kept });
+    scopes.set(limit.family ?? "", { since: now, until, level, timed: named || kept, period: limit.period ?? null });
     return until;
   }
 
@@ -119,8 +140,12 @@ export class Controller {
 
   /** Whether telling this account's sessions apart by model would change the answer of `isBlocked`. */
   hasModelLimit(accountId: string, now: number) {
-    for (const [scope, block] of this.limits.get(accountId) ?? []) if (scope !== "" && block.until > now) return true;
-    return false;
+    return this.modelLimits(accountId, now).length > 0;
+  }
+
+  /** The model families this account is blocked for on their own. */
+  modelLimits(accountId: string, now: number) {
+    return [...(this.limits.get(accountId) ?? [])].flatMap(([scope, block]) => (scope !== "" && block.until > now ? [scope] : []));
   }
 
   /**
@@ -149,14 +174,15 @@ export class Controller {
       const scopes = this.limits.get(reading.id);
       for (const [scope, block] of scopes ?? []) {
         if (block.until > now) {
-          const state = spent(reading, scope);
+          const state = spent(reading, scope, block.period);
           if (state) block.spentAt = Math.max(block.spentAt ?? reading.fetchedAt, reading.fetchedAt);
           else if (state === false && block.spentAt !== undefined && reading.fetchedAt > block.spentAt && reading.fetchedAt > block.since)
             block.until = now;
         }
         if (scope !== "" || block.timed || reading.fetchedAt <= block.since) continue;
-        const began = (window: WindowUsage | null, hours: number) => window !== null && window.resetsAt !== null && window.resetsAt - hours * hour > block.since;
-        if (began(reading.fiveHour, 5) || began(reading.weekly, 168)) scopes!.delete("");
+        // Only a window of the length the notice named, if it named one, can show its limit reset.
+        const began = ({ usage, hours }: ExtraLimit) => usage !== null && usage.resetsAt !== null && usage.resetsAt - hours * hour > block.since;
+        if (sessionLimits(reading).filter((limit) => block.period === null || limit.hours === periodHours[block.period]).some(began)) scopes!.delete("");
       }
     }
   }

@@ -39,6 +39,11 @@ export function hasCodexSubscription(plan: string): boolean {
   return paidPlans.has(plan.toLowerCase());
 }
 
+/**
+ * The slowest sustainable rate among the account's windows, whatever their number: the remaining
+ * share over the hours until each one resets. A window without a reset runs for its whole length;
+ * one that names neither cannot give a rate, so the account is not scored rather than guessed.
+ */
 export function codexBudget(reading: CodexReading, now: number): number | null {
   if (
     !hasCodexSubscription(reading.plan) ||
@@ -56,19 +61,22 @@ export function codexBudget(reading: CodexReading, now: number): number | null {
       window.usedPercent > 100
     )
       return null;
-    if (window.resetsAt !== null && window.resetsAt <= now) return null;
+    if (
+      window.resetsAt !== null &&
+      (!Number.isFinite(window.resetsAt) || window.resetsAt <= now)
+    )
+      return null;
     const remaining = Math.max(0, 100 - window.usedPercent);
     if (!remaining) return null;
     const duration = window.windowDurationMins;
     const hours =
       window.resetsAt === null
-        ? duration === null
+        ? duration === null || !Number.isFinite(duration) || duration <= 0
           ? null
           : duration / 60
         : (window.resetsAt - now) / 3_600_000;
-    budgets.push(
-      hours === null ? remaining : remaining / Math.max(hours, 0.25),
-    );
+    if (hours === null) return null;
+    budgets.push(remaining / Math.max(hours, 0.25));
   }
   return Math.min(...budgets);
 }

@@ -249,3 +249,92 @@ test("모델 차단은 그 모델 창의 조기 초기화로만 풀리고 계정
   );
   assert.equal(controller.isBlocked("a", reset, "fable"), false);
 });
+
+test("5시간 한도 안내의 차단은 보고서에서 5시간 창이 사라져도 안내된 시각까지 유지하고 다시 나타난 창이 소진 뒤 여유를 보이면 일찍 풀린다", () => {
+  const controller = new Controller();
+  const resetsAt = start + 3 * 60 * minute;
+  controller.limitAccount("a", start, { resetsAt, period: "five_hour" });
+  const withShort = (at: number, used: number): AccountUsage => ({
+    ...usage("a", at),
+    fiveHour: { used, resetsAt },
+  });
+  controller.choose("s", [withShort(start - minute, 100)], start);
+  // The window has gone from the report: room in the weekly window says nothing about it.
+  const later = start + 10 * minute;
+  controller.choose("s", [{ ...usage("a", later), fiveHour: null }], later);
+  assert.equal(controller.isBlocked("a", later), true);
+  // It is back with room after the report showed it spent: an early reset.
+  const back = later + minute;
+  controller.choose("s", [withShort(back, 0)], back);
+  assert.equal(controller.isBlocked("a", back), false);
+});
+
+test("주간 한도 안내의 시각 없는 차단은 새로 시작된 5시간 창으로 풀리지 않고 새 주간 창으로만 풀린다", () => {
+  const controller = new Controller();
+  controller.limitAccount("a", start, { period: "weekly" });
+  controller.limitAccount("b", start, { period: "five_hour" });
+  const later = start + 2 * minute;
+  const freshShort = (id: string): AccountUsage => ({
+    ...usage(id, later),
+    fiveHour: { used: 1, resetsAt: start + minute + 5 * 60 * minute },
+  });
+  controller.choose("s", [freshShort("a"), freshShort("b")], later);
+  assert.equal(controller.isBlocked("a", later), true);
+  assert.equal(controller.isBlocked("b", later), false);
+  controller.choose(
+    "s",
+    [
+      {
+        ...usage("a", later),
+        weekly: { used: 1, resetsAt: start + minute + 168 * 60 * minute },
+      },
+    ],
+    later,
+  );
+  assert.equal(controller.isBlocked("a", later), false);
+});
+
+test("모델 5시간 창도 그 모델 차단의 조기 초기화를 판단한다", () => {
+  const controller = new Controller();
+  const resetsAt = start + 2 * 60 * minute;
+  controller.limitAccount("a", start, {
+    resetsAt,
+    family: "fable",
+    period: "five_hour",
+  });
+  const reading = (at: number, used: number): AccountUsage => ({
+    ...usage("a", at),
+    fiveHour: null,
+    models: { fable: { used: 10, resetsAt: at + 3 * 24 * 60 * minute } },
+    limits: [{ family: "fable", hours: 5, usage: { used, resetsAt } }],
+  });
+  controller.choose("s", [reading(start - minute, 100)], start, "fable");
+  controller.choose(
+    "s",
+    [reading(start + minute, 100)],
+    start + minute,
+    "fable",
+  );
+  assert.equal(controller.isBlocked("a", start + minute, "fable"), true);
+  controller.choose(
+    "s",
+    [reading(start + 2 * minute, 0)],
+    start + 2 * minute,
+    "fable",
+  );
+  assert.equal(controller.isBlocked("a", start + 2 * minute, "fable"), false);
+});
+
+test("현재 계정 유지를 끄면 10분 유지와 20% 우위 없이 가장 여유로운 계정을 고른다", () => {
+  const controller = new Controller();
+  controller.bind("s", "a", start);
+  const readings = [
+    { ...usage("a"), weekly: { used: 60, resetsAt: start + 72 * 60 * minute } },
+    usage("b"),
+  ];
+  assert.equal(controller.choose("s", readings, start + minute)?.id, "a");
+  assert.equal(
+    controller.choose("s", readings, start + minute, null, false, false)?.id,
+    "b",
+  );
+});
