@@ -87,7 +87,8 @@ try {
       .readFile(path.join(home, "paseo.pid"), "utf8")
       .then(JSON.parse)
       .catch((error) => {
-        if (error.code === "ENOENT") return null;
+        // The daemon may still be writing the file; a torn read is retried like a missing one.
+        if (error.code === "ENOENT" || error instanceof SyntaxError) return null;
         throw error;
       });
     if (metadata?.listen && !metadata.listen.endsWith(":0")) break;
