@@ -454,10 +454,16 @@ export default function contribute(server: PluginServerContext) {
                   period: null,
                   startedAt: Date.now(),
                 });
+            // The host gives a model change's reopen up when a turn starts while the hooks run, and
+            // the session stays on the account and model it ran: nothing chosen for the new model may
+            // outlive the hook then. The block on the refusing account stands, as that refusal did.
+            const overtaken = () =>
+              change !== null && controller.busy.has(request.agentId);
             // What the host names, a model change, or Aster's own reload is what the session runs
             // once it opens. A refused open leaves the session on the model it ran, so only an open
             // that goes ahead is remembered.
             const remember = (family: string | null) => {
+              if (overtaken()) return;
               if (change && !family) knownFamilies.delete(request.agentId);
               else if (
                 family &&
@@ -701,6 +707,13 @@ export default function contribute(server: PluginServerContext) {
               throw new Error(unavailableMessage());
             }
             const account = accounts.find((entry) => entry.id === selectedId)!;
+            if (overtaken()) {
+              // Should the host open it after all, the session stays where its binding says.
+              console.info(
+                `[aster] session ${request.agentId}: 계정 선택 중 턴 시작, 본체가 모델 변경 다시 열기를 취소하므로 ${account.id} 배정 보류`,
+              );
+              return preserveAccount();
+            }
             controller.bind(request.agentId, account.id, Date.now());
             await routes.save(
               request.agentId,
