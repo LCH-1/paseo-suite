@@ -148,8 +148,8 @@ test("5시간 한도가 없는 계정은 주간 잔여만으로 점수를 매긴
   assert.deepEqual(rankAccounts([weeklyOnly("a", 60), weeklyOnly("b", 10)], now).map((entry) => entry.account.id), ["b", "a"]);
   // A spent weekly limit still rules the account out.
   assert.equal(selectAccount([weeklyOnly("a", 100)], now), null);
-  // Without a five-hour limit nothing caps the weekly rate.
-  const limited = { ...weeklyOnly("c", 10), fiveHour: { used: 99, resetsAt: now + hour } };
+  // A five-hour limit that binds lowers the score of the account that has it.
+  const limited = { ...weeklyOnly("c", 10), fiveHour: { used: 99, resetsAt: now + 2 * hour } };
   assert.equal(selectAccount([limited, weeklyOnly("d", 10)], now)?.id, "d");
 });
 
@@ -179,4 +179,160 @@ test("유지 시간 내라도 세션 모델의 한도가 소진된 현재 계정
   assert.equal(selectAccount([weeklyOnly("a", 59, 0), weeklyOnly("b", 0, 0)], now, new Map(), current, "fable")?.id, "a");
   assert.equal(selectAccount(accounts, now, new Map(), current, "fable")?.id, "b");
   assert.equal(selectAccount(accounts, now, new Map(), current, "sonnet")?.id, "a");
+});
+
+/**
+ * The scheduler of main (72d21a2), copied verbatim apart from names: every account then had a
+ * five-hour and a weekly window. Reports of that shape must still score, rank and select alike.
+ */
+const mainScheduler = (() => {
+  interface MainUsage { id: string; fiveHour: { used: number; resetsAt: number | null }; weekly: { used: number; resetsAt: number | null }; fetchedAt: number; capacity: number }
+  function budget(window: MainUsage["weekly"], duration: number, now: number) {
+    if (!Number.isFinite(window.used) || window.used < 0 || window.used > 100) return null;
+    if (window.resetsAt !== null && (!Number.isFinite(window.resetsAt) || window.resetsAt <= now)) return null;
+    if (window.resetsAt === null && window.used !== 0) return null;
+    const hoursLeft = Math.max(((window.resetsAt ?? now + duration * hour) - now) / hour, 0.25);
+    return Math.max(0, 100 - window.used) / hoursLeft;
+  }
+  function isCurrentUsage(account: MainUsage, now: number) {
+    return Number.isFinite(account.fetchedAt) && now >= account.fetchedAt && now - account.fetchedAt <= policy.maxAge
+      && Number.isFinite(account.capacity) && account.capacity > 0
+      && budget(account.fiveHour, 5, now) !== null
+      && budget(account.weekly, 168, now) !== null;
+  }
+  function rankAccounts(accounts: MainUsage[], now: number, loads = new Map<string, number>()) {
+    return accounts.flatMap((account) => {
+      if (!isCurrentUsage(account, now)) return [];
+      const short = budget(account.fiveHour, 5, now);
+      const weekly = budget(account.weekly, 168, now);
+      if (short === null || weekly === null || short <= 0 || weekly <= 0) return [];
+      const load = loads.get(account.id) ?? 0;
+      const score = Math.min(short, weekly) * account.capacity / (load + 1);
+      return [{ account, score, shortRate: short, weeklyRate: weekly, load }];
+    }).sort((a, b) => b.score - a.score || b.shortRate - a.shortRate || a.account.id.localeCompare(b.account.id));
+  }
+  function selectAccount(accounts: MainUsage[], now: number, loads = new Map<string, number>(), current?: { accountId: string; switchedAt: number }) {
+    const ranked = rankAccounts(accounts, now, loads);
+    const best = ranked[0];
+    if (!best) return null;
+    const previous = ranked.find((entry) => entry.account.id === current?.accountId);
+    if (previous && current && (now - current.switchedAt < policy.switchCooldown || best.score < previous.score * policy.switchGain)) {
+      return previous.account;
+    }
+    return best.account;
+  }
+  return { rankAccounts, selectAccount };
+})();
+
+/** A small deterministic generator, so the matrix is the same on every run. */
+function random(seed: number) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+test("5시간·주간 창이 모두 있는 예전 형식은 main(72d21a2)과 점수·순위·선택·유지 결과가 같다", () => {
+  const next = random(72);
+  const pick = <T,>(values: T[]) => values[Math.floor(next() * values.length)];
+  let compared = 0;
+  for (let round = 0; round < 3000; round++) {
+    const accounts = Array.from({ length: 1 + Math.floor(next() * 4) }, (_, index) => {
+      const fiveUsed = pick([0, 0, 20, 50, 80, 99, 100]);
+      const weeklyUsed = pick([0, 0, 10, 40, 59, 90, 100]);
+      return {
+        id: pick(["a", "b", "c", "d"]) + index,
+        fiveHour: { used: fiveUsed, resetsAt: fiveUsed === 0 && next() < 0.3 ? null : now + pick([-1, 0.1, 1, 2, 4.5]) * hour },
+        weekly: { used: weeklyUsed, resetsAt: weeklyUsed === 0 && next() < 0.3 ? null : now + pick([1, 24, 100, 160]) * hour },
+        fetchedAt: now - pick([0, 60_000, policy.maxAge + 1]),
+        capacity: pick([1, 1, 5, 20]),
+      };
+    });
+    const loads = new Map(accounts.flatMap((entry) => (next() < 0.4 ? [[entry.id, pick([1, 2])] as [string, number]] : [])));
+    const current = next() < 0.6 ? { accountId: pick(accounts).id, switchedAt: now - pick([1, policy.switchCooldown + 1]) } : undefined;
+    const expected = mainScheduler.rankAccounts(accounts, now, loads).map((entry) => [entry.account.id, entry.score, entry.shortRate]);
+    // A session's model changes nothing while no report names a model limit.
+    for (const family of [undefined, null, "fable"]) {
+      const actual = rankAccounts(accounts, now, loads, family).map((entry) => [entry.account.id, entry.score, entry.shortRate]);
+      assert.deepEqual(actual, expected);
+      assert.equal(selectAccount(accounts, now, loads, current, family)?.id, mainScheduler.selectAccount(accounts, now, loads, current)?.id);
+      compared++;
+    }
+  }
+  assert.equal(compared, 9000);
+});
+
+test("점수는 한도 창마다 남은 사용량 ÷ 초기화까지 남은 시간의 최솟값 × 용량 ÷ (동시 세션 수+1)이다", () => {
+  const five = { id: "five", fiveHour: { used: 40, resetsAt: now + 2 * hour }, weekly: { used: 10, resetsAt: now + 90 * hour }, fetchedAt: now, capacity: 5 };
+  const [withShort] = rankAccounts([five], now, new Map([["five", 1]]));
+  // 60% over 2 h is faster than 90% over 90 h: the weekly window is the slower one.
+  assert.equal(withShort.score, Math.min(60 / 2, 90 / 90) * 5 / 2);
+  const [binding] = rankAccounts([{ ...five, fiveHour: { used: 99, resetsAt: now + 4 * hour } }], now);
+  assert.equal(binding.score, Math.min(1 / 4, 90 / 90) * 5);
+  // Weekly only, as now: the weekly window and the session model's window.
+  const weekly: AccountUsage = { id: "weekly", fiveHour: null, weekly: { used: 41, resetsAt: now + 59 * hour }, models: { fable: { used: 70, resetsAt: now + 10 * hour } }, fetchedAt: now, capacity: 20 };
+  const [fable] = rankAccounts([weekly], now, new Map([["weekly", 3]]), "fable");
+  assert.equal(fable.score, Math.min(59 / 59, 30 / 10) * 20 / 4);
+  const [tight] = rankAccounts([{ ...weekly, models: { fable: { used: 95, resetsAt: now + 10 * hour } } }], now, new Map(), "fable");
+  assert.equal(tight.score, Math.min(59 / 59, 5 / 10) * 20);
+  const [unknown] = rankAccounts([weekly], now);
+  assert.equal(unknown.score, (59 / 59) * 20);
+});
+
+test("5시간 창이 있는 계정과 없는 계정이 섞이면 있는 계정만 그 창을 최솟값에 넣고 없다는 이유만으로 동점에서 유리해지지 않는다", () => {
+  const withShort = (id: string, used: number, hours: number): AccountUsage => ({ id, fiveHour: { used, resetsAt: now + hours * hour }, weekly: { used: 0, resetsAt: now + 100 * hour }, fetchedAt: now, capacity: 1 });
+  const without = (id: string): AccountUsage => ({ id, fiveHour: null, weekly: { used: 0, resetsAt: now + 100 * hour }, fetchedAt: now, capacity: 1 });
+  // The five-hour window binds: 2% over 4 h is slower than 100% over 100 h.
+  assert.deepEqual(rankAccounts([withShort("a", 98, 4), without("b")], now).map((entry) => entry.account.id), ["b", "a"]);
+  // A five-hour window with room does not bind, so both score the weekly 1%/h and the tie falls to the id.
+  for (const [first, second] of [["a", "b"], ["b", "a"]]) {
+    const ranked = rankAccounts([withShort(first, 0, 1), without(second)], now);
+    assert.equal(ranked[0].score, ranked[1].score);
+    assert.deepEqual(ranked.map((entry) => entry.account.id), ["a", "b"]);
+  }
+  // Between accounts that all have the window, more five-hour room still breaks the tie as before.
+  assert.deepEqual(rankAccounts([withShort("a", 50, 1), withShort("b", 0, 1)], now).map((entry) => entry.account.id), ["b", "a"]);
+});
+
+test("모델 미상 세션은 점수가 20% 안쪽으로 비슷하면 모델 창이 소진되지 않은 계정을 앞세우고 유지 규칙과 점수는 그대로 둔다", () => {
+  const spent = weeklyOnly("a", 50, 100);
+  const close = weeklyOnly("b", 55, 0);
+  const far = weeklyOnly("c", 60, 0);
+  assert.equal(selectAccount([spent, close], now)?.id, "b");
+  // Outside the margin the higher score stands: no reserve is kept for an unknown model.
+  assert.equal(selectAccount([spent, far], now)?.id, "a");
+  assert.deepEqual(rankAccounts([spent, close], now).map((entry) => [entry.account.id, entry.score]), [["b", 0.45], ["a", 0.5]]);
+  // A session already on the account keeps it within the hold, and a known model is unaffected.
+  assert.equal(selectAccount([spent, close], now, new Map(), { accountId: "a", switchedAt: now - 1 })?.id, "a");
+  assert.equal(selectAccount([spent, close], now, new Map(), undefined, "sonnet")?.id, "a");
+  assert.equal(selectAccount([spent, close], now, new Map(), undefined, "fable")?.id, "b");
+});
+
+test("모델 5시간 창과 Claude Code 표면 창도 기간 길이에 맞는 속도로 최솟값에 들어간다", () => {
+  const base = weeklyOnly("a", 0);
+  const model = (used: number, resetsAt: number | null): AccountUsage => ({ ...base, limits: [{ family: "fable", hours: 5, usage: { used, resetsAt } }] });
+  // A fresh five-hour window runs for five hours: 100% over 5 h is faster than the weekly 1%/h.
+  assert.equal(rankAccounts([model(0, null)], now, new Map(), "fable")[0].score, 1);
+  assert.equal(rankAccounts([model(99, now + 4 * hour)], now, new Map(), "fable")[0].score, 1 / 4);
+  assert.equal(rankAccounts([model(100, now + 4 * hour)], now, new Map(), "fable").length, 0);
+  assert.equal(rankAccounts([model(100, now + 4 * hour)], now, new Map(), "sonnet")[0].score, 1);
+  // The Claude Code surface's own limit binds every session on the account, whatever its model.
+  const surface = (usage: { used: number; resetsAt: number } | null): AccountUsage => ({ ...base, limits: [{ family: null, hours: 168, usage }] });
+  for (const family of [undefined, "sonnet"]) assert.equal(rankAccounts([surface({ used: 80, resetsAt: now + 40 * hour })], now, new Map(), family)[0].score, 20 / 40);
+  assert.equal(rankAccounts([surface({ used: 100, resetsAt: now + 40 * hour })], now).length, 0);
+  assert.equal(rankAccounts([surface(null)], now).length, 0);
+});
+
+test("5시간 창이 다음 보고서에서 사라지거나 다시 나타나도 현재 계정과 점수는 그 보고서만 따른다", () => {
+  const current = { accountId: "a", switchedAt: now - hour };
+  const shortSpent: AccountUsage = { ...weeklyOnly("a", 10), fiveHour: { used: 100, resetsAt: now + hour } };
+  // A spent five-hour window: the hold gives way.
+  assert.equal(selectAccount([shortSpent, weeklyOnly("b", 30)], now, new Map(), current)?.id, "b");
+  // The next report has no five-hour window: nothing remembers the spent one.
+  assert.equal(selectAccount([weeklyOnly("a", 10), weeklyOnly("b", 30)], now, new Map(), current)?.id, "a");
+  // It comes back nearly used up: it binds again.
+  const back: AccountUsage = { ...weeklyOnly("a", 10), fiveHour: { used: 99.9, resetsAt: now + hour } };
+  assert.equal(selectAccount([back, weeklyOnly("b", 30)], now, new Map(), current)?.id, "b");
 });

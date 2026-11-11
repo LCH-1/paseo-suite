@@ -113,10 +113,10 @@ test("한도 안내에서 초기화 시각과 모델 계열을 읽는다", () =>
   ]) assert.equal(limitResetAt(unusable, at), null, unusable);
 
   const weekly = limitSignal(completed, [{ type: "assistant_message", text: "You've hit your weekly limit · resets Nov 14, 1pm (Asia/Seoul)" }], at);
-  assert.deepEqual(weekly, { resetsAt: Date.UTC(2026, 10, 14, 4, 0) + minute, family: null });
+  assert.deepEqual(weekly, { resetsAt: Date.UTC(2026, 10, 14, 4, 0) + minute, family: null, period: "weekly" });
   assert.equal(limitSignal(completed, [{ type: "assistant_message", text: "You've hit your Opus limit · resets Nov 14, 1pm (Asia/Seoul)" }], at)?.family, "opus");
   assert.equal(limitSignal(completed, [{ type: "assistant_message", text: "You've reached your Fable limit. Fable requires usage credits." }], at)?.family, "fable");
-  assert.deepEqual(limitSignal({ kind: "failed", error: { message: "API Error: 429 rate_limit_error" } }, [], at), { resetsAt: null, family: null });
+  assert.deepEqual(limitSignal({ kind: "failed", error: { message: "API Error: 429 rate_limit_error" } }, [], at), { resetsAt: null, family: null, period: null });
   assert.equal(limitSignal(completed, [{ type: "assistant_message", text: "작업을 마쳤습니다." }], at), null);
   assert.equal(modelFamily("claude-opus-4-8[1m]"), "opus");
   assert.equal(modelFamily("default"), null);
@@ -172,4 +172,17 @@ test("이어가기 메시지로 시작한 턴은 다시 이어가지 않는다",
   assert.equal(continuedAfterLimit([{ type: "user_message", text: "원래 요청" }, { type: "user_message", text: LIMIT_CONTINUATION }, { type: "assistant_message", text: "You've hit your weekly limit" }]), true);
   assert.equal(continuedAfterLimit([{ type: "user_message", text: LIMIT_CONTINUATION }, { type: "assistant_message", text: "완료" }, { type: "user_message", text: "다음 요청" }]), false);
   assert.equal(continuedAfterLimit([]), false);
+});
+
+test("한도 안내가 가리키는 창을 5시간(세션)·주간으로 구분하고 모델 이름과 따로 읽는다", () => {
+  const at = Date.UTC(2026, 10, 10, 5, 0);
+  const notice = (text: string) => limitSignal(completed, [{ type: "assistant_message", text }], at);
+  assert.deepEqual(notice("You've hit your 5-hour limit · resets 3pm (Asia/Seoul)"), { resetsAt: Date.UTC(2026, 10, 10, 6, 0) + 60_000, family: null, period: "five_hour" });
+  assert.equal(notice("You've hit your five-hour limit")?.period, "five_hour");
+  assert.equal(notice("Session limit reached ∙ resets 3pm (Asia/Seoul)")?.period, "five_hour");
+  assert.equal(notice("You've hit your weekly limit · resets Nov 14, 1pm (Asia/Seoul)")?.period, "weekly");
+  assert.deepEqual(notice("You've hit your weekly Opus limit · resets Nov 14, 1pm (Asia/Seoul)"), { resetsAt: Date.UTC(2026, 10, 14, 4, 0) + 60_000, family: "opus", period: "weekly" });
+  assert.deepEqual(notice("You've hit your Fable limit · resets Nov 14, 1pm (Asia/Seoul)"), { resetsAt: Date.UTC(2026, 10, 14, 4, 0) + 60_000, family: "fable", period: null });
+  const usage = notice("Claude usage limit reached. Your limit will reset at 3pm (Asia/Seoul).");
+  assert.deepEqual(usage, { resetsAt: Date.UTC(2026, 10, 10, 6, 0) + 60_000, family: null, period: null });
 });

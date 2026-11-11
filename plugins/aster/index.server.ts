@@ -5,8 +5,10 @@ import type {
 } from "@getpaseo/plugin/server";
 import {
   accountSecureDirectory,
+  accountShares,
   bootstrapAccounts,
   exhaustedModels,
+  exhaustedSurfaces,
   exhaustedUntil,
   exhaustedAccountsResetAt,
   hasPreviousAccount,
@@ -42,7 +44,7 @@ import { registerCodexRouting } from "./server/codex";
 import { keepAliasesHidden } from "./server/hidden-aliases";
 import { registerAccountManagement } from "./server/account-management";
 import { providerFamily, type ProviderEntries } from "./server/provider-policy";
-import { modelUsage, rankAccounts } from "./server/scheduler";
+import { rankAccounts, sessionLimits } from "./server/scheduler";
 
 const NO_USAGE_READINGS =
   "Aster: Claude 계정의 사용량 정보를 확인할 수 없습니다. Paseo 사용량 화면과 각 계정의 실제 로그인 상태를 확인하세요. 이전 로그인 표시는 현재 인증 상태를 보장하지 않습니다.";
@@ -54,13 +56,30 @@ class AccountUnavailable extends Error {}
 const familyName = (family: string) =>
   family.charAt(0).toUpperCase() + family.slice(1);
 
-/** The lookup's answer, or null when it fails or does not answer within `ms`. */
+/** The lookup's answer, "failed", or "late" when it does not answer within `ms`. */
 function settleWithin<T>(task: Promise<T>, ms: number) {
-  return new Promise<T | null>((resolve) => {
-    const timer = setTimeout(() => resolve(null), ms);
-    task.then(resolve, () => resolve(null)).finally(() => clearTimeout(timer));
+  return new Promise<{ value: T } | "failed" | "late">((resolve) => {
+    const timer = setTimeout(() => resolve("late"), ms);
+    task
+      .then(
+        (value) => resolve({ value }),
+        () => resolve("failed"),
+      )
+      .finally(() => clearTimeout(timer));
   });
 }
+
+/** What the host says about a session reopened because a model change hit an account limit. */
+function modelChangeOf(request: PluginSessionOpenRequest) {
+  const change = (request as { modelChange?: unknown }).modelChange;
+  if (request.reason !== "refresh" || typeof change !== "object" || !change)
+    return null;
+  const { to } = change as { to?: unknown };
+  return { to: typeof to === "string" ? to : null };
+}
+
+/** A family no limit names: a model whose choice no model limit or block can change. */
+const unnamedFamily = "\u0000";
 
 export default function contribute(server: PluginServerContext) {
   const discoverProfiles = profileDiscovery(
@@ -163,41 +182,65 @@ export default function contribute(server: PluginServerContext) {
       until = controller.limitAccount(account.id, Date.now(), limit);
     return until;
   };
-  const hasModelLimits = (readings: ReturnType<typeof mapReports>) =>
-    readings.some((reading) => Object.keys(reading.models ?? {}).length > 0);
   /**
-   * The model family a session opens on: the host's request names the model when it can, a reload
-   * Aster started itself carries the family it chose for, and otherwise the running agent tells,
-   * read in the same order as at the end of a turn so both choose for the same model.
-   * Without any of them the model's own limits are left out of the choice.
+   * The model family each agent was last seen running: named by a session open, chosen by a model
+   * change, or read from the host. It stands in for a lookup whenever the session's model cannot
+   * change the choice, and when a lookup does not answer in time.
    */
-  const sessionFamily = async (
-    request: PluginSessionOpenRequest,
+  const knownFamilies = new Map<string, string | null>();
+  /** Lookups do not wait until then: one that ran out of time says the host is slow to answer. */
+  let lookupsLateUntil = 0;
+  /**
+   * The family of the model an agent runs, as the host reports it: the runtime's model, else the
+   * configured one, in the same order when a session opens as at the end of a turn. A lookup waits
+   * two seconds at most, and after one runs out of time the next ones do not wait for a while, so
+   * a burst of resumes queued one behind another does not add up their waits. A late answer still
+   * lands in `knownFamilies`.
+   */
+  const lookupFamily = async (
     paseo: PluginHookContext["paseo"],
+    agentId: string,
+  ) => {
+    const lookup = Promise.resolve()
+      .then(() => paseo.agents.ref(agentId).refresh())
+      .then((current) => {
+        const family =
+          modelFamily(current?.agent.runtimeInfo?.model) ??
+          modelFamily(current?.agent.model);
+        if (current) knownFamilies.set(agentId, family);
+        return family;
+      });
+    if (Date.now() < lookupsLateUntil) {
+      lookup.catch(() => undefined);
+      return knownFamilies.get(agentId) ?? null;
+    }
+    const answer = await settleWithin(lookup, 2_000);
+    if (answer === "late") lookupsLateUntil = Date.now() + 15_000;
+    return typeof answer === "object"
+      ? answer.value
+      : (knownFamilies.get(agentId) ?? null);
+  };
+  /**
+   * The model families that could lead to different choices: each one a reading or a block names,
+   * no model at all, and a model nothing names. When they all get the same answer the session's
+   * model does not matter, and no lookup is needed to find it.
+   */
+  const familyCandidates = (
     readings: ReturnType<typeof mapReports>,
     accounts: Account[],
+    now: number,
   ) => {
-    // A null model is the provider's default, which only the running session can name.
-    const requested = (request as { model?: string | null }).model;
-    const named = typeof requested === "string" ? modelFamily(requested) : null;
-    if (named) return named;
-    if (reloadFamilies.has(request.agentId))
-      return reloadFamilies.get(request.agentId) ?? null;
-    const now = Date.now();
-    if (
-      request.reason === "create" ||
-      (!hasModelLimits(readings) &&
-        !accounts.some((account) => controller.hasModelLimit(account.id, now)))
-    )
-      return null;
-    const current = await settleWithin(
-      Promise.resolve().then(() => paseo.agents.ref(request.agentId).refresh()),
-      2_000,
-    );
-    return (
-      modelFamily(current?.agent.runtimeInfo?.model) ??
-      modelFamily(current?.agent.model)
-    );
+    const families = new Set<string | null>([null, unnamedFamily]);
+    for (const reading of readings) {
+      for (const family of Object.keys(reading.models ?? {}))
+        families.add(family);
+      for (const limit of reading.limits ?? [])
+        if (limit.family) families.add(limit.family);
+    }
+    for (const account of accounts)
+      for (const family of controller.modelLimits(account.id, now))
+        families.add(family);
+    return [...families];
   };
   const clock = (at: number) =>
     new Date(at).toLocaleString("ko-KR", {
@@ -240,15 +283,36 @@ export default function contribute(server: PluginServerContext) {
             const subscribed = eligible.some(
               (entry) => entry.id === account.id,
             );
-            // A spent model limit leaves the account usable for every other model.
-            const spentModels = exhaustedModels(account, reports)
-              .map(
-                ({ family, resetsAt }) =>
-                  `${familyName(family)} 한도 소진${resetsAt === null ? "" : `(${clock(resetsAt)} 이후 복귀)`}`,
-              )
-              .join(" · ");
-            const withModels = (status: string) =>
-              spentModels ? `${status} · ${spentModels}` : status;
+            // The five-hour share only while the account reports that window: the limit may come back.
+            const shares = accountShares(account, reports);
+            const usage = [
+              typeof shares.fiveHour === "number"
+                ? `5시간 ${Math.round(shares.fiveHour)}%`
+                : null,
+              typeof shares.weekly === "number"
+                ? `주간 ${Math.round(shares.weekly)}%`
+                : null,
+            ].filter((part) => part !== null);
+            const returns = (resetsAt: number | null) =>
+              resetsAt === null ? [] : [`${clock(resetsAt)} 이후 복귀`];
+            // A spent model limit leaves the account usable for every other model. Another surface's
+            // limit does not reach Paseo's Claude Code sessions, so it is only shown.
+            const spent = [
+              ...exhaustedModels(account, reports).flatMap(
+                ({ family, resetsAt }) => [
+                  `${familyName(family)} 한도 소진`,
+                  ...returns(resetsAt),
+                ],
+              ),
+              ...exhaustedSurfaces(account, reports).flatMap(
+                ({ name, resetsAt }) => [
+                  `${name} 한도 소진(자동 분배 미반영)`,
+                  ...returns(resetsAt),
+                ],
+              ),
+            ];
+            const line = (state: string, note?: string) =>
+              [state, ...usage, ...(note ? [note] : []), ...spent].join(" · ");
             return {
               id: account.id,
               base: "claude" as const,
@@ -259,18 +323,24 @@ export default function contribute(server: PluginServerContext) {
                   ? "구독 종료 · 로그인 풀림 · 자동 제외"
                   : "구독 종료 · 자동 제외"
                 : ranked.has(account.id)
-                  ? spentModels
-                    ? `사용 가능 · ${spentModels}`
-                    : "자동 분배 중"
+                  ? line(
+                      exhaustedModels(account, reports).length
+                        ? "사용 가능"
+                        : "자동 분배 중",
+                    )
                   : loginLost
                     ? "로그인 풀림 · 다시 로그인 필요"
                     : startable.has(account.id)
-                      ? withModels("사용 가능 · 첫 사용 후 사용량 표시")
+                      ? typeof shares.weekly === "number"
+                        ? line("사용 가능")
+                        : line("사용 가능", "첫 사용 후 사용량 표시")
                       : resumesAt
-                        ? `한도 소진 · ${clock(resumesAt)} 이후 자동 복귀`
-                        : withModels(
-                            "구독·잔여 한도 확인 필요 · 자동 선택 보류",
-                          ),
+                        ? [
+                            "한도 소진",
+                            ...usage,
+                            `${clock(resumesAt)} 이후 자동 복귀`,
+                          ].join(" · ")
+                        : line("구독·잔여 한도 확인 필요 · 자동 선택 보류"),
             };
           });
         };
@@ -370,20 +440,20 @@ export default function contribute(server: PluginServerContext) {
             const readings = mapReports(eligible, reports, settings.capacities);
             const unavailableMessage = () => {
               const resetAt = exhaustedAccountsResetAt(eligible, reports);
-              if (resetAt !== null) {
-                const when = new Date(resetAt).toLocaleString("ko-KR", {
-                  timeZone: "Asia/Seoul",
-                  month: "numeric",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                });
-                return `Aster: 모든 Claude 계정의 사용 한도가 소진되었습니다. 가장 빠른 초기화는 ${when}(한국시간)입니다. 초기화 후 자동으로 다시 선택됩니다.`;
-              }
+              if (resetAt !== null)
+                return `Aster: 모든 Claude 계정의 사용 한도가 소진되었습니다. 가장 빠른 초기화는 ${clock(resetAt)}(한국시간)입니다. 초기화 후 자동으로 다시 선택됩니다.`;
               return readings.length === 0
                 ? NO_USAGE_READINGS
                 : NO_SELECTABLE_ACCOUNT;
             };
+            const modelSpentMessage = (family: string, resetAt: number) =>
+              `Aster: 모든 Claude 계정의 ${familyName(family)} 한도가 소진되었습니다. 가장 빠른 초기화는 ${clock(resetAt)}(한국시간)입니다.`;
+            const pickAnotherModel =
+              " 다른 모델을 선택하거나 초기화 후 다시 시도하세요.";
+            // A null model is the provider's default, which only the running session can name.
+            const requested = (request as { model?: string | null }).model;
+            const named =
+              typeof requested === "string" ? modelFamily(requested) : null;
             if (preflight) {
               // A block only ranks accounts, so a blocked one still counts as startable.
               if (
@@ -391,32 +461,76 @@ export default function contribute(server: PluginServerContext) {
                   request.agentId,
                   readings,
                   Date.now(),
-                  null,
+                  named,
                   true,
                 ) ||
                 controller.canBootstrap(
-                  bootstrapAccounts(eligible, reports).map(
-                    (account) => account.id,
-                  ),
+                  bootstrapAccounts(
+                    eligible,
+                    reports,
+                    Date.now(),
+                    undefined,
+                    named,
+                  ).map((account) => account.id),
                   Date.now(),
                   true,
                 )
               )
                 return;
-              throw new Error(unavailableMessage());
+              const modelResetAt = named
+                ? exhaustedAccountsResetAt(eligible, reports, Date.now(), named)
+                : null;
+              throw new Error(
+                named &&
+                modelResetAt !== null &&
+                exhaustedAccountsResetAt(eligible, reports) === null
+                  ? modelSpentMessage(named, modelResetAt) + pickAnotherModel
+                  : unavailableMessage(),
+              );
             }
-            const family = await sessionFamily(
-              request,
-              paseo,
-              readings,
-              eligible,
-            );
-            signal.throwIfAborted();
+            // The host reopens a session whose model change an account limit refused: the new model
+            // decides, and the session goes to an account with room for it without the hold.
+            const change = modelChangeOf(request);
+            let family: string | null;
+            if (change) family = modelFamily(change.to) ?? named;
+            else if (named) family = named;
+            else if (reloadFamilies.has(request.agentId))
+              family = reloadFamilies.get(request.agentId) ?? null;
+            else if (request.reason === "create") family = null;
+            else {
+              const now = Date.now();
+              const candidates = familyCandidates(readings, eligible, now);
+              const choices = candidates.map(
+                (candidate) =>
+                  controller.choose(request.agentId, readings, now, candidate)
+                    ?.id ?? null,
+              );
+              // With nothing to choose the model still decides the CLI check and the refusal.
+              family =
+                new Set(choices).size > 1 ||
+                (choices[0] === null && candidates.length > 2)
+                  ? await lookupFamily(paseo, request.agentId)
+                  : (knownFamilies.get(request.agentId) ?? null);
+              signal.throwIfAborted();
+            }
+            // What the host names, a model change, or Aster's own reload is what the session runs now.
+            if (change && !family) knownFamilies.delete(request.agentId);
+            else if (
+              family &&
+              (change || named || reloadFamilies.has(request.agentId))
+            )
+              knownFamilies.set(request.agentId, family);
             // A spent limit of the session's model rules an account out before the current account
             // is kept for its cooldown, so a model change can leave the account that refused it.
             let selectedId =
-              controller.choose(request.agentId, readings, Date.now(), family)
-                ?.id ?? null;
+              controller.choose(
+                request.agentId,
+                readings,
+                Date.now(),
+                family,
+                false,
+                !change,
+              )?.id ?? null;
             const previousId =
               controller.bindings.get(request.agentId)?.accountId ??
               request.env.ASTER_ACCOUNT_ID ??
@@ -429,6 +543,7 @@ export default function contribute(server: PluginServerContext) {
               exhaustedUntil(previousAccount, reports, Date.now(), family) !==
                 null;
             const mayBootstrap =
+              change !== null ||
               request.reason === "create" ||
               authenticationRecovery.has(request.agentId) ||
               refreshing.has(request.agentId) ||
@@ -465,6 +580,7 @@ export default function contribute(server: PluginServerContext) {
                     Date.now(),
                     family,
                     true,
+                    !change,
                   )?.id ?? null;
                 if (!selectedId) {
                   selectedId = controller.bootstrap(
@@ -486,21 +602,43 @@ export default function contribute(server: PluginServerContext) {
             }
             const switchReason = blockedOnly
               ? "차단 중인 계정뿐이라 CLI 확인 경로"
-              : previousExhausted
-                ? family && exhaustedUntil(previousAccount, reports) === null
-                  ? `이전 계정 ${familyName(family)} 한도 소진`
-                  : "이전 계정 한도 소진"
-                : !previousAccount
-                  ? "이전 계정 구독·등록 확인 불가"
-                  : controller.isBlocked(previousAccount.id, Date.now(), family)
-                    ? "이전 계정 한도·인증 차단 중"
-                    : !readings.some(
-                          (reading) => reading.id === previousAccount.id,
+              : change
+                ? `${family ? familyName(family) : "기본"} 모델 변경이 계정 한도로 거절됨`
+                : previousExhausted
+                  ? family && exhaustedUntil(previousAccount, reports) === null
+                    ? `이전 계정 ${familyName(family)} 한도 소진`
+                    : "이전 계정 한도 소진"
+                  : !previousAccount
+                    ? "이전 계정 구독·등록 확인 불가"
+                    : controller.isBlocked(
+                          previousAccount.id,
+                          Date.now(),
+                          family,
                         )
-                      ? "이전 계정 사용량 미확인"
-                      : "여유 계정 우선";
+                      ? "이전 계정 한도·인증 차단 중"
+                      : !readings.some(
+                            (reading) => reading.id === previousAccount.id,
+                          )
+                        ? "이전 계정 사용량 미확인"
+                        : "여유 계정 우선";
             signal.throwIfAborted();
             if (!selectedId) {
+              // A refused model change is refused again only when usage confirms every account
+              // spent for the new model; the host then keeps the session as it was.
+              const changeResetAt = change
+                ? exhaustedAccountsResetAt(
+                    eligible,
+                    reports,
+                    Date.now(),
+                    family,
+                  )
+                : null;
+              if (change && changeResetAt !== null)
+                throw new AccountUnavailable(
+                  family
+                    ? modelSpentMessage(family, changeResetAt)
+                    : unavailableMessage(),
+                );
               if (exhaustedAccountsResetAt(eligible, reports) !== null)
                 throw new AccountUnavailable(unavailableMessage());
               // Every account spent only this model's limit: the accounts still serve other models,
@@ -519,7 +657,7 @@ export default function contribute(server: PluginServerContext) {
                 request.reason === "create"
               )
                 throw new AccountUnavailable(
-                  `Aster: 모든 Claude 계정의 ${familyName(family)} 한도가 소진되었습니다. 가장 빠른 초기화는 ${clock(modelResetAt)}(한국시간)입니다. 다른 모델을 선택하거나 초기화 후 다시 시도하세요.`,
+                  modelSpentMessage(family, modelResetAt) + pickAnotherModel,
                 );
               if (request.reason !== "create") {
                 console.warn(
@@ -601,6 +739,7 @@ export default function contribute(server: PluginServerContext) {
         turnRevisions.delete(agent.id);
         turnStarts.delete(agent.id);
         bootstrapping.delete(agent.id);
+        knownFamilies.delete(agent.id);
       }
     }),
     server.on("agent.archived", ({ agent }) => {
@@ -611,6 +750,7 @@ export default function contribute(server: PluginServerContext) {
       turnRevisions.delete(agent.id);
       turnStarts.delete(agent.id);
       bootstrapping.delete(agent.id);
+      knownFamilies.delete(agent.id);
       void routes.forget(agent.id);
     }),
     server.on(
@@ -716,38 +856,47 @@ export default function contribute(server: PluginServerContext) {
         if (!stillCurrent()) return skip("새 턴 시작");
         let family = limit?.family ?? null;
         let inferred = false;
+        let looked = false;
+        // The running model is looked up only when it can change what happens next.
+        const lookUp = async () => {
+          family = await lookupFamily(paseo, agent.id);
+          looked = true;
+          signal.throwIfAborted();
+          return stillCurrent();
+        };
+        const aliases = sameAccount(accounts, boundId);
         if (
           !family &&
           boundId &&
-          (hasModelLimits(readings) ||
-            controller.hasModelLimit(boundId, Date.now()))
+          // A failure may block the account for one model only, and a block of one model on this
+          // account is released or kept by the model this turn ran on.
+          ((trouble &&
+            familyCandidates(readings, eligible, Date.now()).length > 2) ||
+            aliases.some((account) =>
+              controller.hasModelLimit(account.id, Date.now()),
+            ))
         ) {
-          // Every Claude report names a model limit now, so a failed lookup only leaves the model unknown.
-          const current = await settleWithin(
-            Promise.resolve().then(() => paseo.agents.ref(agent.id).refresh()),
-            2_000,
-          );
-          signal.throwIfAborted();
-          if (!stillCurrent()) return skip("새 턴 시작");
-          family =
-            modelFamily(current?.agent.runtimeInfo?.model) ??
-            modelFamily(current?.agent.model);
-          // A notice that names no model, from a session whose model the fresh usage shows spent
-          // while the account itself still has room, is that model's limit and not the account's.
+          if (!(await lookUp())) return skip("새 턴 시작");
+          // A notice that names neither a model nor the five-hour window, from a session whose model
+          // the fresh usage shows spent while the account itself still has room, is that model's.
           const reading = readings.find((entry) =>
-            sameAccount(accounts, boundId).some(
-              (account) => account.id === entry.id,
-            ),
+            aliases.some((account) => account.id === entry.id),
           );
-          const model = reading && modelUsage(reading, family);
+          const own = reading ? sessionLimits(reading) : [];
+          const model =
+            reading && family
+              ? sessionLimits(reading, family).filter(
+                  (entry) => entry.family === family,
+                )
+              : [];
           if (
             limit &&
             family &&
-            reading &&
-            model &&
-            model.used >= 100 &&
-            reading.weekly.used < 100 &&
-            (reading.fiveHour === null || reading.fiveHour.used < 100)
+            limit.period !== "five_hour" &&
+            model.some(
+              (entry) => entry.usage !== null && entry.usage.used >= 100,
+            ) &&
+            own.every((entry) => entry.usage !== null && entry.usage.used < 100)
           ) {
             limit = { ...limit, family };
             inferred = true;
@@ -770,27 +919,40 @@ export default function contribute(server: PluginServerContext) {
             );
         } else if (
           startedAt !== undefined &&
-          sameAccount(accounts, boundId).filter((account) =>
+          aliases.filter((account) =>
             controller.succeeded(account.id, startedAt, Date.now(), family),
           ).length
         )
           console.info(
             `[aster] account ${boundId}: 정상 응답 확인, 한도 차단 해제`,
           );
-        const now = Date.now();
-        const selectedId =
-          controller.choose(agent.id, readings, now, family)?.id ??
-          (trouble
-            ? bootstrapAccounts(
-                eligible,
-                reports,
-                now,
-                (id) => controller.isBlocked(id, now, family),
-                family,
-              ).find(
-                (account) => !controller.isBlocked(account.id, now, family),
-              )?.id
-            : undefined);
+        const decide = (candidate: string | null) => {
+          const now = Date.now();
+          return (
+            controller.choose(agent.id, readings, now, candidate)?.id ??
+            (trouble
+              ? bootstrapAccounts(
+                  eligible,
+                  reports,
+                  now,
+                  (id) => controller.isBlocked(id, now, candidate),
+                  candidate,
+                ).find(
+                  (account) =>
+                    !controller.isBlocked(account.id, now, candidate),
+                )?.id
+              : undefined) ??
+            null
+          );
+        };
+        // After the blocks settled: the last known model stands in when no model changes the answer.
+        if (!family && !looked && boundId) {
+          const candidates = familyCandidates(readings, eligible, Date.now());
+          if (new Set(candidates.map(decide)).size > 1) {
+            if (!(await lookUp())) return skip("새 턴 시작");
+          } else family = knownFamilies.get(agent.id) ?? null;
+        }
+        const selectedId = decide(family);
         if (!authenticationFailed && !selectedId) return skip("후보 없음");
         if (!authenticationFailed && selectedId === binding?.accountId)
           return skip("같은 계정");

@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import { spawnProcess, terminateProcess } from "@getpaseo/plugin/server";
 import {
   chooseCodexAccount,
+  codexBudget,
   hasCodexSubscription,
   type CodexReading,
 } from "./codex-policy";
@@ -959,3 +960,87 @@ test("인증 브리지는 기록 경로와 대화 ID를 유지하며 토큰을 �
       [process.execPath, script],
     );
   }));
+
+const codexWindow = (
+  used: number,
+  minutes: number | null,
+  hours: number | null,
+) => ({
+  usedPercent: used,
+  windowDurationMins: minutes,
+  resetsAt: hours === null ? null : now + hours * 3_600_000,
+});
+
+test("Codex 점수도 창 개수와 무관하게 남은 사용량 ÷ 초기화까지 남은 시간의 최솟값이라 주간만·5시간+주간·섞인 계정을 같은 방식으로 비교한다", () => {
+  const weeklyOnly = {
+    ...reading("weekly"),
+    windows: [codexWindow(40, 10080, 60)],
+  };
+  const both = {
+    ...reading("both"),
+    windows: [codexWindow(50, 300, 2), codexWindow(40, 10080, 60)],
+  };
+  assert.equal(codexBudget(weeklyOnly, now), 60 / 60);
+  assert.equal(codexBudget(both, now), Math.min(50 / 2, 60 / 60));
+  const tight = {
+    ...reading("tight"),
+    windows: [codexWindow(99, 300, 4), codexWindow(40, 10080, 60)],
+  };
+  assert.equal(codexBudget(tight, now), 1 / 4);
+  // Mixed accounts: the five-hour window counts where it exists and binds.
+  assert.equal(
+    chooseCodexAccount({ readings: [tight, weeklyOnly], now, loads: new Map() })
+      ?.id,
+    "weekly",
+  );
+  assert.equal(
+    chooseCodexAccount({
+      readings: [
+        both,
+        { ...weeklyOnly, windows: [codexWindow(80, 10080, 60)] },
+      ],
+      now,
+      loads: new Map(),
+    })?.id,
+    "both",
+  );
+  // A window without a reset runs for its whole length.
+  assert.equal(
+    codexBudget(
+      { ...reading("fresh"), windows: [codexWindow(0, 300, null)] },
+      now,
+    ),
+    100 / 5,
+  );
+});
+
+test("Codex 창에 초기화 시각과 길이가 모두 없으면 남은 %를 시간당 속도처럼 쓰지 않고 점수를 만들지 않는다", () => {
+  const unknown = {
+    ...reading("unknown"),
+    windows: [codexWindow(0, null, null)],
+  };
+  assert.equal(codexBudget(unknown, now), null);
+  const partial = {
+    ...reading("partial"),
+    windows: [...reading("partial").windows, codexWindow(10, null, null)],
+  };
+  assert.equal(codexBudget(partial, now), null);
+  assert.equal(
+    chooseCodexAccount({
+      readings: [unknown, reading("measured", 90)],
+      now,
+      loads: new Map(),
+    })?.id,
+    "measured",
+  );
+  assert.equal(
+    codexBudget(
+      {
+        ...reading("broken"),
+        windows: [{ ...codexWindow(10, 300, null), resetsAt: Number.NaN }],
+      },
+      now,
+    ),
+    null,
+  );
+});

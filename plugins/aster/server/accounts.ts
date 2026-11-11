@@ -13,6 +13,7 @@ import {
   isCurrentUsage,
   policy,
   type AccountUsage,
+  type ExtraLimit,
   type WindowUsage,
 } from "./scheduler.ts";
 import { hostUsageReader } from "./host-usage";
@@ -35,6 +36,8 @@ const registrySchema = z.object({
 });
 const windowSchema = z.object({
   id: z.string(),
+  // Display only: a label of another shape must not cost the report.
+  label: z.string().optional().catch(undefined),
   // The host passes the provider's utilization through; anything past the limit is a spent limit.
   usedPct: z
     .number()
@@ -61,28 +64,66 @@ const reportSchema = z.object({
 });
 export const reportsSchema = z.array(reportSchema);
 type UsageWindow = z.infer<typeof windowSchema>;
+type Report = z.infer<typeof reportSchema>;
+
+export type LimitPeriod = "five_hour" | "weekly";
+const periodHours: Record<LimitPeriod, number> = { five_hour: 5, weekly: 168 };
 
 /**
- * The model family of a `weekly_model_<id>` window: a bare family name, optionally after
- * `claude-` and before a version. Anything else is a limit Aster cannot tie to a model.
+ * Paseo starts every Claude session through Claude Code, so a limit on the Claude Code surface
+ * (`Code` in the host's usage source) limits each of them like the account's own windows.
  */
-export function windowFamily(id: string) {
-  return (
-    /^weekly_model_(?:claude[-_])?([a-z]+)(?:[-_]\d[\w.-]*)?$/i
-      .exec(id)?.[1]
-      .toLowerCase() ?? null
+const claudeCodeSurface = /^(?:claude[-_]?)?code(?:_\d+)?$/;
+
+/**
+ * What a usage window limits: `period` is its length, `family` the model family it is confined to
+ * (null for the whole account). The account's `five_hour` and `weekly` windows, and windows named
+ * `<period>_model_<family>` or `<period>_surface_<surface>`. Null for a window that limits no
+ * Paseo session in a way Aster can tell: another surface, or a model it cannot tie to a family.
+ */
+export function windowLimit(
+  id: string,
+): { period: LimitPeriod; family: string | null } | null {
+  if (id === "five_hour" || id === "weekly")
+    return { period: id, family: null };
+  const match = /^(five_hour|weekly)_(model|surface)_(.+)$/.exec(
+    id.toLowerCase(),
   );
+  if (!match) return null;
+  const period = match[1] as LimitPeriod;
+  if (match[2] === "surface")
+    return claudeCodeSurface.test(match[3]) ? { period, family: null } : null;
+  // A bare family name, optionally after `claude-` and before a version.
+  const family = /^(?:claude[-_])?([a-z]+)(?:[-_]\d[\w.-]*)?$/.exec(
+    match[3],
+  )?.[1];
+  return family ? { period, family } : null;
+}
+
+/** The model family a model window is confined to, or null for any other window. */
+export function windowFamily(id: string) {
+  return windowLimit(id)?.family ?? null;
+}
+
+/** The name of a surface other than Claude Code that a window limits, for display only. */
+function otherSurface(window: UsageWindow) {
+  const match = /^(?:five_hour|weekly)_surface_(.+)$/.exec(
+    window.id.toLowerCase(),
+  );
+  if (!match || claudeCodeSurface.test(match[1])) return null;
+  const label = window.label?.split("\u00b7").pop()?.trim();
+  return label || match[1].charAt(0).toUpperCase() + match[1].slice(1);
 }
 
 /**
  * Whether a window limits a session on `family`: the account's own limits always do, a model's
- * weekly limit only for that model. Without a family the model limits are left out.
+ * limit only for that model. Without a family the model limits are left out.
  */
 function limitsSession(id: string, family?: string | null) {
+  const limit = windowLimit(id);
   return (
-    id === "five_hour" ||
-    id === "weekly" ||
-    (!!family && windowFamily(id) === family)
+    limit !== null &&
+    (limit.family === null || (!!family && limit.family === family))
   );
 }
 
@@ -95,25 +136,91 @@ function windowUsage(window: UsageWindow): WindowUsage | null {
       };
 }
 
-/** A family named twice keeps its unknown value, otherwise its more used one. */
-function modelWindows(windows: UsageWindow[]) {
-  const models: Record<string, WindowUsage | null> = {};
-  for (const window of windows) {
-    const family = windowFamily(window.id);
-    if (!family) continue;
-    const usage = windowUsage(window);
-    const previous = Object.hasOwn(models, family) ? models[family] : undefined;
-    models[family] =
-      previous === undefined
-        ? usage
-        : previous === null || usage === null
-          ? null
-          : previous.used >= usage.used
-            ? previous
-            : usage;
-  }
-  return models;
+/** A limit named twice keeps its unknown value, otherwise its more used one. */
+function tighter(
+  previous: WindowUsage | null | undefined,
+  usage: WindowUsage | null,
+) {
+  return previous === undefined
+    ? usage
+    : previous === null || usage === null
+      ? null
+      : previous.used >= usage.used
+        ? previous
+        : usage;
 }
+
+/** The limits beyond the account's five-hour and weekly windows, by model family and period. */
+function scopedLimits(windows: UsageWindow[]) {
+  const models: Record<string, WindowUsage | null> = {};
+  const limits = new Map<string, ExtraLimit>();
+  for (const window of windows) {
+    const limit = windowLimit(window.id);
+    if (!limit || window.id === "five_hour" || window.id === "weekly") continue;
+    const usage = windowUsage(window);
+    if (limit.family !== null && limit.period === "weekly") {
+      const family = limit.family;
+      models[family] = tighter(
+        Object.hasOwn(models, family) ? models[family] : undefined,
+        usage,
+      );
+      continue;
+    }
+    const key = `${limit.period}:${limit.family ?? ""}`;
+    limits.set(key, {
+      family: limit.family,
+      hours: periodHours[limit.period],
+      usage: tighter(limits.get(key)?.usage, usage),
+    });
+  }
+  return { models, limits: [...limits.values()] };
+}
+
+const fetchedAt = (entry: Report) => {
+  const at = Date.parse(entry.fetchedAt);
+  return Number.isFinite(at) ? at : -Infinity;
+};
+
+/**
+ * One account's windows across its reports. The windows of `base`, the newest reports, stand as
+ * they are, so a newer value always wins and an early reset shows. A window they leave out or name
+ * without a value takes the newest value another report has for it: one source's sparse answer
+ * must not hide a limit another source confirmed. The five-hour window is the exception: newer
+ * reports that name the weekly window but not that one say the account no longer has the limit.
+ * `fill` narrows which windows other reports may complete.
+ */
+function mergeWindows(
+  base: Report[],
+  others: Report[],
+  fill: (id: string) => boolean = () => true,
+) {
+  const windows = new Map<string, UsageWindow>();
+  for (const entry of base)
+    for (const window of entry.report.windows ?? []) {
+      const previous = windows.get(window.id);
+      if (
+        previous === undefined ||
+        previous.usedPct === null ||
+        (window.usedPct !== null && window.usedPct > previous.usedPct)
+      )
+        windows.set(window.id, window);
+    }
+  const lifted = windows.has("weekly") && !windows.has("five_hour");
+  for (const entry of [...others].sort((a, b) => fetchedAt(b) - fetchedAt(a)))
+    for (const window of entry.report.windows ?? []) {
+      if (
+        window.usedPct === null ||
+        !fill(window.id) ||
+        (lifted && window.id === "five_hour")
+      )
+        continue;
+      const current = windows.get(window.id);
+      if (current === undefined || current.usedPct === null)
+        windows.set(window.id, window);
+    }
+  return [...windows.values()];
+}
+
 export const settingsSchema = z.object({
   command: commandSchema.default(defaultCommand),
   capacities: z.record(z.string(), z.number().positive()).default({}),
@@ -323,10 +430,15 @@ export function mapReports(
   const seenReports = new Set<string>();
   return accounts.flatMap((account) => {
     const matching = matchingReports(account, reports);
-    const usable = matching
+    const answers = matching.filter(
+      (report) => report.report.status === "available" && !deniesUsage(report),
+    );
+    const current = answers.filter(
+      (report) =>
+        fetchedAt(report) <= now && now - fetchedAt(report) <= policy.maxAge,
+    );
+    const usable = answers
       .flatMap((report) => {
-        if (report.report.status !== "available" || deniesUsage(report))
-          return [];
         const windows = report.report.windows ?? [];
         const short = windows.find((window) => window.id === "five_hour");
         const weekly = windows.find((window) => window.id === "weekly");
@@ -343,13 +455,23 @@ export function mapReports(
           : /Max\s+5x/i.test(report.report.planLabel ?? "")
             ? 5
             : 1;
+        // The account's own windows come from this one report. A model's or a surface's limit it
+        // leaves out or names without a value is taken from the account's other current reports.
+        const scoped = scopedLimits(
+          mergeWindows(
+            [report],
+            current.filter((other) => other !== report),
+            (id) => id !== "five_hour" && id !== "weekly",
+          ),
+        );
         const usage: AccountUsage = {
           id: account.id,
           capacity: capacities[account.id] ?? planCapacity,
           fetchedAt: Date.parse(report.fetchedAt),
           fiveHour: short ? windowUsage(short) : null,
           weekly: windowUsage(weekly)!,
-          models: modelWindows(windows),
+          models: scoped.models,
+          ...(scoped.limits.length ? { limits: scoped.limits } : {}),
         };
         return isCurrentUsage(usage, now)
           ? [{ usage, identity: report.id.slice(report.id.indexOf(":") + 1) }]
@@ -410,29 +532,38 @@ export function expiredAccounts(
 }
 
 /**
- * The windows of an account's newest report that has any: an older report from another
- * source must not keep a limit that has since been lifted, or reset early.
+ * The account's windows as its newest report that has any shows them, completed window by window
+ * from its other reports (`mergeWindows`): a newer value wins, so an early reset shows, and a newer
+ * report that leaves a window out or names it without a value does not hide an older confirmed one.
  */
-function newestWindows(
+function accountWindows(
   account: Account,
   reports: z.infer<typeof reportsSchema>,
 ) {
   const withWindows = matchingReports(account, reports).filter(
     (entry) => !deniesUsage(entry) && (entry.report.windows?.length ?? 0) > 0,
   );
-  const at = (entry: (typeof withWindows)[number]) => {
-    const fetched = Date.parse(entry.fetchedAt);
-    return Number.isFinite(fetched) ? fetched : -Infinity;
-  };
-  const newest = Math.max(...withWindows.map(at));
-  return withWindows
-    .filter((entry) => at(entry) === newest)
-    .flatMap((entry) => entry.report.windows ?? []);
+  const newest = Math.max(...withWindows.map(fetchedAt));
+  return mergeWindows(
+    withWindows.filter((entry) => fetchedAt(entry) === newest),
+    withWindows.filter((entry) => fetchedAt(entry) !== newest),
+  );
+}
+
+/** A used-up window whose reset is still ahead, or unknown. */
+function spentWindow(window: UsageWindow, now: number) {
+  return (
+    window.usedPct !== null &&
+    window.usedPct >= 100 &&
+    (window.resetsAt === null ||
+      !Number.isFinite(Date.parse(window.resetsAt)) ||
+      Date.parse(window.resetsAt) > now)
+  );
 }
 
 /**
  * When a fully used limit lifts: the latest reset among exhausted windows, or null if none is
- * exhausted. With `family`, that model's weekly limit counts as well as the account's own.
+ * exhausted. With `family`, that model's limits count as well as the account's own.
  */
 export function exhaustedUntil(
   account: Account,
@@ -440,7 +571,7 @@ export function exhaustedUntil(
   now = Date.now(),
   family?: string | null,
 ) {
-  const resets = newestWindows(account, reports)
+  const resets = accountWindows(account, reports)
     .filter(
       (window) =>
         limitsSession(window.id, family) &&
@@ -454,22 +585,22 @@ export function exhaustedUntil(
   return resets.length ? Math.max(...resets) : null;
 }
 
-/** Model limits that are spent while the account itself may still have room, with when each lifts. */
-export function exhaustedModels(
-  account: Account,
-  reports: z.infer<typeof reportsSchema>,
-  now = Date.now(),
+/** Spent limits keyed by name, with when each lifts (null when a spent window names no reset). */
+function spentBy(
+  windows: UsageWindow[],
+  now: number,
+  name: (window: UsageWindow) => string | null,
 ) {
   const spent = new Map<string, number | null>();
-  for (const window of newestWindows(account, reports)) {
-    const family = windowFamily(window.id);
-    if (!family || window.usedPct === null || window.usedPct < 100) continue;
+  for (const window of windows) {
+    const key = name(window);
+    if (!key || window.usedPct === null || window.usedPct < 100) continue;
     const at = window.resetsAt === null ? null : Date.parse(window.resetsAt);
     // A reset that already passed most likely lifted the limit; it is not shown as spent.
     if (at !== null && !(at > now)) continue;
-    const previous = spent.get(family);
+    const previous = spent.get(key);
     spent.set(
-      family,
+      key,
       previous === undefined
         ? at
         : previous === null || at === null
@@ -477,12 +608,50 @@ export function exhaustedModels(
           : Math.max(previous, at),
     );
   }
-  return [...spent].map(([family, resetsAt]) => ({ family, resetsAt }));
+  return [...spent];
+}
+
+/** Model limits that are spent while the account itself may still have room, with when each lifts. */
+export function exhaustedModels(
+  account: Account,
+  reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
+) {
+  return spentBy(accountWindows(account, reports), now, (window) =>
+    windowFamily(window.id),
+  ).map(([family, resetsAt]) => ({ family, resetsAt }));
+}
+
+/** Spent limits of surfaces other than Claude Code: shown to the user, never used for routing. */
+export function exhaustedSurfaces(
+  account: Account,
+  reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
+) {
+  return spentBy(accountWindows(account, reports), now, otherSurface).map(
+    ([name, resetsAt]) => ({ name, resetsAt }),
+  );
+}
+
+/**
+ * The used share of the account's five-hour and weekly windows: undefined for a window the
+ * account does not report, null for one reported without a value.
+ */
+export function accountShares(
+  account: Account,
+  reports: z.infer<typeof reportsSchema>,
+) {
+  const windows = accountWindows(account, reports);
+  const share = (id: string) => {
+    const window = windows.find((entry) => entry.id === id);
+    return window === undefined ? undefined : window.usedPct;
+  };
+  return { fiveHour: share("five_hour"), weekly: share("weekly") };
 }
 
 /**
  * A partial report can prove exhaustion even when it cannot produce a routing score.
- * With `family`, a spent weekly limit of that model counts as exhaustion too.
+ * With `family`, a spent limit of that model counts as exhaustion too.
  */
 export function exhaustedAccountsResetAt(
   accounts: Account[],
@@ -493,24 +662,23 @@ export function exhaustedAccountsResetAt(
   if (!accounts.length) return null;
   const resets: number[] = [];
   for (const account of accounts) {
-    const current = matchingReports(account, reports).filter((entry) => {
-      const at = Date.parse(entry.fetchedAt);
-      return Number.isFinite(at) && at <= now && now - at <= policy.maxAge;
-    });
-    const latestAt = Math.max(
-      ...current.map((entry) => Date.parse(entry.fetchedAt)),
+    const current = matchingReports(account, reports).filter(
+      (entry) =>
+        fetchedAt(entry) <= now && now - fetchedAt(entry) <= policy.maxAge,
     );
-    const exhausted = current
-      .filter(
-        (entry) =>
-          Date.parse(entry.fetchedAt) === latestAt && !deniesUsage(entry),
-      )
-      .flatMap((entry) =>
-        entry.report.status === "available" ? (entry.report.windows ?? []) : [],
-      )
-      .filter(
-        (window) => limitsSession(window.id, family) && window.usedPct === 100,
-      );
+    const latestAt = Math.max(...current.map(fetchedAt));
+    const answers = current.filter(
+      (entry) => !deniesUsage(entry) && entry.report.status === "available",
+    );
+    const latest = answers.filter((entry) => fetchedAt(entry) === latestAt);
+    if (!latest.some((entry) => (entry.report.windows?.length ?? 0) > 0))
+      return null;
+    const exhausted = mergeWindows(
+      latest,
+      answers.filter((entry) => fetchedAt(entry) !== latestAt),
+    ).filter(
+      (window) => limitsSession(window.id, family) && window.usedPct === 100,
+    );
     if (!exhausted.length) return null;
     const accountResets = exhausted.map((window) =>
       Date.parse(window.resetsAt ?? ""),
@@ -524,9 +692,12 @@ export function exhaustedAccountsResetAt(
 
 /**
  * Accounts worth opening through the official CLI's own check when usage gives no score:
- * an expired login, a usage lookup throttled by Claude, or a report missing its weekly window.
- * A report without a five-hour window is complete (the account has no such limit) and is
- * scored by `mapReports` instead. With `family`, that model's spent limit is honoured too.
+ * an expired login, a usage lookup throttled by Claude, or an incomplete report. A report is
+ * incomplete when it misses the weekly window, or when a limit the session runs into (the
+ * account's own, or with `family` that model's) has no usable value: none, an unknown or passed
+ * reset, or use without a reset. It still needs a limit of the account's own that confirms room,
+ * and no limit the session runs into may be confirmed spent. A report without a five-hour window
+ * is complete (the account has no such limit) and is scored by `mapReports` instead.
  */
 export function bootstrapAccounts(
   accounts: Account[],
@@ -538,6 +709,12 @@ export function bootstrapAccounts(
   const expired = new Set(expiredAccounts(accounts, reports, now));
   const seen = new Set<string>();
   const throttled = new Set<Account>();
+  const room = (window: UsageWindow) =>
+    window.usedPct !== null &&
+    window.usedPct < 100 &&
+    (window.resetsAt === null
+      ? window.usedPct === 0
+      : Date.parse(window.resetsAt) > now);
   const startable = accounts.filter((account) => {
     const identity =
       account.identity ?? account.email?.toLowerCase() ?? account.home;
@@ -554,32 +731,44 @@ export function bootstrapAccounts(
           Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt) ||
           Number(deniesUsage(b)) - Number(deniesUsage(a)),
       )[0];
-    const windows = latest?.report.windows ?? [];
-    const known = windows.filter((window) => limitsSession(window.id, family));
+    const answered =
+      latest?.report.status === "available" && !deniesUsage(latest);
+    const answers = matching.filter(
+      (entry) =>
+        entry !== latest &&
+        entry.report.status === "available" &&
+        !deniesUsage(entry) &&
+        fetchedAt(entry) <= now,
+    );
+    // What the newest answer shows, completed from current answers only: a stale report must not
+    // make an incomplete one look complete. Any older answer still counts for a spent limit.
+    const windows = answered
+      ? mergeWindows(
+          [latest],
+          answers.filter((entry) => now - fetchedAt(entry) <= policy.maxAge),
+        ).filter((window) => limitsSession(window.id, family))
+      : [];
+    const known = answered
+      ? mergeWindows([latest], answers).filter((window) =>
+          limitsSession(window.id, family),
+        )
+      : [];
     const partial =
-      latest?.report.status === "available" &&
-      !deniesUsage(latest) &&
+      answered &&
       now - Date.parse(latest.fetchedAt) <= policy.maxAge &&
-      windows.some((window) => window.id === "five_hour") &&
-      !windows.some((window) => window.id === "weekly") &&
-      known.every(
-        (window) =>
-          window.usedPct !== null &&
-          window.usedPct >= 0 &&
-          window.usedPct < 100 &&
-          (window.resetsAt === null
-            ? window.usedPct === 0
-            : Date.parse(window.resetsAt) > now),
+      (!windows.some((window) => window.id === "weekly") ||
+        windows.some((window) => !room(window))) &&
+      windows.some(
+        (window) => windowLimit(window.id)?.family === null && room(window),
       ) &&
+      !known.some((window) => spentWindow(window, now)) &&
       !matching.some(
         (entry) =>
           Date.parse(entry.fetchedAt) >= Date.parse(latest.fetchedAt) &&
           Date.parse(entry.fetchedAt) <= now &&
           (entry.report.windows ?? []).some(
             (window) =>
-              limitsSession(window.id, family) &&
-              window.usedPct !== null &&
-              window.usedPct >= 100,
+              limitsSession(window.id, family) && spentWindow(window, now),
           ),
       );
     // The usage endpoint's throttling is not a quota or authentication rejection.
@@ -600,12 +789,7 @@ export function bootstrapAccounts(
       !matching.some((entry) =>
         (entry.report.windows ?? []).some(
           (window) =>
-            limitsSession(window.id, family) &&
-            window.usedPct !== null &&
-            window.usedPct >= 100 &&
-            (window.resetsAt === null ||
-              !Number.isFinite(Date.parse(window.resetsAt)) ||
-              Date.parse(window.resetsAt) > now),
+            limitsSession(window.id, family) && spentWindow(window, now),
         ),
       );
     if (!expired.has(account) && !partial && !rateLimited) return false;

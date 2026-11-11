@@ -97,11 +97,22 @@ export interface LimitSignal {
   resetsAt: number | null;
   /** The model family the limit names, when it is not the whole account's. */
   family: string | null;
+  /** The window the notice names: the five-hour (session) limit or a weekly one. */
+  period: "five_hour" | "weekly" | null;
 }
+
+// A word that names the limit itself, a few words ahead of "limit".
+const naming = (words: string) => new RegExp(String.raw`\b(?:${words})\b(?=[^\n·|]{0,20}\blimit\b)`, "i");
+const fiveHourLimit = naming(String.raw`5[- ]?hours?|five[- ]hours?|session`);
+const weeklyLimit = naming("weekly");
 
 function describeLimit(text: string, now: number): LimitSignal {
   const line = text.split("\n", 1)[0].slice(0, 400);
-  return { resetsAt: limitResetAt(line, now), family: modelFamily(/\b(?:opus|sonnet|haiku|fable)\b(?=[^\n·|]{0,20}\blimit\b)/i.exec(line)?.[0]) };
+  return {
+    resetsAt: limitResetAt(line, now),
+    family: modelFamily(naming("opus|sonnet|haiku|fable").exec(line)?.[0]),
+    period: fiveHourLimit.test(line) ? "five_hour" : weeklyLimit.test(line) ? "weekly" : null,
+  };
 }
 
 /** The family a model ID belongs to (`claude-<family>-…`), or the known family an alias names. */
