@@ -426,6 +426,45 @@ export default function contribute(server: PluginServerContext) {
                 );
               return account ? withAccount(request, account) : undefined;
             };
+            // A null model is the provider's default, which only the running session can name.
+            const requested = (request as { model?: string | null }).model;
+            const named =
+              typeof requested === "string" ? modelFamily(requested) : null;
+            // The host reopens a session whose model change an account limit refused: the new model
+            // decides, and the session goes to an account with room for it without the hold.
+            const change = preflight ? null : modelChangeOf(request);
+            const changedTo = change ? (modelFamily(change.to) ?? named) : null;
+            const previousId =
+              controller.bindings.get(request.agentId)?.accountId ??
+              request.env.ASTER_ACCOUNT_ID ??
+              (request.provider !== "claude" ? request.provider : null);
+            // The account that just refused the new model is the last resort for it, whatever its
+            // usage still shows. A known model is blocked there as a limit notice would block it,
+            // so later turns and its other sessions on that model step aside too.
+            const refused = new Set(
+              change
+                ? sameAccount(accounts, previousId).map((account) => account.id)
+                : [],
+            );
+            if (changedTo)
+              for (const id of refused)
+                controller.limitAccount(id, Date.now(), {
+                  family: changedTo,
+                  resetsAt: null,
+                  period: null,
+                  startedAt: Date.now(),
+                });
+            // What the host names, a model change, or Aster's own reload is what the session runs
+            // once it opens. A refused open leaves the session on the model it ran, so only an open
+            // that goes ahead is remembered.
+            const remember = (family: string | null) => {
+              if (change && !family) knownFamilies.delete(request.agentId);
+              else if (
+                family &&
+                (change || named || reloadFamilies.has(request.agentId))
+              )
+                knownFamilies.set(request.agentId, family);
+            };
             let reports;
             try {
               reports = await readUsage(settings.command, signal);
@@ -435,7 +474,13 @@ export default function contribute(server: PluginServerContext) {
               console.warn(
                 `[aster] session ${request.agentId}: 사용량 조회 실패, 기존 환경으로 재개`,
               );
-              return preserveAccount();
+              const preserved = preserveAccount();
+              remember(
+                change
+                  ? changedTo
+                  : (named ?? reloadFamilies.get(request.agentId) ?? null),
+              );
+              return preserved;
             }
             const readings = mapReports(eligible, reports, settings.capacities);
             const unavailableMessage = () => {
@@ -450,10 +495,6 @@ export default function contribute(server: PluginServerContext) {
               `Aster: 모든 Claude 계정의 ${familyName(family)} 한도가 소진되었습니다. 가장 빠른 초기화는 ${clock(resetAt)}(한국시간)입니다.`;
             const pickAnotherModel =
               " 다른 모델을 선택하거나 초기화 후 다시 시도하세요.";
-            // A null model is the provider's default, which only the running session can name.
-            const requested = (request as { model?: string | null }).model;
-            const named =
-              typeof requested === "string" ? modelFamily(requested) : null;
             if (preflight) {
               // A block only ranks accounts, so a blocked one still counts as startable.
               if (
@@ -488,11 +529,8 @@ export default function contribute(server: PluginServerContext) {
                   : unavailableMessage(),
               );
             }
-            // The host reopens a session whose model change an account limit refused: the new model
-            // decides, and the session goes to an account with room for it without the hold.
-            const change = modelChangeOf(request);
             let family: string | null;
-            if (change) family = modelFamily(change.to) ?? named;
+            if (change) family = changedTo;
             else if (named) family = named;
             else if (reloadFamilies.has(request.agentId))
               family = reloadFamilies.get(request.agentId) ?? null;
@@ -513,28 +551,17 @@ export default function contribute(server: PluginServerContext) {
                   : (knownFamilies.get(request.agentId) ?? null);
               signal.throwIfAborted();
             }
-            // What the host names, a model change, or Aster's own reload is what the session runs now.
-            if (change && !family) knownFamilies.delete(request.agentId);
-            else if (
-              family &&
-              (change || named || reloadFamilies.has(request.agentId))
-            )
-              knownFamilies.set(request.agentId, family);
             // A spent limit of the session's model rules an account out before the current account
             // is kept for its cooldown, so a model change can leave the account that refused it.
             let selectedId =
               controller.choose(
                 request.agentId,
-                readings,
+                readings.filter((reading) => !refused.has(reading.id)),
                 Date.now(),
                 family,
                 false,
                 !change,
               )?.id ?? null;
-            const previousId =
-              controller.bindings.get(request.agentId)?.accountId ??
-              request.env.ASTER_ACCOUNT_ID ??
-              (request.provider !== "claude" ? request.provider : null);
             const previousAccount = eligible.find(
               (entry) => entry.id === previousId,
             );
@@ -557,7 +584,7 @@ export default function contribute(server: PluginServerContext) {
               selectedId = controller.bootstrap(
                 request.agentId,
                 bootstrapAccounts(
-                  eligible,
+                  eligible.filter((account) => !refused.has(account.id)),
                   reports,
                   Date.now(),
                   (id) => controller.isBlocked(id, Date.now(), family),
@@ -601,7 +628,9 @@ export default function contribute(server: PluginServerContext) {
               }
             }
             const switchReason = blockedOnly
-              ? "차단 중인 계정뿐이라 CLI 확인 경로"
+              ? selectedId !== null && refused.has(selectedId)
+                ? "모델 변경을 거절한 계정뿐이라 CLI 확인 경로"
+                : "차단 중인 계정뿐이라 CLI 확인 경로"
               : change
                 ? `${family ? familyName(family) : "기본"} 모델 변경이 계정 한도로 거절됨`
                 : previousExhausted
@@ -665,7 +694,9 @@ export default function contribute(server: PluginServerContext) {
                     ? `[aster] session ${request.agentId}: 모든 계정의 ${family} 한도 소진, 기존 환경으로 재개`
                     : `[aster] session ${request.agentId}: 선택 가능한 사용량 정보 없음, 기존 환경으로 재개`,
                 );
-                return preserveAccount();
+                const preserved = preserveAccount();
+                remember(family);
+                return preserved;
               }
               throw new Error(unavailableMessage());
             }
@@ -686,6 +717,7 @@ export default function contribute(server: PluginServerContext) {
                     ? ` (이전 ${previousId}, 사유: ${switchReason})`
                     : ""),
             );
+            remember(family);
             return withAccount(request, account);
           });
         } catch (error) {

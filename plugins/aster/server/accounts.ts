@@ -437,6 +437,15 @@ export function mapReports(
       (report) =>
         fetchedAt(report) <= now && now - fetchedAt(report) <= policy.maxAge,
     );
+    // A model's or a surface's limit takes its newest value among the account's current reports,
+    // as `accountWindows` shows it: the older complete report a score comes from must not outvote
+    // a newer partial one that shows the limit spent, or reset early.
+    const latestAt = Math.max(...current.map(fetchedAt));
+    const scopedWindows = mergeWindows(
+      current.filter((report) => fetchedAt(report) === latestAt),
+      current.filter((report) => fetchedAt(report) !== latestAt),
+      (id) => id !== "five_hour" && id !== "weekly",
+    );
     const usable = answers
       .flatMap((report) => {
         const windows = report.report.windows ?? [];
@@ -455,15 +464,14 @@ export function mapReports(
           : /Max\s+5x/i.test(report.report.planLabel ?? "")
             ? 5
             : 1;
-        // The account's own windows come from this one report. A model's or a surface's limit it
-        // leaves out or names without a value is taken from the account's other current reports.
-        const scoped = scopedLimits(
-          mergeWindows(
-            [report],
-            current.filter((other) => other !== report),
-            (id) => id !== "five_hour" && id !== "weekly",
+        // The account's own windows come from this one report, the other limits from the newest
+        // values. A limit only this report names, and without a value, stays unknown.
+        const scoped = scopedLimits([
+          ...scopedWindows,
+          ...windows.filter(
+            (window) => !scopedWindows.some((entry) => entry.id === window.id),
           ),
-        );
+        ]);
         const usage: AccountUsage = {
           id: account.id,
           capacity: capacities[account.id] ?? planCapacity,
@@ -532,22 +540,64 @@ export function expiredAccounts(
 }
 
 /**
+ * When each window the reports show spent lifts, as far as they tell: going from the newest
+ * reports back, the latest reset still ahead among reports of one time that show it spent. A spent
+ * window naming no reset takes one from an older report that still shows it spent; a report that
+ * shows the window with room, or spent with a reset (even a passed one), ends the search.
+ */
+function spentResets(entries: Report[], now: number) {
+  const resets = new Map<string, number>();
+  const settled = new Set<string>();
+  for (const at of [...new Set(entries.map(fetchedAt))].sort((a, b) => b - a)) {
+    const ended = new Set<string>();
+    for (const entry of entries) {
+      if (fetchedAt(entry) !== at) continue;
+      for (const window of entry.report.windows ?? []) {
+        if (window.usedPct === null || settled.has(window.id)) continue;
+        const reset =
+          window.resetsAt === null ? NaN : Date.parse(window.resetsAt);
+        if (window.usedPct >= 100 && Number.isNaN(reset)) continue;
+        ended.add(window.id);
+        if (window.usedPct >= 100 && reset > now)
+          resets.set(
+            window.id,
+            Math.max(resets.get(window.id) ?? reset, reset),
+          );
+      }
+    }
+    for (const id of ended) settled.add(id);
+  }
+  return resets;
+}
+
+/**
  * The account's windows as its newest report that has any shows them, completed window by window
  * from its other reports (`mergeWindows`): a newer value wins, so an early reset shows, and a newer
  * report that leaves a window out or names it without a value does not hide an older confirmed one.
+ * A spent window lifts when `spentResets` says, so a newer report that names no reset for it does
+ * not drop the one an older report confirmed.
  */
 function accountWindows(
   account: Account,
   reports: z.infer<typeof reportsSchema>,
+  now = Date.now(),
 ) {
   const withWindows = matchingReports(account, reports).filter(
     (entry) => !deniesUsage(entry) && (entry.report.windows?.length ?? 0) > 0,
   );
   const newest = Math.max(...withWindows.map(fetchedAt));
+  const resets = spentResets(withWindows, now);
   return mergeWindows(
     withWindows.filter((entry) => fetchedAt(entry) === newest),
     withWindows.filter((entry) => fetchedAt(entry) !== newest),
-  );
+  ).map((window) => {
+    const reset = resets.get(window.id);
+    return reset !== undefined &&
+      window.usedPct !== null &&
+      window.usedPct >= 100
+      ? { ...window, resetsAt: new Date(reset).toISOString() }
+      : window;
+  });
 }
 
 /** A used-up window whose reset is still ahead, or unknown. */
@@ -571,7 +621,7 @@ export function exhaustedUntil(
   now = Date.now(),
   family?: string | null,
 ) {
-  const resets = accountWindows(account, reports)
+  const resets = accountWindows(account, reports, now)
     .filter(
       (window) =>
         limitsSession(window.id, family) &&
@@ -617,7 +667,7 @@ export function exhaustedModels(
   reports: z.infer<typeof reportsSchema>,
   now = Date.now(),
 ) {
-  return spentBy(accountWindows(account, reports), now, (window) =>
+  return spentBy(accountWindows(account, reports, now), now, (window) =>
     windowFamily(window.id),
   ).map(([family, resetsAt]) => ({ family, resetsAt }));
 }
@@ -628,7 +678,7 @@ export function exhaustedSurfaces(
   reports: z.infer<typeof reportsSchema>,
   now = Date.now(),
 ) {
-  return spentBy(accountWindows(account, reports), now, otherSurface).map(
+  return spentBy(accountWindows(account, reports, now), now, otherSurface).map(
     ([name, resetsAt]) => ({ name, resetsAt }),
   );
 }
