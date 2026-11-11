@@ -123,6 +123,16 @@ test("한도 안내에서 초기화 시각과 모델 계열을 읽는다", () =>
   assert.equal(modelFamily(null), null);
 });
 
+test("모델 계열은 모델 ID의 claude-<계열> 부분에서 읽고 별칭은 알려진 계열 이름으로 읽는다", () => {
+  assert.equal(modelFamily("claude-fable-5-2"), "fable");
+  assert.equal(modelFamily("us.anthropic.claude-opus-4-1-20250805-v1:0"), "opus");
+  assert.equal(modelFamily("claude-3-5-sonnet-20241022"), "sonnet");
+  assert.equal(modelFamily("claude-omelette-1"), "omelette");
+  assert.equal(modelFamily("Fable"), "fable");
+  assert.equal(modelFamily("fable[1m]"), "fable");
+  assert.equal(modelFamily(""), null);
+});
+
 test("Codex 실패는 계정 문제일 때만 접근 실패로 분류한다", () => {
   for (const message of [
     "unexpected status 401 Unauthorized: token expired",

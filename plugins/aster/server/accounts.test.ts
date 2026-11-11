@@ -12,12 +12,14 @@ import {
   parseReports,
   reportsSchema,
   UsageReader,
+  windowFamily,
+  exhaustedModels,
   type Account,
 } from "./accounts.ts";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { selectAccount } from "./scheduler.ts";
+import { rankAccounts, selectAccount } from "./scheduler.ts";
 
 const accounts: Account[] = [
   {
@@ -39,35 +41,60 @@ test("프로필 사용량 보완 보고서도 선택에 반영하고 기본 보�
   assert.equal(mapReports(accounts, [fallback, report()], {}).length, 1);
 });
 
-test("5시간 창이 빠진 정상 보고서는 사용량을 만들지 않고 CLI 확인 후보로 선택한다", () => {
-  const partial = report();
-  partial.report.windows = partial.report.windows.filter(
+test("Claude가 5시간 한도를 없애 5시간 창이 아예 없는 보고서는 주간 창만으로 점수를 만들고 CLI 확인 경로로 보내지 않는다", () => {
+  const weeklyOnly = report();
+  weeklyOnly.report.windows = weeklyOnly.report.windows.filter(
     (window) => window.id === "weekly",
   );
-  assert.deepEqual(mapReports(accounts, [partial], {}, now), []);
+  const readings = mapReports(accounts, [weeklyOnly], {}, now);
+  assert.equal(readings.length, 1);
+  assert.equal(readings[0].fiveHour, null);
+  assert.equal(readings[0].weekly.used, 40);
+  assert.equal(selectAccount(readings, now)?.id, "a");
+  assert.deepEqual(bootstrapAccounts(accounts, [weeklyOnly], now), []);
+});
+
+test("주간 창이 빠진 보고서만 불완전한 응답으로 보고 점수 없이 CLI 확인 후보로 선택한다", () => {
+  const shortOnly = report();
+  shortOnly.report.windows = shortOnly.report.windows.filter(
+    (window) => window.id === "five_hour",
+  );
+  assert.deepEqual(mapReports(accounts, [shortOnly], {}, now), []);
   assert.deepEqual(
-    bootstrapAccounts(accounts, [partial], now).map((account) => account.id),
+    bootstrapAccounts(accounts, [shortOnly], now).map((account) => account.id),
     ["a"],
   );
   assert.equal(
     bootstrapAccounts(
       [...accounts, { ...accounts[0], id: "alias" }],
-      [partial],
+      [shortOnly],
       now,
     ).length,
     1,
   );
-  const shortOnly = report();
-  shortOnly.report.windows = shortOnly.report.windows.filter(
-    (window) => window.id === "five_hour",
-  );
-  assert.equal(bootstrapAccounts(accounts, [shortOnly], now).length, 1);
+});
+
+test("5시간 창이 있는데 값이 비어 있으면 한도 폐지가 아닌 불완전한 응답이라 0으로 채우지 않는다", () => {
+  const blank = reportsSchema.parse([
+    {
+      ...report(),
+      report: {
+        ...report().report,
+        windows: [
+          { id: "five_hour", usedPct: null, resetsAt: null },
+          report().report.windows[1],
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(mapReports(accounts, blank, {}, now), []);
+  assert.deepEqual(bootstrapAccounts(accounts, blank, now), []);
 });
 
 test("불완전한 창이라도 확인된 한도가 소진되거나 오래되면 시작하지 않는다", () => {
   const partial = report();
   partial.report.windows = partial.report.windows.filter(
-    (window) => window.id === "weekly",
+    (window) => window.id === "five_hour",
   );
   partial.report.windows[0].usedPct = 100;
   assert.deepEqual(bootstrapAccounts(accounts, [partial], now), []);
@@ -91,7 +118,7 @@ test("불완전한 창이라도 확인된 한도가 소진되거나 오래되면
 test("오류·인증거부·빈 창과 최신 소진은 오래된 일부 여유 보고서로 우회하지 않는다", () => {
   const partial = report();
   partial.report.windows = partial.report.windows.filter(
-    (window) => window.id === "weekly",
+    (window) => window.id === "five_hour",
   );
   const rejected = {
     ...partial,
@@ -122,7 +149,7 @@ test("오류·인증거부·빈 창과 최신 소진은 오래된 일부 여유 
       ...partial,
       report: {
         status: "available",
-        windows: [{ id: "weekly", usedPct: null, resetsAt: null }],
+        windows: [{ id: "five_hour", usedPct: null, resetsAt: null }],
       },
     },
   ]);
@@ -188,7 +215,7 @@ function report(label = "a@example.test", id = "claude:account.org-a") {
   };
 }
 
-test("5시간 창이 없어도 두 계정의 주간 소진과 가장 빠른 복귀 시각을 구분한다", () => {
+test("5시간 한도가 없어진 두 계정은 주간 창만으로 소진을 판정하고 가장 빠른 복귀 시각을 구분한다", () => {
   const other: Account = {
     id: "b",
     home: "/fixture/b",
@@ -212,7 +239,15 @@ test("5시간 창이 없어도 두 계정의 주간 소진과 가장 빠른 복�
     },
   ];
   const readings = reportsSchema.parse([first, second]);
-  assert.deepEqual(mapReports([...accounts, other], readings, {}, now), []);
+  const usage = mapReports([...accounts, other], readings, {}, now);
+  assert.deepEqual(
+    usage.map((entry) => [entry.id, entry.fiveHour, entry.weekly.used]),
+    [
+      ["a", null, 100],
+      ["b", null, 100],
+    ],
+  );
+  assert.deepEqual(rankAccounts(usage, now), []);
   assert.deepEqual(bootstrapAccounts([...accounts, other], readings, now), []);
   assert.equal(
     exhaustedAccountsResetAt([...accounts, other], readings, now),
@@ -305,7 +340,7 @@ test("조회 제한으로 확인하지 못한 계정보다 한도 여유가 확�
   };
   const partial = report(other.email!, "claude:account.org-b");
   partial.report.windows = partial.report.windows.filter(
-    (window) => window.id === "weekly",
+    (window) => window.id === "five_hour",
   );
   const limited = reportsSchema.parse([
     {
@@ -1159,7 +1194,7 @@ test("확인된 계정이 있으면 만료된 계정으로 세션을 보내지 �
     reportFor("main@example.invalid", {
       status: "available",
       windows: [
-        { id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" },
+        { id: "five_hour", usedPct: 20, resetsAt: "2026-11-07T12:00:00Z" },
       ],
     }),
     reportFor("second@example.invalid", {
@@ -1203,7 +1238,7 @@ test("확인된 계정이 잠시 막혀 있으면 만료된 계정을 대안으�
     reportFor("main@example.invalid", {
       status: "available",
       windows: [
-        { id: "weekly", usedPct: 20, resetsAt: "2026-11-10T00:00:00Z" },
+        { id: "five_hour", usedPct: 20, resetsAt: "2026-11-07T12:00:00Z" },
       ],
     }),
     reportFor("second@example.invalid", {
@@ -1221,4 +1256,138 @@ test("확인된 계정이 잠시 막혀 있으면 만료된 계정을 대안으�
       .sort(),
     ["main", "second"],
   );
+});
+
+/** The shape the host reports since Claude dropped the five-hour limit: weekly plus per-model weekly. */
+function modelReport(
+  fable: number | null,
+  weekly = 59,
+  label = "a@example.test",
+  id = "claude:account.org-a",
+) {
+  const resetsAt = new Date(now + 6 * 24 * 3_600_000).toISOString();
+  return reportsSchema.parse([
+    {
+      ...report(label, id),
+      report: {
+        status: "available",
+        planLabel: "Max 20x",
+        windows: [
+          { id: "weekly", usedPct: weekly, resetsAt },
+          { id: "weekly_model_fable", usedPct: fable, resetsAt },
+        ],
+      },
+    },
+  ])[0];
+}
+
+test("모델 주간 창은 모델 ID의 계열로만 읽고 모델과 묶을 수 없는 창은 무시한다", () => {
+  assert.equal(windowFamily("weekly_model_fable"), "fable");
+  assert.equal(windowFamily("weekly_model_Opus"), "opus");
+  assert.equal(windowFamily("weekly_model_claude-sonnet-5"), "sonnet");
+  assert.equal(windowFamily("weekly_model_fable_pro"), null);
+  assert.equal(windowFamily("weekly_surface_claude_code"), null);
+  assert.equal(windowFamily("weekly"), null);
+  const [reading] = mapReports(accounts, [modelReport(100)], {}, now);
+  assert.equal(reading.fiveHour, null);
+  assert.deepEqual(reading.models, {
+    fable: { used: 100, resetsAt: now + 6 * 24 * 3_600_000 },
+  });
+  // The model limit only constrains sessions on that model; an unknown model only sees the account's own.
+  assert.equal(
+    selectAccount([reading], now, new Map(), undefined, "fable"),
+    null,
+  );
+  assert.equal(
+    selectAccount([reading], now, new Map(), undefined, "opus")?.id,
+    "a",
+  );
+  assert.equal(selectAccount([reading], now)?.id, "a");
+});
+
+test("모델 창 값이 비어 있으면 그 모델 세션에만 점수를 만들지 않는다", () => {
+  const [reading] = mapReports(accounts, [modelReport(null)], {}, now);
+  assert.equal(reading.models?.fable, null);
+  assert.deepEqual(rankAccounts([reading], now, new Map(), "fable"), []);
+  assert.equal(rankAccounts([reading], now, new Map(), "sonnet").length, 1);
+});
+
+test("모델 한도 소진은 그 모델의 복귀 시각만 알리고 계정 전체 소진으로 보지 않는다", () => {
+  const other: Account = {
+    id: "b",
+    home: "/fixture/b",
+    email: "b@example.test",
+    identity: "org-b|b@example.test",
+  };
+  const resetsAt = now + 6 * 24 * 3_600_000;
+  const spent = [
+    modelReport(100),
+    modelReport(100, 0, other.email!, "claude:account.org-b"),
+  ];
+  assert.equal(exhaustedUntil(accounts[0], spent, now), null);
+  assert.equal(exhaustedUntil(accounts[0], spent, now, "fable"), resetsAt);
+  assert.equal(exhaustedUntil(accounts[0], spent, now, "sonnet"), null);
+  assert.deepEqual(exhaustedModels(accounts[0], spent, now), [
+    { family: "fable", resetsAt },
+  ]);
+  assert.deepEqual(exhaustedModels(accounts[0], [modelReport(99)], now), []);
+  assert.equal(
+    exhaustedAccountsResetAt([...accounts, other], spent, now),
+    null,
+  );
+  assert.equal(
+    exhaustedAccountsResetAt([...accounts, other], spent, now, "fable"),
+    resetsAt,
+  );
+  const mixed = [
+    modelReport(100),
+    modelReport(0, 0, other.email!, "claude:account.org-b"),
+  ];
+  assert.equal(
+    exhaustedAccountsResetAt([...accounts, other], mixed, now, "fable"),
+    null,
+  );
+});
+
+test("주간 창이 빠진 부분 보고서도 세션 모델의 소진된 한도는 우회하지 않는다", () => {
+  const partial = modelReport(100);
+  partial.report.windows = [
+    {
+      id: "five_hour",
+      usedPct: 10,
+      resetsAt: new Date(now + 3_600_000).toISOString(),
+    },
+    ...(partial.report.windows ?? []).filter(
+      (window) => window.id !== "weekly",
+    ),
+  ];
+  assert.deepEqual(
+    bootstrapAccounts(accounts, [partial], now, undefined, "fable"),
+    [],
+  );
+  assert.deepEqual(
+    bootstrapAccounts(accounts, [partial], now, undefined, "sonnet").map(
+      (account) => account.id,
+    ),
+    ["a"],
+  );
+});
+
+test("예정보다 일찍 초기화된 최신 보고서가 같은 계정의 이전 소진 보고서보다 우선한다", () => {
+  const before = {
+    ...modelReport(100, 100),
+    id: "claude-windows:account.org-a",
+    sourceId: "claude-windows",
+    fetchedAt: new Date(now - 60_000).toISOString(),
+  };
+  const early = modelReport(0, 0);
+  assert.equal(exhaustedUntil(accounts[0], [before], now) !== null, true);
+  for (const order of [
+    [before, early],
+    [early, before],
+  ]) {
+    assert.equal(exhaustedUntil(accounts[0], order, now), null);
+    assert.equal(exhaustedUntil(accounts[0], order, now, "fable"), null);
+    assert.deepEqual(exhaustedModels(accounts[0], order, now), []);
+  }
 });

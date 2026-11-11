@@ -22,7 +22,8 @@ async function openFixture(
     | "available"
     | "unknown"
     | "partial-reset"
-    | "two-available",
+    | "two-available"
+    | "fable",
 ) {
   const now = Date.now();
   const recovered = {
@@ -32,7 +33,7 @@ async function openFixture(
     identity: "org-recovered|recovered",
   };
   const accounts =
-    usage === "partial-reset" || usage === "two-available"
+    usage === "partial-reset" || usage === "two-available" || usage === "fable"
       ? [fixtureAccount, recovered]
       : [fixtureAccount];
   const reports =
@@ -91,6 +92,28 @@ async function openFixture(
       id: "claude:recovered.org-recovered",
       account: { label: recovered.email },
     });
+  if (usage === "fable") {
+    // As measured on 2026-11-11: no five-hour window any more, weekly plus a Fable weekly limit.
+    const weekly = (used: number, fable: number) => [
+      {
+        id: "weekly",
+        usedPct: used,
+        resetsAt: new Date(now + 6 * 86_400_000).toISOString(),
+      },
+      {
+        id: "weekly_model_fable",
+        usedPct: fable,
+        resetsAt: new Date(now + 6 * 86_400_000).toISOString(),
+      },
+    ];
+    reports[0].report.windows = weekly(59, 100);
+    reports.push({
+      ...structuredClone(reports[0]),
+      id: "claude:recovered.org-recovered",
+      account: { label: recovered.email },
+      report: { status: "available", windows: weekly(0, 0) },
+    });
+  }
   const initialReports = structuredClone(reports);
   const key = "__asterTest_" + randomUUID().replaceAll("-", "");
   const sent: { agentId: string; text: string }[] = [];
@@ -99,6 +122,12 @@ async function openFixture(
     settings: {} as Record<string, unknown>,
     snapshot: (_agentId: string): Record<string, unknown> => ({}),
     reload: async (..._args: unknown[]) => "",
+    status: null as
+      | null
+      | ((
+          providers: Record<string, unknown>,
+          signal: AbortSignal,
+        ) => Promise<{ id: string; status: string }[]>),
   };
   (globalThis as any)[key] = shared;
   const noOp = "() => {}";
@@ -117,10 +146,7 @@ async function openFixture(
       "./server/controller",
       `export {Controller} from ${actual("./controller.ts")}`,
     ],
-    [
-      "./server/scheduler",
-      `export {rankAccounts} from ${actual("./scheduler.ts")}`,
-    ],
+    ["./server/scheduler", `export * from ${actual("./scheduler.ts")}`],
     [
       "./server/routing-cache",
       "export const accountKey=account=>account.id; export class RoutingCache{async load(){return null} async save(){} async exclude(){} async forget(){}}",
@@ -157,7 +183,7 @@ async function openFixture(
     ["./server/hidden-aliases", `export const keepAliasesHidden=()=>${noOp}`],
     [
       "./server/account-management",
-      `export const registerAccountManagement=()=>${noOp}`,
+      `export const registerAccountManagement=(_server,status)=>{globalThis[${JSON.stringify(key)}].status=status; return ${noOp}}`,
     ],
     ["./server/provider-policy", "export const providerFamily=id=>id"],
   ]);
@@ -288,6 +314,11 @@ async function openFixture(
     },
     emit: async (name: string, payload: unknown) =>
       events.get(name)?.(payload, context),
+    /** The Claude rows of the account status screen. */
+    status: async () =>
+      (
+        await shared.status!({ claude: {} }, new AbortController().signal)
+      ).filter((row) => !row.id.endsWith("-unavailable")),
     /** One whole turn of `agentId` ending with `text` as the assistant's last message. */
     turn: async (agentId: string, turnId: string, text: string) => {
       const agent = { id: agentId, provider: "claude" };
@@ -658,6 +689,172 @@ test("부분 사용량의 기존 정상 계정은 유지하고 권한 대기 중
     });
     assert.equal(fixture.reloads.length, 0);
     logged(fixture, /한도 감지, 전환 건너뜀 \(권한 대기\)/);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+const withModel = (
+  overrides: Partial<PluginSessionOpenRequest>,
+  model: string | null,
+) => ({ ...overrides, model }) as Partial<PluginSessionOpenRequest>;
+const koreanClock = (at: string) =>
+  new Date(at).toLocaleString("ko-KR", {
+    timeZone: "Asia/Seoul",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+test("5시간 창이 없어진 실측 보고서로도 계정 상태를 자동 분배로 보이고 Fable만 소진된 계정은 복귀 시각과 함께 사용 가능으로 보인다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const when = koreanClock(
+      fixture.initialReports[0].report.windows[1].resetsAt,
+    );
+    assert.deepEqual(
+      (await fixture.status()).map((row) => [row.id, row.status]),
+      [
+        ["fixture", `사용 가능 · Fable 한도 소진(${when} 이후 복귀)`],
+        ["recovered", "자동 분배 중"],
+      ],
+    );
+    const created = await fixture.open({
+      agentId: "new-agent",
+      reason: "create",
+      env: {},
+    });
+    assert.equal(created?.env.ASTER_ACCOUNT_ID, "recovered");
+    assert.ok(!fixture.logs.some((line) => /CLI 정상 확인 경로/.test(line)));
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("Fable 소진 계정 A에 묶인 세션의 모델 변경 refresh(model=claude-fable-5-2)는 10분 유지·20% 우위보다 소진 제외를 우선해 B를 고른다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    // The conversation sits on A, chosen while A was the only account with a reading.
+    fixture.setReports([fixture.initialReports[0]]);
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    fixture.setReports(fixture.initialReports);
+    // Inside the 10-minute hold another model keeps the account.
+    assert.equal(
+      (await fixture.open(withModel({ reason: "refresh" }, "claude-sonnet-5")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    const opened = await fixture.open(
+      withModel({ reason: "refresh" }, "claude-fable-5-2"),
+    );
+    assert.equal(opened?.env.ASTER_ACCOUNT_ID, "recovered");
+    assert.equal(opened?.env.CLAUDE_CONFIG_DIR, "/recovered");
+    logged(
+      fixture,
+      /session fixture-agent: recovered \(이전 fixture, 사유: 이전 계정 Fable 한도 소진\)/,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("요청에 모델이 없으면 저장된 에이전트 모델로 Fable 소진 계정을 피한다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    fixture.setReports([fixture.initialReports[0]]);
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    fixture.setReports(fixture.initialReports);
+    fixture.setSnapshot(() => ({ model: "claude-fable-5-2" }));
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "recovered");
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("모든 계정의 Fable 한도가 소진되면 새 Fable 대화만 복귀 시각과 함께 거절하고 다른 모델과 기존 대화는 연다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    const spent = structuredClone(fixture.initialReports);
+    spent[1].report.windows[1].usedPct = 100;
+    fixture.setReports(spent);
+    await assert.rejects(
+      fixture.open(
+        withModel(
+          { agentId: "fable-agent", reason: "create", env: {} },
+          "claude-fable-5-2",
+        ),
+      ),
+      new RegExp(
+        `모든 Claude 계정의 Fable 한도가 소진되었습니다. 가장 빠른 초기화는 ${koreanClock(spent[0].report.windows[1].resetsAt)}`,
+      ),
+    );
+    assert.equal(
+      (
+        await fixture.open(
+          withModel(
+            { agentId: "sonnet-agent", reason: "create", env: {} },
+            "claude-sonnet-5",
+          ),
+        )
+      )?.env.ASTER_ACCOUNT_ID,
+      "recovered",
+    );
+    assert.equal(
+      (await fixture.open(withModel({ reason: "refresh" }, "claude-fable-5-2")))
+        ?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("모델을 밝히지 않은 한도 오류도 최신 사용량이 그 모델 창의 소진을 보이면 그 모델 세션만 옮긴다", async () => {
+  const fixture = await openFixture("fable");
+  try {
+    fixture.setSnapshot((agentId) => ({
+      model:
+        agentId === "sonnet-agent" ? "claude-sonnet-5" : "claude-fable-5-2",
+    }));
+    // Both sessions start on A before its Fable limit shows spent.
+    const before = structuredClone(fixture.initialReports[0]);
+    before.report.windows[1].usedPct = 90;
+    fixture.setReports([before]);
+    assert.equal((await fixture.open())?.env.ASTER_ACCOUNT_ID, "fixture");
+    assert.equal(
+      (
+        await fixture.open({
+          agentId: "sonnet-agent",
+          reason: "create",
+          env: {},
+        })
+      )?.env.ASTER_ACCOUNT_ID,
+      "fixture",
+    );
+    fixture.setReports(fixture.initialReports);
+    const agent = { id: "fixture-agent", provider: "claude" };
+    await fixture.emit("agent.turn_started", { agent, turnId: "turn-1" });
+    await fixture.emit("agent.turn_ended", {
+      agent,
+      turnId: "turn-1",
+      outcome: {
+        kind: "failed",
+        error: {
+          message:
+            "API Error: 429 This request would exceed your account's rate limit. Please try again later.",
+        },
+      },
+      timeline: [],
+    });
+    assert.equal(fixture.reloads.length, 1);
+    assert.equal(fixture.reloads[0].env.ASTER_ACCOUNT_ID, "recovered");
+    logged(
+      fixture,
+      /account fixture: 한도 차단 .*fable 모델 한정\(사용량 확인\)/,
+    );
+    await fixture.turn("sonnet-agent", "turn-2", "완료했습니다.");
+    assert.equal(fixture.reloads.length, 1);
   } finally {
     fixture.dispose();
   }
