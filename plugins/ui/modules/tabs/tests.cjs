@@ -847,6 +847,7 @@ function harness(
   withDraftBridge = false,
   withTitles = false,
   withGroups = false,
+  initial = {},
 ) {
   const effects = [];
   const calls = [];
@@ -871,7 +872,11 @@ function harness(
       return true;
     },
   });
-  let bridgeSnapshot = { entries: [], activeDraftId: null, completions: [] };
+  let bridgeSnapshot = initial.bridgeSnapshot ?? {
+    entries: [],
+    activeDraftId: null,
+    completions: [],
+  };
   let groups = { groups: [], order: [] };
   const groupListeners = new Set();
   function setGroups(next) {
@@ -917,6 +922,19 @@ function harness(
       calls.push(["draft-navigate", draftId]);
       context.location.pathname = "/new";
       setBridgeSnapshot({ ...bridgeSnapshot, activeDraftId: draftId });
+    },
+    pin(draftId) {
+      const entry = bridgeSnapshot.entries.find(
+        (entry) => entry.draftId === draftId,
+      );
+      if (!entry || entry.pinned) return;
+      calls.push(["draft-pin", draftId]);
+      setBridgeSnapshot({
+        ...bridgeSnapshot,
+        entries: bridgeSnapshot.entries.map((entry) =>
+          entry.draftId === draftId ? { ...entry, pinned: true } : entry,
+        ),
+      });
     },
     close(draftId) {
       calls.push(["draft-close", draftId]);
@@ -1067,7 +1085,7 @@ function harness(
   };
   const context = {
     console: { info() {}, warn() {} },
-    localStorage: storage(),
+    localStorage: initial.storage ?? storage(),
     structuredClone,
     Date: { now: () => now },
     location: { pathname: "/h/host/workspace/a" },
@@ -2873,6 +2891,123 @@ function keepDraft(app, id) {
   const bar = app.renderDraft();
   bar.onKeepTab(bar.tabs.find((row) => row.tab.tabId === draftIdOf(id)).tab);
 }
+
+test("빈 작성 탭의 명시적 고정은 bridge에 한 번 저장하고 재진입하지 않는다", () => {
+  const app = harness(null, true);
+  try {
+    const id = app.bridge.open();
+    keepDraft(app, id);
+    keepDraft(app, id);
+    assert.equal(app.bridgeSnapshot().entries[0].pinned, true);
+    assert.deepEqual(
+      app.calls.filter(([kind]) => kind === "draft-pin"),
+      [["draft-pin", id]],
+    );
+  } finally {
+    app.context.__PASEO_GLOBAL_TABS__.dispose();
+  }
+});
+
+test("고정한 빈 작성 탭은 재시작 후 두 개 모두 유지하고 미리보기는 하나만 대체한다", () => {
+  const first = harness(null, true);
+  let reloaded;
+  try {
+    pinned(first, ["a"]);
+    const completed = first.bridge.open();
+    completeDraft(
+      first,
+      completed,
+      { kind: "agent", agentId: "created" },
+      "created-tab",
+    );
+    const one = first.bridge.open();
+    keepDraft(first, one);
+    const two = first.bridge.open();
+    keepDraft(first, two);
+    const preview = first.bridge.open();
+    const saved = structuredClone(first.bridgeSnapshot());
+    first.context.__PASEO_GLOBAL_TABS__.dispose();
+    reloaded = harness(null, true, false, false, {
+      bridgeSnapshot: saved,
+      storage: first.context.localStorage,
+    });
+    assert.deepEqual(
+      reloaded.bridgeSnapshot().entries.map((entry) => entry.draftId),
+      [one, two, preview],
+    );
+    const next = reloaded.bridge.open();
+    assert.deepEqual(
+      reloaded.bridgeSnapshot().entries.map((entry) => entry.draftId),
+      [one, two, next],
+    );
+    assert.deepEqual(
+      reloaded.calls.filter(([kind]) => kind === "draft-close"),
+      [["draft-close", preview]],
+    );
+    assert.deepEqual(
+      reloaded.model.entries().map((entry) => entry.agentId),
+      ["agent-a", "created"],
+    );
+    assert.deepEqual(reloaded.bridgeSnapshot().completions, saved.completions);
+  } finally {
+    reloaded?.context.__PASEO_GLOBAL_TABS__.dispose();
+    first.context.__PASEO_GLOBAL_TABS__?.dispose();
+  }
+});
+
+test("고정한 빈 작성 탭의 일괄 복원은 기존 대화와 완료 이력을 보존한다", () => {
+  const app = harness(null, true);
+  try {
+    pinned(app, ["a"]);
+    const completed = app.bridge.open();
+    completeDraft(
+      app,
+      completed,
+      { kind: "agent", agentId: "created" },
+      "created-tab",
+    );
+    const completions = structuredClone(app.bridgeSnapshot().completions);
+    app.setBridgeSnapshot({
+      entries: [
+        {
+          draftId: "kept-one",
+          serverId: "host",
+          href: "/new?draftId=kept-one",
+          pinned: true,
+        },
+        {
+          draftId: "kept-two",
+          serverId: "host",
+          href: "/new?draftId=kept-two",
+          pinned: true,
+        },
+        { draftId: "preview", serverId: "host", href: "/new?draftId=preview" },
+      ],
+      activeDraftId: "preview",
+      completions,
+    });
+    assert.deepEqual(
+      app.bridgeSnapshot().entries.map((entry) => entry.draftId),
+      ["kept-one", "kept-two", "preview"],
+    );
+    const next = app.bridge.open();
+    assert.deepEqual(
+      app.bridgeSnapshot().entries.map((entry) => entry.draftId),
+      ["kept-one", "kept-two", next],
+    );
+    assert.deepEqual(
+      app.calls.filter(([kind]) => kind === "draft-close"),
+      [["draft-close", "preview"]],
+    );
+    assert.deepEqual(
+      app.model.entries().map((entry) => entry.agentId),
+      ["agent-a", "created"],
+    );
+    assert.deepEqual(app.bridgeSnapshot().completions, completions);
+  } finally {
+    app.context.__PASEO_GLOBAL_TABS__.dispose();
+  }
+});
 
 test("빈 새 워크스페이스는 다른 빈 작성 탭과 대화 미리보기로 대체된다", () => {
   const app = harness(null, true);
