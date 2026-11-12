@@ -46,6 +46,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           npm run build:main --workspace=@getpaseo/desktop
           npm exec --workspace=@getpaseo/desktop -- vitest run src/features/auto-updater.test.ts --bail=1
+          npm exec --workspace=@getpaseo/app -- vitest run src/workspace-tabs/new-workspace-tabs.test.tsx src/project-window/state.test.ts --bail=1
           git restore -- packages/cli/bin/paseo
           git diff --exit-code
       - name: Suite verification and package
@@ -61,6 +62,8 @@ jobs:
           npm run package:win
           npm run smoke
       - name: Upload private build artifacts
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: paseo-suite-windows-x64
@@ -77,10 +80,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json tagName 2>$null
-          if ($LASTEXITCODE -eq 0) { Write-Output 'Validated release already published; keeping its existing assets.'; exit 0 }
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Release tag and installer version differ.' }
           $assets = @(Get-ChildItem dist/installers -File | Where-Object { $_.Name -match '\.(exe|blockmap)$|^latest\.yml$' } | ForEach-Object FullName)
+          foreach ($name in @("Paseo-Suite-$version-x64.exe", "Paseo-Suite-$version-x64.exe.blockmap", 'latest.yml')) {
+            if (-not (Test-Path -LiteralPath "dist/installers/$name")) { throw "Missing release asset: $name" }
+          }
           $assets += (Resolve-Path dist/suite-lock.json).Path
+          Copy-Item tools/install.ps1 dist/install.ps1
+          $assets += (Resolve-Path dist/install.ps1).Path
           $sums = $assets | ForEach-Object { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLower(), (Split-Path $_ -Leaf) }
           $sums | Set-Content dist/SHA256SUMS -Encoding utf8
-          gh release create $env:GITHUB_REF_NAME @assets dist/SHA256SUMS --repo $env:GITHUB_REPOSITORY --title "Paseo Suite $env:GITHUB_REF_NAME" --generate-notes
+          $existing = gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json isDraft,assets 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $existing | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              throw 'This stable release already exists. Published installer assets are immutable.'
+            }
+            gh release upload $env:GITHUB_REF_NAME @assets dist/SHA256SUMS --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'Draft release upload failed.' }
+          } else {
+            gh release create $env:GITHUB_REF_NAME @assets dist/SHA256SUMS --draft --repo $env:GITHUB_REPOSITORY --title "Paseo Suite $env:GITHUB_REF_NAME" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed.' }
+          }
+          $uploaded = gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify draft release.' }
+          foreach ($file in @($assets) + @('dist/SHA256SUMS')) {
+            if ((Split-Path $file -Leaf) -cnotin $uploaded) { throw "Asset upload incomplete: $file" }
+          }
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Stable release publication failed.' }
