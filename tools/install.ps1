@@ -124,6 +124,13 @@ function Test-SuiteRunning {
     return @(Get-Process -Name Paseo -ErrorAction SilentlyContinue).Count -gt 0
 }
 
+function Save-SuiteHelper {
+    $target = Join-Path $script:UpdaterRoot 'install.ps1'
+    if ([IO.Path]::GetFullPath($PSCommandPath) -ine [IO.Path]::GetFullPath($target)) {
+        Copy-Item -LiteralPath $PSCommandPath -Destination $target -Force
+    }
+}
+
 function Set-SuiteAutoUpdate {
     param([bool]$Enabled)
     if (-not $Enabled) {
@@ -173,7 +180,7 @@ function Invoke-SuiteSetup {
     }
     try {
         if ($Action -eq 'DisableAutoUpdate') { Set-SuiteAutoUpdate $false; return }
-        if ($Action -eq 'EnableAutoUpdate') { Set-SuiteAutoUpdate $true; return }
+        if ($Action -eq 'EnableAutoUpdate') { Save-SuiteHelper; Set-SuiteAutoUpdate $true; return }
         $release = Get-SuiteRelease
         $installed = Get-InstalledSuiteVersion
         Write-Output "Latest Suite: $($release.Version); installed: $installed"
@@ -183,6 +190,8 @@ function Invoke-SuiteSetup {
             return
         }
         if ($installed -and $installed -ge $release.Version) {
+            # Direct exe installs may have no command helper, or an old authenticated one.
+            if ($installed -eq $release.Version) { Save-SuiteHelper }
             if ($EnableAutoUpdate) { Set-SuiteAutoUpdate $true }
             Write-Output 'Suite is already up to date; downgrades are blocked.'
             return

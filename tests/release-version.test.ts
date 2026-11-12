@@ -151,6 +151,34 @@ async function runInstallerProbe(body: string) {
 }
 
 test(
+  "Windows exe 직접 설치 후 최신 버전이어도 명령 도우미를 만들고 이전 인증 도우미를 교체한다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    await runInstallerProbe(`
+function Get-SuiteRelease { [pscustomobject]@{ Version=[version]'1.2.3' } }
+function Get-InstalledSuiteVersion { [version]'1.2.3' }
+function Save-SuiteRelease { throw 'must not download or install the same app again' }
+function Set-SuiteAutoUpdate { throw 'automatic updates must stay opt-in' }
+$Action = 'Install'
+Invoke-SuiteSetup
+$helper = Join-Path $script:UpdaterRoot 'install.ps1'
+Assert ((Get-Content $helper -Raw) -like '*function Invoke-SuiteRequest*') 'helper not seeded for direct exe install'
+Set-Content $helper 'legacy authenticated helper'
+Invoke-SuiteSetup
+Assert ((Get-Content $helper -Raw) -like '*function Invoke-SuiteRequest*') 'old helper not replaced'
+Set-Content $helper 'legacy authenticated helper'
+function Set-SuiteAutoUpdate {
+  Assert ((Get-Content $helper -Raw) -like '*function Invoke-SuiteRequest*') 'scheduled helper still requires authentication'
+  $script:enabled = $true
+}
+$Action = 'EnableAutoUpdate'
+Invoke-SuiteSetup
+Assert $script:enabled 'explicit task enable failed'
+`);
+  },
+);
+
+test(
   "Windows 공개 다운로드는 GitHub CLI·인증 헤더·REST API 없이 릴리즈 자산을 읽는다",
   { skip: process.platform !== "win32" },
   async () => {
