@@ -74,7 +74,7 @@
   let projectionRevision = 0;
   let bridgeState = draftBridge?.getSnapshot() || { entries: [], activeDraftId: null, completions: [] };
   const pinnedDrafts = new Set([...(typeof previousDraftPins === "undefined" ? [] : previousDraftPins),
-    ...bridgeState.entries.filter((entry) => draftBridge?.hasInput?.(entry.draftId)).map((entry) => entry.draftId)]);
+    ...bridgeState.entries.filter((entry) => entry.pinned || draftBridge?.hasInput?.(entry.draftId)).map((entry) => entry.draftId)]);
   let reconcilingPreview = false;
   let observedPreview = model.preview()?.key;
   let lastCompletion = Math.max(0, ...(bridgeState.completions || []).map((item) => item.sequence));
@@ -157,6 +157,7 @@
     if (!knownDrafts.has(draftId) || pinnedDrafts.has(draftId)) return false;
     pinnedDrafts.add(draftId);
     draftPresentations.delete(virtualId(draftId));
+    draftBridge?.pin?.(draftId);
     notifyProjection();
     return true;
   }
@@ -222,7 +223,7 @@
     const added = bridgeState.entries.filter(entry => !knownDrafts.has(entry.draftId) && entry.kind !== "history");
     bridgeState.entries.forEach((entry) => {
       knownDrafts.set(entry.draftId, entry);
-      if (draftBridge.hasInput?.(entry.draftId)) pinDraft(entry.draftId);
+      if (entry.pinned || draftBridge.hasInput?.(entry.draftId)) pinDraft(entry.draftId);
     });
     for (const completion of [...(bridgeState.completions || [])].sort((left, right) => left.sequence - right.sequence)) {
       if (completion.sequence <= lastCompletion) continue;
