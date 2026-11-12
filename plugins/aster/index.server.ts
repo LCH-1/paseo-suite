@@ -23,7 +23,9 @@ import {
   type Account,
   type SpentAccount,
 } from "./server/accounts";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { syncHndHooks } from "./server/profile-hooks";
 import { accountKey, RoutingCache } from "./server/routing-cache";
 import {
   continuedAfterLimit,
@@ -118,6 +120,26 @@ export default function contribute(server: PluginServerContext) {
     fetch: profileUsage.fetchUsage,
   });
   const reader = new UsageReader();
+  // Account profiles never read ~/.claude/settings.json; keep HND's hooks in each of them.
+  const syncHooks = async () => {
+    try {
+      const changed = await syncHndHooks(
+        homedir(),
+        (await discoverAccounts()).map((account) => account.home),
+      );
+      if (changed.length)
+        console.info(
+          `[aster] HND hook을 계정 프로필 ${changed.length}곳에 맞춤`,
+        );
+    } catch (error) {
+      console.warn(
+        `[aster] HND hook 동기화 실패: ${String(error).slice(0, 200)}`,
+      );
+    }
+  };
+  void syncHooks();
+  const hookTimer = setInterval(() => void syncHooks(), 120_000);
+  hookTimer.unref?.();
   const checkUsageRevision = usageRevision(paseoHome, () =>
     reader.invalidate(),
   );
@@ -1090,6 +1112,7 @@ export default function contribute(server: PluginServerContext) {
     ),
   ];
   return () => {
+    clearInterval(hookTimer);
     reader.dispose();
     subscriptions.dispose();
     unregister.forEach((remove) => remove());

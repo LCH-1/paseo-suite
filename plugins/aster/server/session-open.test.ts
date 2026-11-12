@@ -157,6 +157,10 @@ async function openFixture(
     ],
     ["./server/scheduler", `export * from ${actual("./scheduler.ts")}`],
     [
+      "./server/profile-hooks",
+      "export async function syncHndHooks(){return []}",
+    ],
+    [
       "./server/routing-cache",
       "export const accountKey=account=>account.id; export class RoutingCache{async load(){return null} async save(){} async exclude(){} async forget(){}}",
     ],
