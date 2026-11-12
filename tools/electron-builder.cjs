@@ -44,7 +44,7 @@ module.exports = {
     provider: "github",
     owner: "LCH-1",
     repo: "paseo-suite",
-    private: true,
+    private: false,
   },
   nsis: { ...base.nsis, include: path.join(root, "tools/installer.nsh") },
   win: {

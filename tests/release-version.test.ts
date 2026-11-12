@@ -151,6 +151,33 @@ async function runInstallerProbe(body: string) {
 }
 
 test(
+  "Windows 공개 다운로드는 GitHub CLI·인증 헤더·REST API 없이 릴리즈 자산을 읽는다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    await runInstallerProbe(`
+function Get-Command { throw 'GitHub CLI must not be used' }
+function Invoke-RestMethod($Uri, [switch]$UseBasicParsing, $TimeoutSec, $MaximumRedirection, $Headers, $Credential, [switch]$UseDefaultCredentials) {
+  Assert ($Uri -eq 'https://github.com/LCH-1/paseo-suite/releases/latest/download/suite-lock.json') 'wrong latest asset URL'
+  Assert (-not $Headers -and -not $Credential -and -not $UseDefaultCredentials) 'credentials were sent'
+  [pscustomobject]@{ schemaVersion=1; suiteVersion='1.2.3' }
+}
+function Invoke-WebRequest($Uri, [switch]$UseBasicParsing, $OutFile, $TimeoutSec, $MaximumRedirection, $Headers, $Credential, [switch]$UseDefaultCredentials) {
+  Assert ($Uri -eq 'https://github.com/LCH-1/paseo-suite/releases/download/v1.2.3/SHA256SUMS') 'wrong pinned asset URL'
+  Assert (-not $Headers -and -not $Credential -and -not $UseDefaultCredentials) 'credentials were sent'
+  Set-Content $OutFile 'owned metadata'
+}
+Assert ((Get-SuiteRelease).Version -eq [version]'1.2.3') 'anonymous metadata failed'
+$file = Join-Path $script:UpdaterRoot 'downloaded'
+Invoke-SuiteRequest -Asset SHA256SUMS -Tag v1.2.3 -OutFile $file
+Assert (Test-Path $file) 'anonymous asset download failed'
+$caught = $false
+try { Invoke-SuiteRequest -Asset '../private' } catch { $caught = $true }
+Assert $caught 'invalid path accepted'
+`);
+  },
+);
+
+test(
   "Windows 업데이트는 NSIS DisplayIcon 경로에서 기존 Suite 버전을 읽고 일반 Core 설치는 제외한다",
   { skip: process.platform !== "win32" },
   async () => {
@@ -173,18 +200,17 @@ test(
   async () => {
     await runInstallerProbe(`
 $script:downloads = 0
-function Invoke-SuiteGh($Arguments) {
+function Invoke-SuiteRequest($Asset, $Tag, $OutFile) {
   $script:downloads++
-  $dir = $Arguments[-1]
-  Set-Content (Join-Path $dir 'Paseo-Suite-1.2.3-x64.exe') 'owned installer'
-  Set-Content (Join-Path $dir 'install.ps1') 'owned helper'
-  @('${createHash("sha256").update("owned installer\r\n").digest("hex")}  Paseo-Suite-1.2.3-x64.exe', '${createHash("sha256").update("owned helper\r\n").digest("hex")}  install.ps1') | Set-Content (Join-Path $dir 'SHA256SUMS')
+  if ($Asset -eq 'Paseo-Suite-1.2.3-x64.exe') { Set-Content $OutFile 'owned installer'; return }
+  if ($Asset -eq 'install.ps1') { Set-Content $OutFile 'owned helper'; return }
+  @('${createHash("sha256").update("owned installer\r\n").digest("hex")}  Paseo-Suite-1.2.3-x64.exe', '${createHash("sha256").update("owned helper\r\n").digest("hex")}  install.ps1') | Set-Content $OutFile
 }
 $release = [pscustomobject]@{ Tag='v1.2.3'; Installer='Paseo-Suite-1.2.3-x64.exe' }
 $file = Save-SuiteRelease $release
 Assert (Test-Path $file) 'missing verified installer'
 $again = Save-SuiteRelease $release
-Assert ($again -eq $file -and $script:downloads -eq 1) 'download repeated'
+Assert ($again -eq $file -and $script:downloads -eq 3) 'download repeated'
 Set-Content $file 'tampered'
 $caught = $false
 try { Save-SuiteRelease $release } catch { $caught = $_.Exception.Message -like '*SHA256 verification failed*' }
@@ -194,25 +220,26 @@ Assert $caught 'tampered cached installer accepted'
 );
 
 test(
-  "Windows 업데이트는 완전한 안정 릴리스만 선택하고 사전 버전과 누락 자산은 거절한다",
+  "Windows 업데이트는 안정 릴리스 메타데이터만 읽고 사전 버전과 미지원 형식은 거절한다",
   { skip: process.platform !== "win32" },
   async () => {
     await runInstallerProbe(`
-$script:fixture = @{ tag_name='v1.2.3'; draft=$false; prerelease=$false; assets=@(@{name='Paseo-Suite-1.2.3-x64.exe'}, @{name='SHA256SUMS'}, @{name='install.ps1'}) }
-function Invoke-SuiteGh($Arguments) { $script:fixture | ConvertTo-Json -Depth 5 }
+$script:fixture = [pscustomobject]@{ schemaVersion=1; suiteVersion='1.2.3' }
+function Invoke-SuiteRequest($Asset, $Tag, $OutFile) {
+  Assert ($Asset -eq 'suite-lock.json') 'unexpected metadata asset'
+  return $script:fixture
+}
 $release = Get-SuiteRelease
 Assert ($release.Version -eq [version]'1.2.3') 'wrong release version'
-foreach ($field in @('draft', 'prerelease')) {
-  $script:fixture[$field] = $true
-  $caught = $false
-  try { Get-SuiteRelease } catch { $caught = $true }
-  Assert $caught 'non-stable accepted'
-  $script:fixture[$field] = $false
-}
-$script:fixture.assets = @(@{name='Paseo-Suite-1.2.3-x64.exe'})
+$script:fixture.suiteVersion = '1.2.3-beta.1'
 $caught = $false
 try { Get-SuiteRelease } catch { $caught = $true }
-Assert $caught 'incomplete release accepted'
+Assert $caught 'non-stable accepted'
+$script:fixture.suiteVersion = '1.2.3'
+$script:fixture.schemaVersion = 99
+$caught = $false
+try { Get-SuiteRelease } catch { $caught = $true }
+Assert $caught 'unsupported metadata accepted'
 `);
   },
 );

@@ -1,6 +1,6 @@
 # Paseo Suite
 
-현재 사용 중인 Paseo 0.12 기능을 유지하는 배포·플러그인 저장소입니다. 본체 소스는 공개 [LCH-1/paseo](https://github.com/LCH-1/paseo), 플러그인 소스와 통합 설치 파일은 이 비공개 저장소에서 관리합니다. 릴리스의 `suite-lock.json`이 정확한 본체 커밋과 플러그인 파일 해시를 고정합니다. 데스크톱 배포 버전과 내부 프로토콜 버전은 별개입니다.
+현재 사용 중인 Paseo 0.12 기능을 유지하는 배포·플러그인 저장소입니다. 본체 소스는 공개 [LCH-1/paseo](https://github.com/LCH-1/paseo), 플러그인 소스와 통합 설치 파일은 이 공개 저장소에서 관리합니다. 릴리스의 `suite-lock.json`이 정확한 본체 커밋과 플러그인 파일 해시를 고정합니다. 데스크톱 배포 버전과 내부 프로토콜 버전은 별개입니다.
 
 | 관리 대상     | 책임                                                                                                                          | 작업 경로                             |
 | :------------ | :---------------------------------------------------------------------------------------------------------------------------- | :------------------------------------ |
@@ -22,23 +22,16 @@ Windows 자격증명 지원은 본체의 기존 `claude-usage-source`로 통합�
 2. 설치 후 Paseo를 실행하면 해시를 확인한 세 플러그인을 오프라인으로 설치합니다. Node·pnpm·개발 폴더는 필요 없습니다.
 3. 개인 환경을 가져오려면 Settings Sync에서 기존 GitHub 계정과 백업 암호를 연결합니다. 로그인·암호·개인 경로는 설치 파일에 포함되지 않습니다.
 
-비공개 업데이트는 저장소 접근 권한이 있는 로컬 GitHub CLI 로그인을 사용합니다. GitHub CLI가 없으면 Releases에서 수동으로 내려받아 설치할 수 있습니다. 인증 정보는 업데이트를 확인할 때 읽으며 배포 파일이나 본체 공개 저장소에 저장하지 않습니다.
+설치·업데이트는 공개 Release에서 인증 없이 받습니다. GitHub 계정·GitHub CLI·호스트 연결은 필요 없습니다. Settings Sync를 사용할 때만 각 사용자가 본인 GitHub 계정과 백업 암호를 연결합니다. 개인 백업은 그 계정의 암호화된 Secret Gist에 저장하며 소스나 릴리즈에 포함하지 않습니다.
 
 ### PowerShell에서 설치·업데이트
 
-처음 한 번 GitHub CLI를 설치하고 이 저장소 접근 권한이 있는 계정으로 로그인합니다. Windows PowerShell 5.1 이상과 Windows x64를 지원합니다.
+Windows PowerShell 5.1 이상과 Windows x64를 지원합니다. 최신 안정 릴리스의 설치 도우미를 받아 실행합니다. 설치 파일과 후속 도우미는 같은 릴리스의 SHA256SUMS로 확인하며, 다운로드가 끊기거나 해시가 다르면 설치하지 않습니다.
 
 ```powershell
-winget install --id GitHub.cli -e
-gh auth login
-```
-
-새 PowerShell에서 최신 안정 릴리스의 설치 도우미를 받아 실행합니다. Node나 호스트 연결은 필요 없습니다. 설치 파일과 후속 도우미는 같은 릴리스의 SHA256SUMS로 확인하며, 다운로드가 끊기거나 해시가 다르면 설치하지 않습니다.
-
-```powershell
-gh release download --repo LCH-1/paseo-suite --pattern install.ps1 --dir "$env:TEMP\PaseoSuite" --clobber
-if ($LASTEXITCODE -ne 0) { throw '설치 도우미 다운로드 실패' }
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\PaseoSuite\install.ps1" -Action Install
+$paseoSetup = Join-Path $env:TEMP 'PaseoSuite-install.ps1'
+Invoke-WebRequest -UseBasicParsing 'https://github.com/LCH-1/paseo-suite/releases/latest/download/install.ps1' -OutFile $paseoSetup
+powershell -NoProfile -ExecutionPolicy Bypass -File $paseoSetup -Action Install
 ```
 
 그다음 수동 업데이트는 다음 명령으로 실행합니다. 설치된 버전보다 오래된 릴리스로 내려가지 않으며, 앱·백그라운드 로컬 호스트가 실행 중이면 다운로드만 하고 설치를 보류합니다. 설치는 계정·대화·프로젝트 파일을 삭제하지 않습니다.
@@ -53,7 +46,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuit
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action EnableAutoUpdate
 ```
 
-현재 Windows 사용자로 로그인할 때와 30분마다 GitHub를 확인합니다. 최신 설치본을 한 번 내려받아 대기하고, Paseo 앱과 로컬 호스트가 모두 종료된 다음 검사에서 자동 설치합니다. 실행 중인 에이전트나 창을 종료하지 않으므로, 앱을 닫아도 호스트를 계속 실행하는 설정에서는 호스트까지 정상 종료해야 적용됩니다. 검사 중에만 PowerShell이 실행되며 상주 업데이트 프로세스는 없습니다. GitHub 로그인이 만료되면 설치를 보류합니다. 마지막 결과는 `%LOCALAPPDATA%\PaseoSuite\updater\status.json`에 남습니다.
+현재 Windows 사용자로 로그인할 때와 30분마다 GitHub를 확인합니다. 최신 설치본을 한 번 내려받아 대기하고, Paseo 앱과 로컬 호스트가 모두 종료된 다음 검사에서 자동 설치합니다. 실행 중인 에이전트나 창을 종료하지 않으므로, 앱을 닫아도 호스트를 계속 실행하는 설정에서는 호스트까지 정상 종료해야 적용됩니다. 검사 중에만 PowerShell이 실행되며 상주 업데이트 프로세스는 없습니다. 인터넷 연결이나 다운로드에 실패하면 다음 검사에서 다시 시도합니다. 마지막 결과는 `%LOCALAPPDATA%\PaseoSuite\updater\status.json`에 남습니다.
 
 ```powershell
 # 자동 업데이트 끄기
@@ -85,7 +78,7 @@ npm run package:win
 npm run smoke
 ```
 
-배포 파일은 `dist/installers`에 생성됩니다. 검증이 끝난 본체 커밋·플러그인 해시를 고정한 뒤 비공개 Suite Release에 올립니다. 공개 포크의 기존 기본 브랜치 이력을 덮어쓰지 않고 검증한 본체를 별도의 릴리스 태그로 고정합니다.
+배포 파일은 `dist/installers`에 생성됩니다. 검증이 끝난 본체 커밋·플러그인 해시를 고정한 뒤 공개 Suite Release에 올립니다. 공개 포크의 기존 기본 브랜치 이력을 덮어쓰지 않고 검증한 본체를 별도의 릴리스 태그로 고정합니다.
 
 ## 작업공간
 

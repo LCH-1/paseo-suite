@@ -300,7 +300,7 @@ await fs.writeFile(
       entrypoint: "suite/bootstrap.mjs",
       sha256: hash(bootstrap.outputFiles[0].contents),
       daemonVersion: lock.core.protocolVersion,
-      updateFeed: { owner: "LCH-1", repo: "paseo-suite", private: true },
+      updateFeed: { owner: "LCH-1", repo: "paseo-suite", private: false },
     },
     null,
     2,

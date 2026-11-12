@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: LCH-1/paseo
-          ref: f468a6e4624a3fda5e0c75eb7aab471f6b786d6f
+          ref: 24e9a021a2ddf03535cac275add98c246dbfc5c3
           path: paseo-core
       - uses: actions/setup-node@v4
         with:
@@ -45,7 +45,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           npm run build:main --workspace=@getpaseo/desktop
-          npm exec --workspace=@getpaseo/desktop -- vitest run src/features/auto-updater.test.ts --bail=1
+          npm exec --workspace=@getpaseo/desktop -- vitest run src/features/auto-updater.test.ts src/bundled-setup.test.ts src/features/bundled-update-feed.test.ts --bail=1
           npm exec --workspace=@getpaseo/app -- vitest run src/workspace-tabs/new-workspace-tabs.test.tsx src/project-window/state.test.ts --bail=1
           git restore -- packages/cli/bin/paseo
           git diff --exit-code

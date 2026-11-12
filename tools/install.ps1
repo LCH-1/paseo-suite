@@ -14,34 +14,35 @@ $script:Repository = 'LCH-1/paseo-suite'
 $script:UpdaterRoot = Join-Path $env:LOCALAPPDATA 'PaseoSuite\updater'
 $script:TaskName = 'PaseoSuite-Update-' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
-function Invoke-SuiteGh {
-    param([string[]]$Arguments)
-    $command = Get-Command gh -ErrorAction SilentlyContinue
-    $program = if ($command) { $command.Source } else { Join-Path $env:ProgramFiles 'GitHub CLI\gh.exe' }
-    if (-not (Test-Path -LiteralPath $program)) {
-        throw 'Install GitHub CLI first: winget install --id GitHub.cli -e; then gh auth login'
+function Invoke-SuiteRequest {
+    param([string]$Asset, [string]$Tag = 'latest', [string]$OutFile)
+    if ($Asset -notmatch '^[\w.-]+$' -or ($Tag -ne 'latest' -and $Tag -notmatch '^v\d+\.\d+\.\d+$')) {
+        throw 'Invalid Suite release path.'
     }
-    $output = & $program @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        # Do not include command output: credential/helper errors can contain secrets.
-        throw 'GitHub request failed. Run gh auth login with an account allowed to access LCH-1/paseo-suite.'
+    $base = "https://github.com/$script:Repository/releases"
+    $url = if ($Tag -eq 'latest') { "$base/latest/download/$Asset" } else { "$base/download/$Tag/$Asset" }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        if ($OutFile) {
+            Invoke-WebRequest -Uri $url -UseBasicParsing -OutFile $OutFile -TimeoutSec 300 -MaximumRedirection 5
+        } else {
+            Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec 60 -MaximumRedirection 5
+        }
+    } catch {
+        throw "Cannot download public Suite release asset: $Asset. Check your internet connection and retry."
     }
-    return $output -join "`n"
 }
 
 function Get-SuiteRelease {
-    $release = Invoke-SuiteGh @('api', "repos/$script:Repository/releases/latest") | ConvertFrom-Json
-    if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') {
-        throw 'The latest release is not a supported stable Suite release.'
+    # Public release assets avoid credentials and the anonymous GitHub REST API quota.
+    $lock = Invoke-SuiteRequest 'suite-lock.json'
+    if ($lock.schemaVersion -ne 1 -or $lock.suiteVersion -notmatch '^(\d+\.\d+\.\d+)$') {
+        throw 'The latest release metadata is not a supported stable Suite release.'
     }
     $version = $Matches[1]
     $installer = "Paseo-Suite-$version-x64.exe"
-    foreach ($name in @($installer, 'SHA256SUMS', 'install.ps1')) {
-        if (@($release.assets | Where-Object { $_.name -ceq $name }).Count -ne 1) {
-            throw "Incomplete Suite release: $name"
-        }
-    }
-    return [pscustomobject]@{ Version = [version]$version; Tag = $release.tag_name; Installer = $installer }
+    return [pscustomobject]@{ Version = [version]$version; Tag = "v$version"; Installer = $installer }
 }
 
 function Get-InstalledSuiteVersion {
@@ -101,8 +102,9 @@ function Save-SuiteRelease {
     $temporary = Join-Path $directory ([guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $temporary | Out-Null
     try {
-        Invoke-SuiteGh @('release', 'download', $Release.Tag, '--repo', $script:Repository,
-            '--pattern', $Release.Installer, '--pattern', 'SHA256SUMS', '--pattern', 'install.ps1', '--dir', $temporary) | Out-Null
+        foreach ($name in @($Release.Installer, 'SHA256SUMS', 'install.ps1')) {
+            Invoke-SuiteRequest -Asset $name -Tag $Release.Tag -OutFile (Join-Path $temporary $name) | Out-Null
+        }
         foreach ($name in @($Release.Installer, 'install.ps1')) {
             Assert-SuiteChecksum (Join-Path $temporary $name) (Join-Path $temporary 'SHA256SUMS')
         }
