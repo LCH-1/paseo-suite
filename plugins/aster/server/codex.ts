@@ -14,7 +14,11 @@ import type {
 } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { createLocalPluginConnection } from "./legacy-credential-rpc";
-import { codexTokens, inspectCodexAccount } from "./codex-runtime.mjs";
+import {
+  CodexAccountClient,
+  codexTokens,
+  inspectCodexAccount,
+} from "./codex-runtime.mjs";
 import {
   chooseCodexAccount,
   hasCodexSubscription,
@@ -23,6 +27,7 @@ import {
 import { paseoHome, readSettings } from "./accounts";
 import { codexAccessFailure } from "./auth-recovery";
 import { runPaseo } from "./paseo";
+import { pruneCodexHistory, retentionSummary } from "./codex-retention";
 
 interface CodexAccount {
   id: string;
@@ -319,6 +324,66 @@ export function resumableCodexAccount(
   return previous ?? accounts[0] ?? null;
 }
 
+/** The Codex home the default `codex` provider runs with, where its conversations are kept. */
+export function codexHomeOf(providers: Providers, userHome = homedir()) {
+  const home =
+    providers.codex?.env?.CODEX_HOME ||
+    process.env.CODEX_HOME ||
+    join(userHome, ".codex");
+  const directory =
+    home === "~"
+      ? userHome
+      : /^~[\\/]/.test(home)
+        ? join(userHome, home.slice(2))
+        : home;
+  if (!isAbsolute(directory))
+    throw Error("Codex 계정 폴더는 절대 경로로 등록하세요.");
+  return resolve(directory);
+}
+
+/**
+ * Deletes the given threads through the official app-server, one at a time, and keeps the first
+ * reason Codex gave for one it refused. A thread another Codex process holds is refused.
+ */
+export async function deleteCodexThreads(
+  command: string[],
+  codexHome: string,
+  threadIds: string[],
+  signal: AbortSignal,
+) {
+  const client = new CodexAccountClient(command, codexHome, {
+    timeout: 15_000,
+  });
+  let reason: string | undefined;
+  try {
+    await client.initialize();
+    for (const threadId of threadIds) {
+      if (signal.aborted) break;
+      try {
+        await client.request("thread/delete", { threadId });
+      } catch (error) {
+        const cause = error instanceof Error ? error.cause : undefined;
+        reason ??=
+          typeof cause === "string" ? cause : String(error).slice(0, 200);
+      }
+    }
+  } finally {
+    client.close();
+  }
+  return { reason };
+}
+
+async function daemonProviders(home = paseoHome) {
+  const client = await createLocalPluginConnection(home);
+  try {
+    await client.connect();
+    const { config } = await client.getDaemonConfig();
+    return providersSchema.parse(config.providers ?? {});
+  } finally {
+    client.close();
+  }
+}
+
 /** A reading stands this long before it is renewed. */
 const READING_FRESH = 60_000;
 /**
@@ -349,7 +414,11 @@ export interface CodexRoutingOptions {
   installBridge?: () => Promise<void>;
   settings?: () => Promise<{ capacities: Record<string, number> }>;
   now?: () => number;
+  /** Whether the opt-in Codex history retention runs (at start and daily). */
+  retention?: boolean;
 }
+
+const DAY = 86_400_000;
 
 export function registerCodexRouting(
   server: PluginServerContext,
@@ -393,6 +462,41 @@ export function registerCodexRouting(
     serial = result.catch(() => undefined);
     return result;
   };
+  let pruning = false;
+  /** The opt-in history retention: off unless `codexHistoryRetentionDays` is set. */
+  const pruneHistory = async () => {
+    if (pruning || lifetime.signal.aborted) return;
+    pruning = true;
+    try {
+      const days = (await readSettings()).codexHistoryRetentionDays;
+      if (!days) return;
+      const providers = await daemonProviders();
+      const codexHome = codexHomeOf(providers),
+        command = codexOriginalCommand(providers.codex?.command);
+      const result = await pruneCodexHistory({
+        codexHome,
+        paseoHome,
+        days,
+        now: Date.now(),
+        remove: (threadIds) =>
+          deleteCodexThreads(command, codexHome, threadIds, lifetime.signal),
+      });
+      console.info(retentionSummary(days, result));
+    } catch (error) {
+      console.warn(
+        `[aster] Codex 대화 기록 정리 보류: ${String(error).slice(0, 200)}`,
+      );
+    } finally {
+      pruning = false;
+    }
+  };
+  let retentionTimer: ReturnType<typeof setInterval> | undefined;
+  if (options.retention !== false) {
+    // The daemon answers once the bridge is in place; after that, once a day.
+    void bridgeReady().then(() => pruneHistory());
+    retentionTimer = setInterval(() => void pruneHistory(), DAY);
+    retentionTimer.unref?.();
+  }
   const readingKey = (account: CodexAccount) =>
     `${account.identity}:${account.home}`;
   const invalidate = (identity: string) => {
@@ -758,6 +862,7 @@ export function registerCodexRouting(
   return {
     dispose: () => {
       bridgeReady.dispose();
+      if (retentionTimer) clearInterval(retentionTimer);
       lifetime.abort();
       removals.forEach((remove) => remove());
     },

@@ -226,6 +226,13 @@ export const settingsSchema = z.object({
   capacities: z.record(z.string(), z.number().positive()).default({}),
   profileUsageFallback: z.boolean().optional(),
   continueAfterLimitSwitch: z.boolean().optional(),
+  /** Days of Codex conversation history to keep; off unless set. A bad value leaves it off. */
+  codexHistoryRetentionDays: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .catch(undefined),
 });
 
 /** One malformed report, often from another provider's source, must not hide every other account. */

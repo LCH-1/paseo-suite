@@ -139,7 +139,15 @@ export class CodexAccountClient {
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
       if (message.error)
-        pending.reject(Error("Codex 계정 정보를 확인하지 못했습니다."));
+        pending.reject(
+          // The app-server's own reason stays on `cause` for callers that report it.
+          Error("Codex 계정 정보를 확인하지 못했습니다.", {
+            cause:
+              typeof message.error.message === "string"
+                ? message.error.message.slice(0, 200)
+                : undefined,
+          }),
+        );
       else pending.resolve(message.result);
     });
     this.child.stderr.resume();
