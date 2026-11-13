@@ -1,12 +1,16 @@
+import { createReadStream } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pipeline, type Readable, type Transform } from "node:stream";
+import * as zlib from "node:zlib";
 
 // Codex keeps every conversation as a rollout file under CODEX_HOME's sessions and
 // archived_sessions and never removes one (Codex 0.167 has no retention setting; its memories'
 // `max_rollout_age_days` only limits what memory extraction reads). Aster removes old ones only
 // when the user opts in, and through the official app-server `thread/delete`: that also drops the
 // thread from Codex's state database and its spawned sub-agent threads, keeps forks readable,
-// and refuses a thread another Codex process holds ("already has an active writer").
+// and refuses a thread another Codex process holds ("already has an active writer"). A sub-agent
+// thread stays as long as the thread that spawned it does.
 
 const ROLLOUT =
   /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i;
@@ -53,6 +57,70 @@ export async function codexRollouts(codexHome: string) {
   return threads;
 }
 
+/** How much of a rollout is read for its first line (`session_meta`, a few KB). */
+const META_LIMIT = 1_048_576;
+
+/** The first line of a rollout, decompressing `.zst` where this Node can; null when unreadable. */
+async function firstLine(path: string): Promise<string | null> {
+  const compressed = path.toLowerCase().endsWith(".zst");
+  const decompress = (zlib as { createZstdDecompress?: () => Transform })
+    .createZstdDecompress;
+  if (compressed && !decompress) return null;
+  const source = createReadStream(path, { highWaterMark: 65_536 });
+  const stream: Readable = compressed
+    ? pipeline(source, decompress!(), () => undefined)
+    : source;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      const end = chunk.indexOf(10);
+      if (end >= 0) {
+        chunks.push(chunk.subarray(0, end));
+        return Buffer.concat(chunks).toString("utf8");
+      }
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size > META_LIMIT) return null;
+    }
+    return size ? Buffer.concat(chunks).toString("utf8") : null;
+  } catch {
+    return null;
+  } finally {
+    stream.destroy();
+    source.destroy();
+  }
+}
+
+/**
+ * The thread that spawned this one, from its rollout's `session_meta` line
+ * (`source.subagent.thread_spawn.parent_thread_id`), or null for any other thread.
+ */
+export async function rolloutParent(files: RolloutFile[]) {
+  for (const file of files) {
+    const line = await firstLine(file.path);
+    if (!line) continue;
+    try {
+      const meta = JSON.parse(line) as {
+        type?: unknown;
+        payload?: {
+          source?: {
+            subagent?: { thread_spawn?: { parent_thread_id?: unknown } };
+          };
+        };
+      } | null;
+      const parent =
+        meta?.type === "session_meta"
+          ? meta.payload?.source?.subagent?.thread_spawn?.parent_thread_id
+          : undefined;
+      if (typeof parent === "string") return parent.toLowerCase();
+    } catch {
+      // Not a rollout this Codex wrote: it has no parent to keep it.
+    }
+  }
+  return null;
+}
+
 /**
  * The Codex threads of conversations Paseo still lists (not archived). Their history stays
  * whatever its age, so an open tab never loses it. A record that cannot be read stops the run.
@@ -79,12 +147,19 @@ export async function openPaseoThreads(paseoHome: string) {
   for (const file of files) {
     const record = JSON.parse(await readFile(file, "utf8")) as {
       archivedAt?: string | null;
-      persistence?: { sessionId?: unknown } | null;
+      persistence?: {
+        sessionId?: unknown;
+        nativeHandle?: unknown;
+        metadata?: { threadId?: unknown } | null;
+      } | null;
       runtimeInfo?: { sessionId?: unknown } | null;
     } | null;
     if (!record || record.archivedAt) continue;
+    // Paseo opens a Codex thread by its native handle first, then the session ID.
     for (const id of [
       record.persistence?.sessionId,
+      record.persistence?.nativeHandle,
+      record.persistence?.metadata?.threadId,
       record.runtimeInfo?.sessionId,
     ])
       if (typeof id === "string") ids.add(id.toLowerCase());
@@ -100,13 +175,15 @@ export interface RetentionResult {
   skipped: number;
   /** Old threads kept because a conversation Paseo lists uses them. */
   kept: number;
+  /** Old sub-agent threads kept with the thread that spawned them, which stays. */
+  children: number;
   reason?: string;
 }
 
 /**
  * Removes the threads whose every rollout file is older than `days`, except those of open Paseo
- * conversations, and reports what disappeared. `remove` asks Codex to delete the given threads;
- * nothing is started when no thread is old enough.
+ * conversations and the sub-agent threads of any thread that stays, and reports what disappeared.
+ * `remove` asks Codex to delete the given threads; nothing is started when no thread is old enough.
  */
 export async function pruneCodexHistory(input: {
   codexHome: string;
@@ -121,9 +198,32 @@ export async function pruneCodexHistory(input: {
   const old = [...before].filter(([, files]) =>
     files.every((file) => file.modified < cutoff),
   );
-  const candidates = old.filter(([id]) => !open.has(id)).map(([id]) => id);
-  const kept = old.length - candidates.length;
-  if (!candidates.length) return { removed: 0, bytes: 0, skipped: 0, kept };
+  const aged = new Set(old.map(([id]) => id));
+  // A sub-agent thread goes with the thread that spawned it (Codex deletes them together), so one
+  // whose parent stays (recent, or open in Paseo) stays too, however old it is.
+  const parents = new Map<string, string>();
+  for (const [id, files] of old)
+    if (!open.has(id)) {
+      const parent = await rolloutParent(files);
+      if (parent) parents.set(id, parent);
+    }
+  const children = new Set<string>();
+  const stays = (id: string) =>
+    open.has(id) || children.has(id) || (before.has(id) && !aged.has(id));
+  for (let grown = true; grown; ) {
+    grown = false;
+    for (const [id, parent] of parents)
+      if (!children.has(id) && stays(parent)) {
+        children.add(id);
+        grown = true;
+      }
+  }
+  const candidates = old
+    .filter(([id]) => !open.has(id) && !children.has(id))
+    .map(([id]) => id);
+  const kept = old.length - candidates.length - children.size;
+  if (!candidates.length)
+    return { removed: 0, bytes: 0, skipped: 0, kept, children: children.size };
   const { reason } = await input.remove(candidates);
   const after = await codexRollouts(input.codexHome);
   let removed = 0,
@@ -138,6 +238,7 @@ export async function pruneCodexHistory(input: {
     bytes,
     skipped: candidates.filter((id) => after.has(id)).length,
     kept,
+    children: children.size,
     ...(reason ? { reason } : {}),
   };
 }
@@ -151,6 +252,7 @@ export function retentionSummary(days: number, result: RetentionResult) {
       ? `${result.skipped}개 건너뜀(사용 중·삭제 거부${result.reason ? `: ${result.reason}` : ""})`
       : null,
     result.kept ? `Paseo 열린 대화 ${result.kept}개 보존` : null,
+    result.children ? `남는 대화의 하위 작업 ${result.children}개 보존` : null,
   ]
     .filter((part) => part !== null)
     .join(", ");
