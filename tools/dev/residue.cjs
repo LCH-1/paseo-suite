@@ -30,6 +30,8 @@
  * 불완전하면(경로·환경을 읽지 못한 Paseo 계열 프로세스, 환경 변수를 하나도 못 읽음, 대상을 읽지
  * 못한 바로가기) plan 은 전부 KEEP 으로 표시하고 그 이유를 출력하며 quarantine 은 거부한다.
  * lsass 같은 보호 프로세스와 다른 세션의 Paseo 계열이 아닌 프로세스는 메모리를 열지 않는다.
+ * 실행 파일이 Paseo 폴더 밖에 있는 등록 서비스(예: Codex 앱의 sandbox 서비스)는 서비스 관리자가
+ * 띄워 Paseo 환경을 물려받지 않으므로 이름이 같아도 Paseo 계열로 보지 않는다.
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -313,6 +315,7 @@ function Get-ResidueProcesses { @(Get-CimInstance Win32_Process) }
 function Read-ResidueProcess([int]$Id) { [ResiduePeb]::Get($Id) }
 function Get-ResidueSessionId { [Diagnostics.Process]::GetCurrentProcess().SessionId }
 function Test-ResidueProcessAlive([int]$Id) { [bool](Get-Process -Id $Id -ErrorAction SilentlyContinue) }
+function Get-ResidueServices { @(Get-CimInstance Win32_Service -Filter 'ProcessId <> 0') }
 # Paseo-family processes: the exe path and environment of each one must be read, wherever it runs.
 $script:ResidueFamily = '^(?:paseo[^\\/]*|node|bun|codex[^\\/]*|esbuild|claude)\.exe$'
 # Never opened for a memory read: kernel, session managers, credential and security services.
@@ -322,6 +325,10 @@ function Invoke-ResidueProcessStage {
   $processes = @(Get-ResidueProcesses)
   if ($processes.Count -eq 0) { throw 'no process was listed' }
   $session = Get-ResidueSessionId
+  # Any shell gets the PID and image path of every running service. Without this list every
+  # family process must still be read.
+  $services = @{}
+  try { foreach ($service in @(Get-ResidueServices)) { if ($service.ProcessId) { $services[[int]$service.ProcessId] = $service } } } catch { $services = @{} }
   foreach ($process in $processes) {
     $id = [int]$process.ProcessId
     $name = [string]$process.Name
@@ -331,7 +338,17 @@ function Invoke-ResidueProcessStage {
     }
     $source = 'process:' + $name + '#' + $id
     Add-ResidueItem $source ([string]$process.ExecutablePath + '|' + [string]$process.CommandLine)
-    $family = $name -match $script:ResidueFamily
+    # The service manager starts a service, so it inherits no Paseo environment. One whose image
+    # (this exe, not a PID reused after the listing) is outside every Paseo folder is no Paseo
+    # process: the Codex app's sandbox service runs as LocalSystem in session 0.
+    $outside = $false
+    $service = $services[$id]
+    if ($service) {
+      $image = [string]$service.PathName
+      Add-ResidueItem ('service:' + $service.Name + '#' + $id) $image
+      $outside = $image.IndexOf('\' + $name, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $image -notmatch $script:ResidueRx
+    }
+    $family = $name -match $script:ResidueFamily -and -not $outside
     $missing = @()
     # An unprivileged shell gets no path for elevated, other-session or other-user processes.
     if ($family -and -not $process.ExecutablePath) { $missing += 'path' }
