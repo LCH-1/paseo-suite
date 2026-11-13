@@ -4,10 +4,12 @@ import { utimes,
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   writeFile,
   rm,
   realpath,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -625,5 +627,39 @@ test("방금 끝난 로그인은 다시 눌러도 유실되지 않는다", async
     assert.ok(f.refreshed.includes("usage"));
   } finally {
     await f.cleanup?.();
+  }
+});
+
+test("프로바이더 정리 전 설정 백업은 최근 3개만 남기고 다른 파일은 건드리지 않는다", async () => {
+  const fixture = await reloginFixture();
+  try {
+    fixture.paseo.config.patch = async () => {};
+    const directory = join(fixture.root, "aster");
+    await mkdir(directory, { recursive: true });
+    const older: string[] = [];
+    for (let hours = 1; hours <= 5; hours++) {
+      const name = `provider-policy-before-${randomUUID()}.json`;
+      await writeFile(join(directory, name), "{}");
+      const at = Date.now() / 1000 - hours * 3600;
+      await utimes(join(directory, name), at, at);
+      older.push(name);
+    }
+    await writeFile(join(directory, "settings.json"), "{}");
+    await fixture.call(accountsRpc.policy);
+    await fixture.call(accountsRpc.policy);
+    const backups = (await readdir(directory)).filter((name) =>
+      name.startsWith("provider-policy-before-"),
+    );
+    assert.equal(backups.length, 3);
+    // The two just taken and the newest older one.
+    assert.ok(backups.includes(older[0]));
+    assert.equal(backups.filter((name) => !older.includes(name)).length, 2);
+    assert.equal(
+      await readFile(join(directory, "settings.json"), "utf8"),
+      "{}",
+    );
+  } finally {
+    fixture.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });

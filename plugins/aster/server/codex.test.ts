@@ -26,6 +26,7 @@ import {
   codexReadingReuse,
   discoverCodexAccounts,
   registerCodexRouting,
+  removeOldLauncher,
   resumableCodexAccount,
   retryingBridge,
 } from "./codex";
@@ -1285,3 +1286,28 @@ test("Codex 계정이 여럿이면 2분 안 판독만 재사용해 분배하고 
     routing.dispose();
   }
 });
+
+test("이전 배치 실행기는 어떤 프로바이더 명령도 가리키지 않을 때만 지운다", async () =>
+  fixture(async (home) => {
+    const old = join(home, "aster", "codex-node.cmd");
+    await mkdir(join(home, "aster"), { recursive: true });
+    await writeFile(old, "@echo off\r\n");
+    await writeFile(join(home, "aster", "codex-node.ps1"), "# current");
+    const current = [
+      "powershell.exe",
+      "-File",
+      join(home, "aster", "codex-node.ps1"),
+      "codex-proxy.mjs",
+      '["codex"]',
+    ];
+    // A provider the bridge could not patch (disabled) still starts Codex through it.
+    assert.equal(
+      await removeOldLauncher(home, [current, [old, "codex-proxy.mjs"]]),
+      false,
+    );
+    assert.ok(existsSync(old));
+    assert.equal(await removeOldLauncher(home, [current, ["claude"]]), true);
+    assert.equal(existsSync(old), false);
+    assert.ok(existsSync(join(home, "aster", "codex-node.ps1")));
+    assert.equal(await removeOldLauncher(home, [current]), false);
+  }));
