@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuit
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action Check
 ```
 
-설치를 확인한 뒤에는 받은 설치 파일을 지우고, 설치를 보류한 동안에는 최신 설치 파일 하나만 남깁니다. 앱은 기본 `~/.paseo`로 시작할 때 설치 기록이 가리키는 체크포인트와 최근 체크포인트 3개만 남기고, 현재 플러그인·설정과 남은 체크포인트가 가리키는 플러그인·하루가 지나지 않은 플러그인을 뺀 옛 플러그인 폴더를 정리합니다. `config.json`이 없으면 플러그인 폴더는 지우지 않습니다. 지운 폴더 이름, 지우지 못한 폴더와 오류 코드, 중단 이유는 `~/.paseo/suite/residue-cleanup.json`에 최근 20회까지 남습니다.
+설치를 확인한 뒤에는 받은 설치 파일을 지우고, 설치를 보류한 동안에는 최신 설치 파일 하나만 남깁니다. 앱은 기본 `~/.paseo`로 시작할 때 설치 기록이 가리키는 체크포인트와 설정 내용이 서로 다른 최근 체크포인트 3개만 남기고(실패한 이전 시도는 체크포인트를 남기지 않고, 같은 설정 사본은 개수에 세지 않고 지웁니다), 현재 플러그인·설정과 남은 체크포인트가 가리키는 플러그인·하루가 지나지 않은 플러그인을 뺀 옛 플러그인 폴더를 정리합니다. `config.json`이 없으면 플러그인 폴더는 지우지 않습니다. 지운 폴더 이름, 지우지 못한 폴더와 오류 코드, 중단 이유는 `~/.paseo/suite/residue-cleanup.json`에 최근 20회까지 남습니다.
 
 ### 이전 버전으로 되돌리기
 
