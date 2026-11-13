@@ -925,10 +925,39 @@ function stillCurrent(reports: z.infer<typeof reportsSchema>, now: number) {
   );
 }
 
+/** How long the reports of one lookup answer again at most. */
+const REUSE = 60_000;
+/** What a session open may still take after it read the reports, which must stay current. */
+const REUSE_MARGIN = 20_000;
+
+/**
+ * Until when the Claude reports read at `at` may answer again: a minute, but never so long that
+ * one current then comes within `REUSE_MARGIN` of the scheduler's `policy.maxAge`. The host keeps
+ * a report five minutes after its lookup ended while `fetchedAt` is when that lookup began, so a
+ * report it answers from that cache can be over five minutes old already, and a whole minute more
+ * would drop it from the open that reads it. Reused only that long, the next lookup finds the
+ * host's cache expired and brings a new report.
+ */
+function reusableUntil(reports: z.infer<typeof reportsSchema>, at: number) {
+  let until = at + REUSE;
+  for (const report of reports) {
+    const fetched = Date.parse(report.fetchedAt);
+    if (
+      claudeSources.includes(report.sourceId) &&
+      Number.isFinite(fetched) &&
+      fetched <= at &&
+      at - fetched <= policy.maxAge
+    )
+      until = Math.min(until, fetched + policy.maxAge - REUSE_MARGIN);
+  }
+  return until;
+}
+
 export class UsageReader {
   private readonly lifetime = new AbortController();
   private cached: {
-    at: number;
+    /** When the reports stop answering on their own (`reusableUntil`). */
+    until: number;
     reports: z.infer<typeof reportsSchema>;
     /** Read before the latest login change: it stands in only while the forced lookup runs. */
     superseded?: boolean;
@@ -985,7 +1014,7 @@ export class UsageReader {
     signal = AbortSignal.any([signal, this.lifetime.signal]);
     signal.throwIfAborted();
     const cached = this.cached;
-    if (cached && !cached.superseded && this.now() - cached.at < 60_000)
+    if (cached && !cached.superseded && this.now() < cached.until)
       return cached.reports;
     // After a login change the reports from just before it decide while the forced lookup runs.
     const standing =
@@ -1027,7 +1056,8 @@ export class UsageReader {
             ),
           );
           if (generation === this.generation) {
-            this.cached = { at: this.now(), reports };
+            const at = this.now();
+            this.cached = { until: reusableUntil(reports, at), reports };
             this.failed = null;
             this.forceRefresh = false;
           }
