@@ -4,6 +4,17 @@ import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { transitionPlugins } from "./migration.ts";
+// Restores the Suite plugin sources recorded in a checkpoint.
+//   node tools/rollback-install.mjs <installed Paseo.exe> <home>/suite/checkpoints/<id>
+// The executable only runs the bundled CLI, so any installed Paseo works. To go
+// back to an older app, reinstall it from its public GitHub release tag first
+// (install.ps1 -Action Rollback -Version <x.y.z>); no local installer copy is kept.
+if (process.argv.length < 4) {
+  console.error(
+    "Usage: node tools/rollback-install.mjs <installed Paseo.exe> <checkpoint folder>",
+  );
+  process.exit(1);
+}
 const executable = path.resolve(process.argv[2]);
 const checkpoint = path.resolve(process.argv[3]);
 const home = path.resolve(
@@ -77,10 +88,6 @@ const adapter = {
     if (source.enabled === false) await cli("plugin", "disable", id);
   },
 };
-const current = await adapter.list();
-const expected = JSON.parse(
-  await fs.readFile(path.join(home, "config.json"), "utf8"),
-).plugins;
 const own = new Set([
   "terminal-tabs",
   "global-workspace-tabs",
@@ -91,6 +98,31 @@ const own = new Set([
   "settings-sync",
   "claude-windows-usage",
 ]);
+// Check every source before the first remove: a cleaned release would otherwise
+// fail half way through the transition.
+const missing = [];
+for (const id of own) {
+  const source = original.plugins?.[id]?.path;
+  if (
+    source &&
+    !(await fs.stat(source).then(
+      (stat) => stat.isDirectory(),
+      () => false,
+    ))
+  )
+    missing.push(`${id}: ${source}`);
+}
+if (missing.length) {
+  console.error(
+    `Checkpoint plugin sources are missing; nothing was changed.\n  ${missing.join("\n  ")}\n` +
+      "Start the Paseo release that created them (reinstall it from its GitHub release tag with install.ps1 -Action Rollback -Version <x.y.z>) so it extracts its plugins again, then retry.",
+  );
+  process.exit(1);
+}
+const current = await adapter.list();
+const expected = JSON.parse(
+  await fs.readFile(path.join(home, "config.json"), "utf8"),
+).plugins;
 const target = { ...current };
 for (const id of own) {
   if (original.plugins?.[id]) target[id] = original.plugins[id];

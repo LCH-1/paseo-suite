@@ -55,6 +55,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuit
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action Check
 ```
 
+설치를 확인한 뒤에는 받은 설치 파일을 지우고, 설치를 보류한 동안에는 최신 설치 파일 하나만 남깁니다. 앱은 기본 `~/.paseo`로 시작할 때 설치 기록이 가리키는 체크포인트와 최근 체크포인트 3개만 남기고, 현재 플러그인·설정과 남은 체크포인트가 가리키는 플러그인·하루가 지나지 않은 플러그인을 뺀 옛 플러그인 폴더를 정리합니다.
+
+### 이전 버전으로 되돌리기
+
+되돌릴 버전은 이 저장소의 공개 Release 태그에서 인증 없이 받습니다. PC에 설치 파일을 따로 보관하지 않습니다. 자동 업데이트가 켜져 있으면 최신 버전이 다시 설치되므로 먼저 끈 뒤 실행합니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action DisableAutoUpdate
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action Rollback -Version 1.0.9
+```
+
+설치 파일은 같은 태그의 SHA256SUMS로 확인합니다. 앱이나 로컬 호스트가 실행 중이면 설치를 보류하므로 모두 종료한 뒤 같은 명령을 다시 실행합니다. 되돌린 앱을 시작하면 그 버전에 포함된 플러그인으로 다시 맞춥니다.
+
 기존 PC의 설정·대화 파일은 그대로 두고 플러그인 소스만 버전별 경로로 옮깁니다. 설치 체크포인트는 `$PASEO_HOME/suite/checkpoints`에 남습니다. 다른 세션이 수정한 설정은 복구 과정에서 덮어쓰지 않습니다. Windows 설치기는 실행 중인 Paseo 프로세스를 강제 종료하지 않으며, 사용 중인 설치 파일을 교체하기 전 종료를 요청합니다.
 
 ## 개발·검증

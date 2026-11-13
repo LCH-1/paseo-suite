@@ -1,11 +1,13 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Update', 'Check', 'EnableAutoUpdate', 'DisableAutoUpdate')]
+    [ValidateSet('Install', 'Update', 'Check', 'EnableAutoUpdate', 'DisableAutoUpdate', 'Rollback')]
     [string]$Action = 'Install',
     [switch]$EnableAutoUpdate,
     [switch]$DownloadOnly,
-    [switch]$Scheduled
+    [switch]$Scheduled,
+    # Rollback only: an older published release, for example 1.0.9.
+    [string]$Version
 )
 
 Set-StrictMode -Version Latest
@@ -35,12 +37,14 @@ function Invoke-SuiteRequest {
 }
 
 function Get-SuiteRelease {
+    param([string]$Tag = 'latest')
     # Public release assets avoid credentials and the anonymous GitHub REST API quota.
-    $lock = Invoke-SuiteRequest 'suite-lock.json'
+    $lock = Invoke-SuiteRequest -Asset 'suite-lock.json' -Tag $Tag
     if ($lock.schemaVersion -ne 1 -or $lock.suiteVersion -notmatch '^(\d+\.\d+\.\d+)$') {
         throw 'The latest release metadata is not a supported stable Suite release.'
     }
     $version = $Matches[1]
+    if ($Tag -ne 'latest' -and "v$version" -ne $Tag) { throw "Release $Tag does not describe Suite $Tag." }
     $installer = "Paseo-Suite-$version-x64.exe"
     return [pscustomobject]@{ Version = [version]$version; Tag = "v$version"; Installer = $installer }
 }
@@ -87,13 +91,15 @@ function Assert-SuiteChecksum {
 }
 
 function Save-SuiteRelease {
-    param($Release)
+    # -InstallerOnly skips the helper: releases before 1.0.8 have none, and a
+    # rollback must never replace the current helper with an older one.
+    param($Release, [switch]$InstallerOnly)
+    $verified = @($Release.Installer)
+    if (-not $InstallerOnly) { $verified += 'install.ps1' }
     $directory = Join-Path $script:UpdaterRoot $Release.Tag
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    if ((Test-Path -LiteralPath (Join-Path $directory $Release.Installer)) -and
-        (Test-Path -LiteralPath (Join-Path $directory 'install.ps1')) -and
-        (Test-Path -LiteralPath (Join-Path $directory 'SHA256SUMS'))) {
-        foreach ($name in @($Release.Installer, 'install.ps1')) {
+    if (@($verified + 'SHA256SUMS' | Where-Object { -not (Test-Path -LiteralPath (Join-Path $directory $_)) }).Count -eq 0) {
+        foreach ($name in $verified) {
             Assert-SuiteChecksum (Join-Path $directory $name) (Join-Path $directory 'SHA256SUMS')
         }
         return Join-Path $directory $Release.Installer
@@ -102,13 +108,13 @@ function Save-SuiteRelease {
     $temporary = Join-Path $directory ([guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $temporary | Out-Null
     try {
-        foreach ($name in @($Release.Installer, 'SHA256SUMS', 'install.ps1')) {
+        foreach ($name in @($Release.Installer, 'SHA256SUMS') + @($verified | Select-Object -Skip 1)) {
             Invoke-SuiteRequest -Asset $name -Tag $Release.Tag -OutFile (Join-Path $temporary $name) | Out-Null
         }
-        foreach ($name in @($Release.Installer, 'install.ps1')) {
+        foreach ($name in $verified) {
             Assert-SuiteChecksum (Join-Path $temporary $name) (Join-Path $temporary 'SHA256SUMS')
         }
-        foreach ($name in @($Release.Installer, 'install.ps1', 'SHA256SUMS')) {
+        foreach ($name in $verified + 'SHA256SUMS') {
             Move-Item -LiteralPath (Join-Path $temporary $name) -Destination (Join-Path $directory $name) -Force
         }
     } finally {
@@ -204,6 +210,41 @@ function Invoke-SuiteInstaller {
     return 'installed'
 }
 
+function Invoke-SuiteRollback {
+    # The public GitHub release tag is the rollback source; no local installer copy is kept.
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Rollback needs -Version <major.minor.patch> of a published Suite release.' }
+    if ($EnableAutoUpdate) { throw 'Rollback cannot enable automatic updates; they would reinstall the latest release.' }
+    # The scheduled update would reinstall the latest release within 30 minutes.
+    if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
+        throw 'Automatic updates are enabled and would undo the rollback. Run -Action DisableAutoUpdate first.'
+    }
+    $installed = Get-InstalledSuiteVersion
+    if (-not $installed) {
+        Write-Output 'No registered Suite installation found. Use -Action Install first.'
+        return
+    }
+    $release = Get-SuiteRelease -Tag "v$Version"
+    Write-Output "Rollback Suite: $($release.Version); installed: $installed"
+    if ($release.Version -ge $installed) {
+        Write-Output 'Rollback installs an older release only. Use -Action Update for the latest release.'
+        return
+    }
+    $installer = Save-SuiteRelease $release -InstallerOnly
+    $status = if ($DownloadOnly) { 'downloaded' } else { Invoke-SuiteInstaller $installer }
+    if ($status -eq 'installed') {
+        $actual = Get-InstalledSuiteVersion
+        if (-not $actual -or $actual -ne $release.Version) { throw 'Installer completed, but the registered Suite version does not match.' }
+        Remove-SuiteDownloads
+    } else {
+        Remove-SuiteDownloads -KeepTag $release.Tag
+    }
+    $result = [ordered]@{ version = "$($release.Version)"; status = $status; action = 'rollback'; installer = $installer; checkedAt = [DateTime]::UtcNow.ToString('o') }
+    $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:UpdaterRoot 'status.json') -Encoding UTF8
+    Write-Output "Suite rollback $status. Installer: $installer"
+    if ($status -eq 'installed') { Write-Output 'Start Paseo to switch to the plugins bundled with this release. Automatic updates stay off until you enable them again.' }
+    if ($status -eq 'pending') { Write-Output 'Finish your work, exit both Paseo and its local host, then run this rollback again; nothing was stopped.' }
+}
+
 function Invoke-SuiteSetup {
     if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
         throw 'This installer requires Windows x64.'
@@ -218,6 +259,7 @@ function Invoke-SuiteSetup {
     try {
         if ($Action -eq 'DisableAutoUpdate') { Set-SuiteAutoUpdate $false; return }
         if ($Action -eq 'EnableAutoUpdate') { Save-SuiteHelper; Set-SuiteAutoUpdate $true; return }
+        if ($Action -eq 'Rollback') { Invoke-SuiteRollback; return }
         $release = Get-SuiteRelease
         $installed = Get-InstalledSuiteVersion
         Write-Output "Latest Suite: $($release.Version); installed: $installed"
