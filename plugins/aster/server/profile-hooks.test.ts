@@ -134,6 +134,16 @@ test("사용자 설정의 대화 기록 보존 기간을 프로필에 맞추고 
     mergeProfileSettings({}, { cleanupPeriodDays: "90" as unknown as number }),
     {},
   );
+  // Values the CLI rejects (whole days from 1) are not copied into every profile.
+  for (const days of [0, -1, 1.5])
+    for (const profile of [{}, { cleanupPeriodDays: 30 }])
+      assert.deepEqual(
+        mergeProfileSettings(profile, { cleanupPeriodDays: days }),
+        profile,
+      );
+  assert.deepEqual(mergeProfileSettings({}, { cleanupPeriodDays: 1 }), {
+    cleanupPeriodDays: 1,
+  });
 });
 
 test("동기화는 보존 기간만 있는 사용자 설정도 settings.json 이 없는 프로필에 쓰고 다시 쓰지 않는다", async () => {
