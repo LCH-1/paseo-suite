@@ -1049,7 +1049,7 @@ test("Codex 창에 초기화 시각과 길이가 모두 없으면 남은 %를 �
   );
 });
 
-/** The Codex session-open hook with every host, CLI and settings dependency replaced. */
+/** The Codex routing hooks with every host, CLI and settings dependency replaced. */
 function codexRouting(
   accounts: { id: string; home: string; identity: string }[],
 ) {
@@ -1057,19 +1057,29 @@ function codexRouting(
   const lookups: Array<{
     identity: string;
     answer: (value: Omit<CodexReading, "id" | "identity" | "at">) => void;
+    fail: (error: Error) => void;
   }> = [];
   type Open = (
     input: { request: PluginSessionOpenRequest },
     context: unknown,
   ) => Promise<PluginSessionOpenRequest | undefined>;
+  type Listener = (event: unknown, context: unknown) => unknown;
   let hook: Open | null = null;
+  const listeners = new Map<string, Listener>();
+  /** What `paseo agent reload` does in the host: the hook opens the session again. */
+  let reload: (agentId: string) => Promise<void> = async () => {};
+  /** The status the host reports for a session after its turn. */
+  let status = "idle";
   const routes = registerCodexRouting(
     {
       before: (_name: string, handler: Open) => {
         hook = handler;
         return () => {};
       },
-      on: () => () => {},
+      on: (name: string, handler: Listener) => {
+        listeners.set(name, handler);
+        return () => {};
+      },
     } as never,
     {
       discover: async () => accounts,
@@ -1077,9 +1087,10 @@ function codexRouting(
       settings: async () => ({ capacities: {} }),
       now: () => clock,
       retention: false,
+      reload: (agentId) => reload(agentId),
       inspect: (_command, _home, identity) =>
-        new Promise((resolve) => {
-          lookups.push({ identity, answer: resolve });
+        new Promise((resolve, reject) => {
+          lookups.push({ identity, answer: resolve, fail: reject });
         }),
     },
   );
@@ -1087,12 +1098,38 @@ function codexRouting(
     signal: new AbortController().signal,
     paseo: {
       config: { get: async () => ({ config: { providers: { codex: {} } } }) },
+      agents: {
+        ref: () => ({
+          refresh: async () => ({ agent: { status, pendingPermissions: [] } }),
+        }),
+      },
     },
   };
   const logs: string[] = [];
-  const info = console.info;
+  const info = console.info,
+    warn = console.warn;
   console.info = (message: string) => void logs.push(message);
+  console.warn = (message: string) => void logs.push(message);
   const tick = () => new Promise((resolve) => setImmediate(resolve));
+  /** Settles every open lookup of `identity`, once one has started. */
+  const settle = async (
+    identity: string,
+    outcome: (lookup: (typeof lookups)[number]) => void,
+  ) => {
+    for (
+      let turn = 0;
+      turn < 20 && !lookups.some((lookup) => lookup.identity === identity);
+      turn++
+    )
+      await tick();
+    for (const lookup of lookups.filter(
+      (entry) => entry.identity === identity,
+    )) {
+      lookups.splice(lookups.indexOf(lookup), 1);
+      outcome(lookup);
+    }
+    for (let turn = 0; turn < 5; turn++) await tick();
+  };
   return {
     logs,
     advance: (ms: number) => {
@@ -1101,17 +1138,8 @@ function codexRouting(
     /** Lookups started and not yet answered. */
     waiting: () => lookups.map((lookup) => lookup.identity).sort(),
     /** Answers every open lookup of `identity`: `used` percent spent in both windows. */
-    answer: async (identity: string, used: number) => {
-      for (
-        let turn = 0;
-        turn < 20 && !lookups.some((lookup) => lookup.identity === identity);
-        turn++
-      )
-        await tick();
-      for (const lookup of lookups.filter(
-        (entry) => entry.identity === identity,
-      )) {
-        lookups.splice(lookups.indexOf(lookup), 1);
+    answer: (identity: string, used: number) =>
+      settle(identity, (lookup) =>
         lookup.answer({
           plan: "pro",
           allowed: true,
@@ -1128,10 +1156,13 @@ function codexRouting(
               resetsAt: clock + 86_400_000,
             },
           ],
-        });
-      }
-      for (let turn = 0; turn < 5; turn++) await tick();
-    },
+        }),
+      ),
+    /** Fails every open lookup of `identity`, as a lost login or an app-server error does. */
+    fail: (identity: string) =>
+      settle(identity, (lookup) =>
+        lookup.fail(Error("Codex 계정 정보를 확인하지 못했습니다.")),
+      ),
     open: (agentId: string, reason: PluginSessionOpenRequest["reason"]) =>
       hook!(
         {
@@ -1147,8 +1178,32 @@ function codexRouting(
         },
         context,
       ),
+    /** One turn of `agentId`, ended as `outcome`; resolves once the turn-end handling is done. */
+    turn: async (
+      agentId: string,
+      outcome:
+        | { kind: "completed" }
+        | { kind: "failed"; error: { message: string } },
+    ) => {
+      const agent = { id: agentId, provider: "codex" };
+      await listeners.get("agent.turn_started")!(
+        { agent, turnId: `${agentId}-turn` },
+        context,
+      );
+      return listeners.get("agent.turn_ended")!(
+        { agent, turnId: `${agentId}-turn`, outcome },
+        context,
+      );
+    },
+    onReload: (action: (agentId: string) => Promise<void>) => {
+      reload = action;
+    },
+    reportStatus: (value: string) => {
+      status = value;
+    },
     dispose: () => {
       console.info = info;
+      console.warn = warn;
       routes.dispose();
     },
   };
@@ -1282,6 +1337,136 @@ test("Codex 계정이 여럿이면 2분 안 판독만 재사용해 분배하고 
     await routing.answer("a", 80);
     await routing.answer("b", 20);
     assert.equal(openedOn(await unbound), "b");
+  } finally {
+    routing.dispose();
+  }
+});
+
+test("Codex 계정이 여럿이면 조회에 실패한 기존 계정으로 재개하지 않고 새 판독을 기다려 다른 계정으로 옮긴다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+  ]);
+  try {
+    const first = routing.open("s", "create");
+    await routing.answer("a", 10);
+    await routing.answer("b", 50);
+    assert.equal(openedOn(await first), "a");
+
+    // A minute later another open renews both readings behind it, and a's lookup fails.
+    routing.advance(61_000);
+    await routing.open("other", "create");
+    await routing.fail("a");
+    await routing.answer("b", 50);
+    assert.ok(
+      routing.logs.includes(
+        "[aster] Codex 계정 codex: 구독·한도를 확인할 수 없어 자동 선택에서 제외",
+      ),
+    );
+
+    // The resume of the session bound to a looks a up again instead of going back to it.
+    const resumed = routing.open("s", "resume");
+    assert.equal(await answersAtOnce(resumed), false);
+    await routing.fail("a");
+    assert.equal(openedOn(await resumed), "b");
+    assert.match(
+      routing.logs.at(-1)!,
+      /s \d+ms \(resume · 판독 대기 · codex-second\)$/,
+    );
+  } finally {
+    routing.dispose();
+  }
+});
+
+test("Codex 턴이 로그인 오류로 끝나 옮기지 못한 세션은 차단이 풀린 뒤에도 그 계정을 다시 확인하고 재개한다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+  ]);
+  try {
+    const first = routing.open("s", "create");
+    await routing.answer("a", 10);
+    await routing.answer("b", 50);
+    assert.equal(openedOn(await first), "a");
+
+    // The turn fails on a's login; b is chosen, but a new turn holds the session.
+    let reloads = 0;
+    routing.onReload(async () => void reloads++);
+    routing.reportStatus("running");
+    await routing.turn("s", {
+      kind: "failed",
+      error: { message: "unexpected status 401 Unauthorized: token expired" },
+    });
+    assert.equal(reloads, 0);
+
+    // Past a's one-minute block its dropped reading is not room: the resume asks again.
+    routing.advance(61_000);
+    const resumed = routing.open("s", "resume");
+    assert.equal(await answersAtOnce(resumed), false);
+    await routing.fail("a");
+    await routing.answer("b", 50);
+    assert.equal(openedOn(await resumed), "b");
+  } finally {
+    routing.dispose();
+  }
+});
+
+test("Codex 계정 중 하나라도 판독이 없으면 새로고침은 기존 계정으로 바로 열지 않고 전체를 다시 골라 분배한다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+    { id: "codex-third", home: "/c", identity: "c" },
+  ]);
+  try {
+    const first = routing.open("s", "create");
+    await routing.answer("a", 50);
+    await routing.answer("b", 10);
+    await routing.fail("c");
+    assert.equal(openedOn(await first), "b");
+
+    // Past the ten-minute hold a has far more room; c still has no reading.
+    routing.advance(11 * 60_000);
+    const refreshed = routing.open("s", "refresh");
+    assert.equal(await answersAtOnce(refreshed), false);
+    await routing.answer("a", 10);
+    await routing.answer("b", 60);
+    await routing.fail("c");
+    assert.equal(openedOn(await refreshed), "a");
+  } finally {
+    routing.dispose();
+  }
+});
+
+test("Codex 턴 종료 뒤 Aster가 옮기려고 시작한 reload는 판독이 오래됐어도 원래 계정으로 되돌아가지 않는다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+  ]);
+  try {
+    const first = routing.open("s", "create");
+    await routing.answer("a", 50);
+    await routing.answer("b", 10);
+    assert.equal(openedOn(await first), "b");
+
+    // The turn end finds a better; the host opens the session again some minutes later.
+    routing.advance(11 * 60_000);
+    let reopened: ReturnType<typeof routing.open> | undefined;
+    routing.onReload(async (agentId) => {
+      routing.advance(150_000);
+      reopened = routing.open(agentId, "refresh");
+      await reopened;
+    });
+    const ended = routing.turn("s", { kind: "completed" });
+    await routing.answer("a", 10);
+    await routing.answer("b", 60);
+    await routing.answer("a", 10);
+    await routing.answer("b", 60);
+    await ended;
+    assert.equal(openedOn(await reopened!), "a");
+    assert.match(
+      routing.logs.at(-1)!,
+      /s \d+ms \(refresh · 판독 대기 · codex\)$/,
+    );
   } finally {
     routing.dispose();
   }
