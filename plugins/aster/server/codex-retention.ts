@@ -11,7 +11,9 @@ import * as zlib from "node:zlib";
 // thread from Codex's state database and its spawned sub-agent threads, keeps forks readable,
 // and refuses a thread another Codex process holds ("already has an active writer"). A sub-agent
 // thread stays as long as the thread that spawned it does, and a thread that spawned one that
-// stays stays too, or deleting it would take that one along.
+// stays stays too, or deleting it would take that one along. Only a rollout's `session_meta` line
+// tells which thread spawned it; where no first line of a thread can be read that is unknown, so
+// such a thread stays when it is old, and holds back the day's run when it stays anyway.
 
 const ROLLOUT =
   /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i;
@@ -61,11 +63,14 @@ export async function codexRollouts(codexHome: string) {
 /** How much of a rollout is read for its first line (`session_meta`, a few KB). */
 const META_LIMIT = 1_048_576;
 
+const zstdDecompress = () =>
+  (zlib as { createZstdDecompress?: () => Transform }).createZstdDecompress;
+const isZst = (path: string) => path.toLowerCase().endsWith(".zst");
+
 /** The first line of a rollout, decompressing `.zst` where this Node can; null when unreadable. */
 async function firstLine(path: string): Promise<string | null> {
-  const compressed = path.toLowerCase().endsWith(".zst");
-  const decompress = (zlib as { createZstdDecompress?: () => Transform })
-    .createZstdDecompress;
+  const compressed = isZst(path);
+  const decompress = zstdDecompress();
   if (compressed && !decompress) return null;
   const source = createReadStream(path, { highWaterMark: 65_536 });
   const stream: Readable = compressed
@@ -95,14 +100,20 @@ async function firstLine(path: string): Promise<string | null> {
 
 /**
  * The thread that spawned this one, from its rollout's `session_meta` line
- * (`source.subagent.thread_spawn.parent_thread_id`), or null for any other thread.
+ * (`source.subagent.thread_spawn.parent_thread_id`), or null for any other thread. Undefined when
+ * no rollout of the thread starts with a `session_meta` line that can be read (too long, broken,
+ * compressed beyond this Node, or gone), so which thread spawned it is unknown.
  */
-export async function rolloutParent(files: RolloutFile[]) {
+export async function rolloutParent(
+  files: RolloutFile[],
+): Promise<string | null | undefined> {
+  let known = false;
   for (const file of files) {
     const line = await firstLine(file.path);
     if (!line) continue;
+    let meta;
     try {
-      const meta = JSON.parse(line) as {
+      meta = JSON.parse(line) as {
         type?: unknown;
         payload?: {
           source?: {
@@ -110,16 +121,16 @@ export async function rolloutParent(files: RolloutFile[]) {
           };
         };
       } | null;
-      const parent =
-        meta?.type === "session_meta"
-          ? meta.payload?.source?.subagent?.thread_spawn?.parent_thread_id
-          : undefined;
-      if (typeof parent === "string") return parent.toLowerCase();
     } catch {
-      // Not a rollout this Codex wrote: it has no parent to keep it.
+      continue;
     }
+    if (meta?.type !== "session_meta") continue;
+    known = true;
+    const parent =
+      meta.payload?.source?.subagent?.thread_spawn?.parent_thread_id;
+    if (typeof parent === "string") return parent.toLowerCase();
   }
-  return null;
+  return known ? null : undefined;
 }
 
 /**
@@ -180,14 +191,19 @@ export interface RetentionResult {
   children: number;
   /** Old threads kept because a sub-agent thread they spawned stays. */
   parents: number;
+  /** Old threads kept because no first line of theirs tells which thread spawned them. */
+  unreadable: number;
   reason?: string;
 }
 
 /**
  * Removes the threads whose every rollout file is older than `days`, except those of open Paseo
- * conversations, the sub-agent threads of any thread that stays and the threads that spawned
- * one that stays, and reports what disappeared. `remove` asks Codex to delete the given threads;
- * nothing is started when no thread is old enough.
+ * conversations, the sub-agent threads of any thread that stays, the threads that spawned one
+ * that stays and old threads whose parent cannot be read, and reports what disappeared. `remove`
+ * asks Codex to delete the given threads; nothing is started when no thread is old enough. The
+ * run stops before deleting anything when a thread that stays has no readable first line (the
+ * thread that spawned it, which must stay too, is unknown) or, when this Node cannot decompress
+ * `zstd` (`zstd: false` for tests), as soon as any rollout is compressed.
  */
 export async function pruneCodexHistory(input: {
   codexHome: string;
@@ -195,6 +211,7 @@ export async function pruneCodexHistory(input: {
   days: number;
   now: number;
   remove: (threadIds: string[]) => Promise<{ reason?: string }>;
+  zstd?: boolean;
 }): Promise<RetentionResult> {
   const before = await codexRollouts(input.codexHome);
   const open = await openPaseoThreads(input.paseoHome);
@@ -205,15 +222,27 @@ export async function pruneCodexHistory(input: {
       .map(([id]) => id),
   );
   const kept = [...aged].filter((id) => open.has(id)).length;
+  const none = { removed: 0, bytes: 0, skipped: 0 };
   if ([...aged].every((id) => open.has(id)))
-    return { removed: 0, bytes: 0, skipped: 0, kept, children: 0, parents: 0 };
+    return { ...none, kept, children: 0, parents: 0, unreadable: 0 };
+  if (!(input.zstd ?? zstdDecompress() !== undefined)) {
+    const packed = [...before.values()].filter((files) =>
+      files.some((file) => isZst(file.path)),
+    ).length;
+    if (packed)
+      throw new Error(
+        `이 Node 는 zstd 를 풀지 못해 압축된 rollout 대화 ${packed}개의 하위 작업 관계를 읽을 수 없음`,
+      );
+  }
   // A sub-agent thread goes with the thread that spawned it (Codex deletes them together). So the
   // sub-agent threads of a thread that stays (recent, or open in Paseo) stay however old they
   // are, and so do the threads that spawned one that stays, up to the first.
   const parentOf = new Map<string, string>();
   const spawned = new Map<string, string[]>();
+  const unknown = new Set<string>();
   for (const [id, files] of before) {
     const parent = await rolloutParent(files);
+    if (parent === undefined) unknown.add(id);
     if (!parent || parent === id) continue;
     parentOf.set(id, parent);
     spawned.set(parent, [...(spawned.get(parent) ?? []), id]);
@@ -224,6 +253,7 @@ export async function pruneCodexHistory(input: {
   ]);
   const children = new Set<string>(),
     parents = new Set<string>(),
+    unread = new Set<string>(),
     queue = [...stays];
   const keep = (id: string, why: Set<string>) => {
     if (stays.has(id) || !aged.has(id)) return;
@@ -231,14 +261,31 @@ export async function pruneCodexHistory(input: {
     why.add(id);
     queue.push(id);
   };
-  for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
-    const parent = parentOf.get(id);
-    if (parent) keep(parent, parents);
-    for (const child of spawned.get(id) ?? []) keep(child, children);
-  }
+  const spread = () => {
+    for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+      const parent = parentOf.get(id);
+      if (parent) keep(parent, parents);
+      for (const child of spawned.get(id) ?? []) keep(child, children);
+    }
+  };
+  spread();
+  // Any old thread may have spawned a thread that stays without a readable first line.
+  const blind = [...stays].filter((id) => unknown.has(id));
+  // An old one may be the sub-agent of a thread that stays: it stays, with what it spawned.
+  for (const id of aged) if (unknown.has(id)) keep(id, unread);
+  spread();
   const candidates = [...aged].filter((id) => !stays.has(id));
-  const held = { kept, children: children.size, parents: parents.size };
-  if (!candidates.length) return { removed: 0, bytes: 0, skipped: 0, ...held };
+  const held = {
+    kept,
+    children: children.size,
+    parents: parents.size,
+    unreadable: unread.size,
+  };
+  if (!candidates.length) return { ...none, ...held };
+  if (blind.length)
+    throw new Error(
+      `남는 대화 ${blind.length}개의 rollout 첫 줄을 읽지 못해 그 대화를 띄운 대화를 알 수 없음(${blind[0]} 등)`,
+    );
   const { reason } = await input.remove(candidates);
   const after = await codexRollouts(input.codexHome);
   let removed = 0,
@@ -269,6 +316,9 @@ export function retentionSummary(days: number, result: RetentionResult) {
     result.children ? `남는 대화의 하위 작업 ${result.children}개 보존` : null,
     result.parents
       ? `남는 하위 작업을 띄운 대화 ${result.parents}개 보존`
+      : null,
+    result.unreadable
+      ? `첫 줄을 읽지 못한 오래된 대화 ${result.unreadable}개 보존`
       : null,
   ]
     .filter((part) => part !== null)

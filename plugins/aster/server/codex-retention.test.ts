@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -26,16 +27,44 @@ const now = 1_800_000_000_000;
 const thread = (n: number) =>
   `01980000-0000-7000-8000-${String(n).padStart(12, "0")}`;
 
+/** A rollout as Codex 0.167 writes it: `session_meta` first, a sub-agent naming its parent. */
+const meta = (id: string, parent?: string) =>
+  [
+    JSON.stringify({
+      timestamp: "2026-08-01T00:00:00.000Z",
+      ordinal: 0,
+      type: "session_meta",
+      payload: {
+        id,
+        source: parent
+          ? {
+              subagent: {
+                thread_spawn: { parent_thread_id: parent, depth: 1 },
+              },
+            }
+          : "cli",
+      },
+    }),
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message" } }),
+    "",
+  ].join("\n");
+
+/** Text is compressed for a `.zst` path; bytes are written as they are. */
 async function rollout(
   home: string,
   relative: string,
   id: string,
   ageDays: number,
-  size: number | string | Buffer = 100,
+  content: string | Buffer = meta(id),
 ) {
   const file = join(home, relative.replace("{id}", id));
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, typeof size === "number" ? "x".repeat(size) : size);
+  await writeFile(
+    file,
+    typeof content === "string" && file.endsWith(".zst")
+      ? zstdCompressSync(Buffer.from(content))
+      : content,
+  );
   const at = (now - ageDays * DAY) / 1000;
   await utimes(file, at, at);
   return file;
@@ -59,15 +88,14 @@ test("Codex 대화 기록 보존은 모든 rollout 이 기간을 넘긴 대화�
       "sessions/2026/08/01/rollout-2026-08-01T01-02-03-{id}.jsonl",
       thread(1),
       100,
-      300,
     );
     const archived = await rollout(
       codexHome,
       "archived_sessions/rollout-2026-08-02T01-02-03-{id}.jsonl.zst",
       thread(2),
       95,
-      200,
     );
+    const bytes = (await stat(old)).size + (await stat(archived)).size;
     const recent = await rollout(
       codexHome,
       "sessions/2026/11/12/rollout-2026-11-12T01-02-03-{id}.jsonl",
@@ -131,11 +159,12 @@ test("Codex 대화 기록 보존은 모든 rollout 이 기간을 넘긴 대화�
     assert.deepEqual(asked, [[thread(1), thread(2), thread(6)]]);
     assert.deepEqual(result, {
       removed: 2,
-      bytes: 500,
+      bytes,
       skipped: 1,
       kept: 1,
       children: 0,
       parents: 0,
+      unreadable: 0,
       reason: `thread ${thread(6)} already has an active writer`,
     });
     for (const file of [recent, open, resumedOld, busy, other])
@@ -145,28 +174,6 @@ test("Codex 대화 기록 보존은 모든 rollout 이 기간을 넘긴 대화�
       `[aster] Codex 대화 기록 보존 90일: 2개 대화 0.0MB 삭제, 1개 건너뜀(사용 중·삭제 거부: thread ${thread(6)} already has an active writer), Paseo 열린 대화 1개 보존`,
     );
   }));
-
-/** A rollout as Codex 0.167 writes it: `session_meta` first, a sub-agent naming its parent. */
-const meta = (id: string, parent?: string) =>
-  [
-    JSON.stringify({
-      timestamp: "2026-08-01T00:00:00.000Z",
-      ordinal: 0,
-      type: "session_meta",
-      payload: {
-        id,
-        source: parent
-          ? {
-              subagent: {
-                thread_spawn: { parent_thread_id: parent, depth: 1 },
-              },
-            }
-          : "cli",
-      },
-    }),
-    JSON.stringify({ type: "event_msg", payload: { type: "user_message" } }),
-    "",
-  ].join("\n");
 
 test("Codex 대화 기록 보존은 남는 대화가 띄운 하위 작업 대화를 오래돼도 남기고 Paseo가 여는 native handle 도 보호한다", async () =>
   workspace(async (root) => {
@@ -312,6 +319,237 @@ test("Codex 대화 기록 보존은 기간 안이거나 Paseo에서 열린 하�
     );
   }));
 
+/** First lines that tell nothing about the thread that spawned it. */
+const unreadableFirstLines: Array<[string, string | Buffer]> = [
+  ["깨진 줄", '{"timestamp":"2026-11-13T00:00:00.000Z","type":"sess'],
+  ["1MB 넘는 줄", "x".repeat(1_100_000)],
+  ["빈 파일", ""],
+  [
+    "session_meta 가 아닌 줄",
+    `${JSON.stringify({ type: "response_item", payload: {} })}\n`,
+  ],
+];
+
+test("남는 대화의 rollout 첫 줄을 읽지 못하면 그 대화를 띄운 대화를 알 수 없어 그날 정리를 보류한다", async () => {
+  const cases: Array<
+    [string, (codexHome: string, paseoHome: string) => Promise<void>]
+  > = [
+    ...unreadableFirstLines.map(([name, body]): (typeof cases)[number] => [
+      `기간 안 하위 작업 · ${name}`,
+      async (codexHome) => {
+        await rollout(
+          codexHome,
+          "sessions/2026/11/13/rollout-2026-11-13T01-02-03-{id}.jsonl",
+          thread(22),
+          1,
+          body,
+        );
+      },
+    ]),
+    [
+      "기간 안 하위 작업 · 풀 수 없는 zst",
+      async (codexHome) => {
+        await rollout(
+          codexHome,
+          "sessions/2026/11/13/rollout-2026-11-13T01-02-03-{id}.jsonl.zst",
+          thread(22),
+          1,
+          Buffer.from("not zstd"),
+        );
+      },
+    ],
+    [
+      "Paseo 에서 열린 오래된 하위 작업 · 깨진 줄",
+      async (codexHome, paseoHome) => {
+        await rollout(
+          codexHome,
+          "sessions/2026/07/01/rollout-2026-07-01T01-02-03-{id}.jsonl",
+          thread(22),
+          120,
+          "{ torn",
+        );
+        await mkdir(join(paseoHome, "agents", "project"), { recursive: true });
+        await writeFile(
+          join(paseoHome, "agents", "project", "open.json"),
+          JSON.stringify({ id: "a", persistence: { sessionId: thread(22) } }),
+        );
+      },
+    ],
+    [
+      "기간 안 하위 작업이 띄운 대화로 남는 오래된 대화 · 깨진 줄",
+      async (codexHome) => {
+        await rollout(
+          codexHome,
+          "sessions/2026/07/01/rollout-2026-07-01T01-02-03-{id}.jsonl",
+          thread(24),
+          120,
+          "{ torn",
+        );
+        await rollout(
+          codexHome,
+          "sessions/2026/11/13/rollout-2026-11-13T01-02-03-{id}.jsonl",
+          thread(25),
+          1,
+          meta(thread(25), thread(24)),
+        );
+      },
+    ],
+  ];
+  for (const [name, arrange] of cases)
+    await workspace(async (root) => {
+      const codexHome = join(root, "codex"),
+        paseoHome = join(root, "paseo");
+      // 21 may be the thread that spawned the unreadable one; 23 is plainly old.
+      const files = [
+        await rollout(
+          codexHome,
+          "sessions/2026/07/01/rollout-2026-07-01T01-02-03-{id}.jsonl",
+          thread(21),
+          120,
+        ),
+        await rollout(
+          codexHome,
+          "sessions/2026/07/02/rollout-2026-07-02T01-02-03-{id}.jsonl",
+          thread(23),
+          120,
+        ),
+      ];
+      await arrange(codexHome, paseoHome);
+      let calls = 0;
+      await assert.rejects(
+        pruneCodexHistory({
+          codexHome,
+          paseoHome,
+          days: 90,
+          now,
+          remove: async () => {
+            calls++;
+            return {};
+          },
+        }),
+        /남는 대화 1개의 rollout 첫 줄을 읽지 못해/,
+        name,
+      );
+      assert.equal(calls, 0, name);
+      for (const file of files) assert.ok(existsSync(file), name);
+    });
+});
+
+test("첫 줄을 읽지 못한 오래된 대화는 남는 대화의 하위 작업일 수 있어 그것이 띄운 대화와 함께 남기고 나머지는 정리한다", async () => {
+  for (const [name, body] of unreadableFirstLines)
+    await workspace(async (root) => {
+      const codexHome = join(root, "codex"),
+        paseoHome = join(root, "paseo");
+      const unknown = await rollout(
+        codexHome,
+        "sessions/2026/07/01/rollout-2026-07-01T01-02-03-{id}.jsonl",
+        thread(41),
+        120,
+        body,
+      );
+      const spawned = await rollout(
+        codexHome,
+        "sessions/2026/07/01/rollout-2026-07-01T02-02-03-{id}.jsonl",
+        thread(42),
+        120,
+        meta(thread(42), thread(41)),
+      );
+      await rollout(
+        codexHome,
+        "sessions/2026/07/02/rollout-2026-07-02T01-02-03-{id}.jsonl",
+        thread(43),
+        120,
+      );
+      // One readable first line among a thread's rollouts is enough to know it.
+      await rollout(
+        codexHome,
+        "archived_sessions/rollout-2026-07-03T01-02-03-{id}.jsonl",
+        thread(45),
+        120,
+        body,
+      );
+      await rollout(
+        codexHome,
+        "sessions/2026/07/03/rollout-2026-07-03T01-02-03-{id}.jsonl",
+        thread(45),
+        110,
+      );
+      assert.equal(
+        await rolloutParent([{ path: unknown, size: 0, modified: 0 }]),
+        undefined,
+        name,
+      );
+      const asked: string[][] = [];
+      const result = await pruneCodexHistory({
+        codexHome,
+        paseoHome,
+        days: 90,
+        now,
+        remove: async (threadIds) => {
+          asked.push([...threadIds].sort());
+          return {};
+        },
+      });
+      assert.deepEqual(asked, [[thread(43), thread(45)]], name);
+      assert.equal(result.unreadable, 1, name);
+      assert.equal(result.children, 1, name);
+      for (const file of [unknown, spawned]) assert.ok(existsSync(file), name);
+      assert.match(
+        retentionSummary(90, result),
+        /, 남는 대화의 하위 작업 1개 보존, 첫 줄을 읽지 못한 오래된 대화 1개 보존$/,
+        name,
+      );
+    });
+});
+
+test("zstd 를 풀 수 없는 Node 에서는 압축된 rollout 이 있으면 그날 정리를 보류한다", async () =>
+  workspace(async (root) => {
+    const codexHome = join(root, "codex"),
+      paseoHome = join(root, "paseo");
+    // 32, compressed and recent, was spawned by the old 31; 33 is plainly old.
+    const parent = await rollout(
+      codexHome,
+      "sessions/2026/07/01/rollout-2026-07-01T01-02-03-{id}.jsonl",
+      thread(31),
+      120,
+    );
+    await rollout(
+      codexHome,
+      "sessions/2026/11/13/rollout-2026-11-13T01-02-03-{id}.jsonl.zst",
+      thread(32),
+      1,
+      meta(thread(32), thread(31)),
+    );
+    const plain = await rollout(
+      codexHome,
+      "sessions/2026/07/02/rollout-2026-07-02T01-02-03-{id}.jsonl",
+      thread(33),
+      120,
+    );
+    const asked: string[][] = [];
+    const run = (zstd?: boolean) =>
+      pruneCodexHistory({
+        codexHome,
+        paseoHome,
+        days: 90,
+        now,
+        remove: async (threadIds) => {
+          asked.push([...threadIds].sort());
+          return {};
+        },
+        ...(zstd === undefined ? {} : { zstd }),
+      });
+    await assert.rejects(
+      run(false),
+      /zstd 를 풀지 못해 압축된 rollout 대화 1개/,
+    );
+    assert.deepEqual(asked, []);
+    for (const file of [parent, plain]) assert.ok(existsSync(file), file);
+    // Where it can, the compressed sub-agent keeps the thread that spawned it.
+    assert.equal((await run()).parents, 1);
+    assert.deepEqual(asked, [[thread(33)]]);
+  }));
+
 test("지울 대화가 없으면 Codex를 띄우지 않고 Paseo 기록을 읽을 수 없으면 아무것도 지우지 않는다", async () =>
   workspace(async (root) => {
     const codexHome = join(root, "codex"),
@@ -327,19 +565,21 @@ test("지울 대화가 없으면 Codex를 띄우지 않고 Paseo 기록을 읽�
       calls++;
       return {};
     };
+    const nothing = {
+      removed: 0,
+      bytes: 0,
+      skipped: 0,
+      kept: 0,
+      children: 0,
+      parents: 0,
+      unreadable: 0,
+    };
     assert.deepEqual(
       await pruneCodexHistory({ codexHome, paseoHome, days: 90, now, remove }),
-      { removed: 0, bytes: 0, skipped: 0, kept: 0, children: 0, parents: 0 },
+      nothing,
     );
     assert.equal(
-      retentionSummary(90, {
-        removed: 0,
-        bytes: 0,
-        skipped: 0,
-        kept: 0,
-        children: 0,
-        parents: 0,
-      }),
+      retentionSummary(90, nothing),
       "[aster] Codex 대화 기록 보존 90일: 0개 대화 0.0MB 삭제",
     );
     await rollout(
