@@ -444,3 +444,87 @@ Assert (Test-Download '1.2.2') 'locked file vanished'
     assert.match(stdout, /already up to date/);
   },
 );
+
+// Release v1.2.1 as published: installer + SHA256SUMS; older tags have no helper.
+const olderReleaseFixture = `
+$script:requests = @()
+function Invoke-SuiteRequest($Asset, $Tag, $OutFile) {
+  $script:requests += "$Tag/$Asset"
+  if ($Asset -eq 'suite-lock.json') { return [pscustomobject]@{ schemaVersion=1; suiteVersion=$Tag.Substring(1) } }
+  if ($Asset -eq 'Paseo-Suite-1.2.1-x64.exe') { Set-Content $OutFile 'old installer'; return }
+  if ($Asset -eq 'SHA256SUMS') { @('${createHash("sha256").update("old installer\r\n").digest("hex")}  Paseo-Suite-1.2.1-x64.exe') | Set-Content $OutFile; return }
+  throw "missing release asset: $Tag/$Asset"
+}
+function Get-ScheduledTask { }
+$script:installed = [version]'1.2.3'
+function Get-InstalledSuiteVersion { $script:installed }
+`;
+
+test(
+  "Windows 롤백은 공개 릴리즈 태그에서 설치 파일과 SHA256SUMS만 받아 이전 버전을 설치하고 현재 도우미·로컬 사본을 남기지 않는다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { stdout } = await runInstallerProbe(`${olderReleaseFixture}
+$helper = Join-Path $script:UpdaterRoot 'install.ps1'
+Set-Content $helper 'current helper'
+function Invoke-SuiteInstaller($Installer) {
+  Assert ((Get-Content $Installer -Raw).Trim() -eq 'old installer') 'wrong installer'
+  $script:installed = [version]'1.2.1'
+  'installed'
+}
+$Action = 'Rollback'
+$Version = '1.2.1'
+Invoke-SuiteSetup
+Assert ($script:installed -eq [version]'1.2.1') 'rollback not installed'
+Assert ($script:requests -contains 'v1.2.1/suite-lock.json') 'tag metadata not checked'
+Assert (-not ($script:requests | Where-Object { $_ -like '*install.ps1' })) 'older helper downloaded'
+Assert ((Get-Content $helper -Raw).Trim() -eq 'current helper') 'current helper replaced'
+Assert (-not (Test-Path (Join-Path $script:UpdaterRoot 'v1.2.1'))) 'local installer copy kept'
+$status = Get-Content (Join-Path $script:UpdaterRoot 'status.json') -Raw | ConvertFrom-Json
+Assert ($status.action -eq 'rollback' -and $status.status -eq 'installed' -and $status.version -eq '1.2.1') 'status not recorded'
+`);
+    assert.match(stdout, /Rollback Suite: 1\.2\.1; installed: 1\.2\.3/);
+  },
+);
+
+test(
+  "Windows 롤백은 실행 중이면 보류하고 자동 업데이트·새 버전·잘못된 태그·미설치 PC에서는 내려받지 않는다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { stdout } = await runInstallerProbe(`${olderReleaseFixture}
+function Get-Process { [pscustomobject]@{ Id=123 } }
+function Start-Process { throw 'must not install while Paseo is running' }
+$Action = 'Rollback'
+$Version = '1.2.1'
+Invoke-SuiteSetup
+Assert (Test-Path (Join-Path $script:UpdaterRoot 'v1.2.1/Paseo-Suite-1.2.1-x64.exe')) 'pending rollback installer removed'
+Assert ($script:installed -eq [version]'1.2.3') 'installed while running'
+function Save-SuiteRelease { throw 'must not download' }
+function Expect-Refusal($Pattern) {
+  $caught = $null
+  try { Invoke-SuiteSetup } catch { $caught = $_.Exception.Message }
+  Assert ($caught -like $Pattern) "expected refusal $Pattern, got $caught"
+}
+function Get-ScheduledTask { 'enabled' }
+Expect-Refusal '*DisableAutoUpdate first*'
+function Get-ScheduledTask { }
+$Version = 'latest'
+Expect-Refusal '*-Version <major.minor.patch>*'
+$Version = '1.2.1'
+$EnableAutoUpdate = $true
+Expect-Refusal '*cannot enable automatic updates*'
+$EnableAutoUpdate = $false
+function Invoke-SuiteRequest($Asset, $Tag, $OutFile) { [pscustomobject]@{ schemaVersion=1; suiteVersion='1.2.2' } }
+Expect-Refusal '*does not describe Suite v1.2.1*'
+$Version = '1.2.4'
+function Invoke-SuiteRequest($Asset, $Tag, $OutFile) { [pscustomobject]@{ schemaVersion=1; suiteVersion='1.2.4' } }
+Invoke-SuiteSetup
+$script:installed = $null
+$Version = '1.2.1'
+Invoke-SuiteSetup
+`);
+    assert.match(stdout, /Suite rollback pending/);
+    assert.match(stdout, /Rollback installs an older release only/);
+    assert.match(stdout, /No registered Suite installation found/);
+  },
+);
