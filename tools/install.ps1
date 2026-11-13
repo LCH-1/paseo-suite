@@ -14,6 +14,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:Repository = 'LCH-1/paseo-suite'
 $script:UpdaterRoot = Join-Path $env:LOCALAPPDATA 'PaseoSuite\updater'
+# NSIS /currentuser installs here unless an earlier per-user install chose another folder.
+$script:UserInstallRoot = Join-Path $env:LOCALAPPDATA 'Programs\Paseo'
 $script:TaskName = 'PaseoSuite-Update-' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
 function Invoke-SuiteRequest {
@@ -93,6 +95,18 @@ function Assert-SuiteUserScope {
     if ($machine.Count -gt 0) {
         throw ("$Operation supports per-user installs only. Suite $($machine[0].Version) is installed for all users at $($machine[0].Location); " +
             "nothing was downloaded or changed. $Advice")
+    }
+    # Without a registration that still names them, versioned installs below that folder are found
+    # only here. NSIS never puts Paseo.exe in a subfolder of its own install.
+    $nested = @(Get-ChildItem -LiteralPath $script:UserInstallRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Paseo.exe') -PathType Leaf } |
+        ForEach-Object { $_.Name })
+    if ($nested.Count -gt 0) {
+        $named = ($nested | Select-Object -First 3) -join ', '
+        if ($nested.Count -gt 3) { $named += " and $($nested.Count - 3) more" }
+        throw ("$Operation would install into $script:UserInstallRoot, which holds other Paseo installs ($named); " +
+            'a later per-user update or uninstall would delete them. Nothing was downloaded or changed. ' +
+            'Keep using the tool that installed them, or move them out of that folder first.')
     }
 }
 

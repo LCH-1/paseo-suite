@@ -129,9 +129,10 @@ async function runInstallerProbe(body: string) {
   const file = path.join(directory, "probe.ps1");
   const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
   // No uninstall entries unless a test defines them: the real registry is never read.
+  // The per-user install folder is an empty temporary path, never the real one.
   await writeFile(
     file,
-    `\uFEFF$ErrorActionPreference = 'Stop'\n. ${quote(path.join(root, "tools/install.ps1"))}\n$script:UpdaterRoot = ${quote(directory)}\nfunction Assert($condition, $message) { if (-not $condition) { throw $message } }\nfunction Get-ItemProperty { }\n${body}\n`,
+    `\uFEFF$ErrorActionPreference = 'Stop'\n. ${quote(path.join(root, "tools/install.ps1"))}\n$script:UpdaterRoot = ${quote(directory)}\n$script:UserInstallRoot = ${quote(path.join(directory, "Programs", "Paseo"))}\nfunction Assert($condition, $message) { if (-not $condition) { throw $message } }\nfunction Get-ItemProperty { }\n${body}\n`,
   );
   try {
     return await promisify(execFile)(
@@ -648,6 +649,64 @@ $Action = 'Install'
 $DownloadOnly = $true
 Invoke-SuiteSetup
 Assert ($script:requests -contains 'latest') 'per-user install refused'
+`);
+    assert.match(stdout, /Suite downloaded/);
+  },
+);
+
+test(
+  "Windows 설치·업데이트·자동 업데이트 켜기·롤백은 사용자별 설치 폴더 아래에 다른 Paseo 설치 폴더가 있으면 등록이 없어도 아무것도 받거나 바꾸기 전에 거부한다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { stdout } = await runInstallerProbe(`${olderReleaseAssets}
+function Save-SuiteRelease { throw 'must not download into a folder that holds other installs' }
+function Save-SuiteHelper { throw 'must not replace the command helper' }
+function Set-SuiteAutoUpdate { throw 'must not change the scheduled task' }
+function Start-Process { throw 'must not run the installer' }
+function Expect-Refusal($Pattern) {
+  $caught = $null
+  try { Invoke-SuiteSetup } catch { $caught = $_.Exception.Message }
+  Assert ($caught -like $Pattern) "expected refusal $Pattern, got $caught"
+}
+# The company PC after a swap left its all-users registration pointing nowhere: versioned
+# installs below the per-user folder, which NSIS /currentuser would install into and a
+# later per-user update or uninstall would empty.
+$nested = Join-Path $script:UserInstallRoot '1.0.7-suite-26403642aa04-core-733643f1'
+New-Item -ItemType Directory -Path $nested -Force | Out-Null
+Set-Content (Join-Path $nested 'Paseo.exe') 'app'
+$Version = '1.2.1'
+foreach ($name in 'Install', 'Update', 'EnableAutoUpdate', 'Rollback') {
+  $Action = $name
+  Expect-Refusal "$name would install into *Paseo, which holds other Paseo installs (1.0.7-suite-26403642aa04-core-733643f1)*nothing was downloaded or changed*"
+}
+# A per-user install already at the top is emptied by its next update as well.
+Set-Content (Join-Path $script:UserInstallRoot 'Paseo.exe') 'app'
+$Action = 'Update'
+Expect-Refusal '*holds other Paseo installs*'
+# Rollback names the folder before asking to turn automatic updates off.
+function Get-ScheduledTask { 'enabled' }
+$Action = 'Rollback'
+Expect-Refusal 'Rollback would install into*'
+function Get-ScheduledTask { }
+Assert ($script:requests.Count -eq 0) 'release metadata requested before refusing'
+Assert (-not (Test-Path (Join-Path $script:UpdaterRoot 'install.ps1'))) 'command helper written'
+Assert (-not (Test-Path (Join-Path $script:UpdaterRoot 'status.json'))) 'status written'
+
+# An ordinary per-user install: Paseo.exe at the top, its own folders hold no Paseo.exe.
+Remove-Item -LiteralPath $nested -Recurse -Force
+New-Item -ItemType Directory -Path (Join-Path $script:UserInstallRoot 'resources') -Force | Out-Null
+function Get-SuiteRelease { $script:requests += 'latest'; [pscustomobject]@{ Version=[version]'1.2.3'; Tag='v1.2.3'; Installer='Paseo-Suite-1.2.3-x64.exe' } }
+function Get-InstalledSuiteVersion { [version]'1.2.2' }
+function Save-SuiteRelease($Release) {
+  $folder = Join-Path $script:UpdaterRoot $Release.Tag
+  New-Item -ItemType Directory -Path $folder -Force | Out-Null
+  foreach ($name in @($Release.Installer, 'install.ps1')) { Set-Content (Join-Path $folder $name) 'owned' }
+  Join-Path $folder $Release.Installer
+}
+$Action = 'Update'
+$DownloadOnly = $true
+Invoke-SuiteSetup
+Assert ($script:requests -contains 'latest') 'ordinary per-user update refused'
 `);
     assert.match(stdout, /Suite downloaded/);
   },

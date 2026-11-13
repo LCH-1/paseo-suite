@@ -34,7 +34,7 @@ Invoke-WebRequest -UseBasicParsing 'https://github.com/LCH-1/paseo-suite/release
 powershell -NoProfile -ExecutionPolicy Bypass -File $paseoSetup -Action Install
 ```
 
-그다음 수동 업데이트는 다음 명령으로 실행합니다. 설치된 버전보다 오래된 릴리스로 내려가지 않으며, 앱·백그라운드 로컬 호스트가 실행 중이면 다운로드만 하고 설치를 보류합니다. 설치는 계정·대화·프로젝트 파일을 삭제하지 않습니다. 이 도우미는 사용자별 설치만 다룹니다. 모든 사용자용(HKLM)으로 설치한 PC(예: 회사 PC)에서는 사용자별 사본이 옆에 생기고 이후 업데이트·제거 때 같은 폴더의 다른 설치까지 지워질 수 있어 Install·Update·EnableAutoUpdate·Rollback 모두 아무것도 받기 전에 거부합니다. 그런 PC는 Release의 설치 파일을 직접 실행하거나 그 PC에서 쓰던 교체 절차로 바꿉니다.
+그다음 수동 업데이트는 다음 명령으로 실행합니다. 설치된 버전보다 오래된 릴리스로 내려가지 않으며, 앱·백그라운드 로컬 호스트가 실행 중이면 다운로드만 하고 설치를 보류합니다. 설치는 계정·대화·프로젝트 파일을 삭제하지 않습니다. 이 도우미는 사용자별 설치만 다룹니다. 모든 사용자용(HKLM)으로 설치한 PC(예: 회사 PC)에서는 사용자별 사본이 옆에 생기고 이후 업데이트·제거 때 같은 폴더의 다른 설치까지 지워질 수 있어 Install·Update·EnableAutoUpdate·Rollback 모두 아무것도 받기 전에 거부합니다. 그런 PC는 Release의 설치 파일을 직접 실행하거나 그 PC에서 쓰던 교체 절차로 바꿉니다. 등록이 없어도 `%LOCALAPPDATA%\Programs\Paseo`의 하위 폴더에 `Paseo.exe`가 있으면(버전별 설치 폴더 모음) 같은 이유로 거부하니, 그 폴더들을 만든 교체 절차를 계속 쓰거나 폴더들을 다른 곳으로 옮긴 뒤 실행합니다.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action Update
