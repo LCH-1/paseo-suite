@@ -25,6 +25,9 @@ interface System {
   items: SystemItem[];
   errors: string[];
   processIds: number[];
+  environmentRead?: number;
+  unreadable?: Array<{ pid: number; name: string; missing: string }>;
+  shortcutsUnreadable?: string[];
 }
 
 // Every root points into a temporary tree; the real collector is replaced by a fixture.
@@ -61,7 +64,14 @@ function sandbox() {
     "--min-age-hours",
     "0",
   ];
-  let system: System = { items: [], errors: [], processIds: [1234] };
+  // A complete collection: one process listed and its environment read.
+  const complete = {
+    items: [],
+    errors: [],
+    processIds: [1234],
+    environmentRead: 1,
+  };
+  let system: System = { ...complete };
   const runWith = (extra: Record<string, unknown>, ...argv: string[]) => {
     const lines: string[] = [];
     const errors: string[] = [];
@@ -105,7 +115,7 @@ function sandbox() {
     runWith,
     plan,
     setSystem(next: Partial<System>) {
-      system = { items: [], errors: [], processIds: [1234], ...next };
+      system = { ...complete, ...next };
     },
     dispose() {
       fs.rmSync(box, { recursive: true, force: true });
@@ -543,6 +553,68 @@ test("참조 수집이 실패하거나 살아 있는 데몬이 목록에 없으�
   }
 });
 
+test("읽지 못한 Paseo 계열 프로세스·대상을 읽지 못한 바로가기·환경 변수를 하나도 못 읽은 수집은 불완전으로 보고 이유를 출력하며 격리를 거부한다", () => {
+  const t = sandbox();
+  try {
+    seed(t);
+    // An elevated or other-session daemon: no exe path, no environment.
+    t.setSystem({
+      unreadable: [
+        { pid: 4321, name: "Paseo.exe", missing: "path+environment" },
+      ],
+    });
+    const elevated = t.plan("installs,releases");
+    assert.equal(elevated.saved.collection.ok, false);
+    assert.match(
+      elevated.saved.collection.errors.join(" "),
+      /Paseo\.exe#4321\(경로·환경\)/,
+    );
+    assert.equal(elevated.action("installs", "old-a"), "KEEP");
+    assert.equal(elevated.action("releases", hex("3")), "KEEP");
+    let refused = t.run(
+      "quarantine",
+      "--plan",
+      elevated.file,
+      "--kind",
+      "installs",
+      "--execute",
+    );
+    assert.equal(refused.code, 1);
+    assert.match(refused.errors, /Paseo\.exe#4321/);
+    assert.ok(fs.existsSync(path.join(t.installs, "old-a")));
+    const printed = t.run("plan", "--kind", "installs");
+    assert.match(printed.output, /모든 항목을 KEEP.*Paseo\.exe#4321/);
+
+    // A complete plan is refused when the fresh collection is not.
+    t.setSystem({});
+    const good = t.plan("installs");
+    assert.equal(good.action("installs", "old-a"), "PRUNE");
+    for (const [next, reason] of [
+      [{ environmentRead: 0 }, /환경 변수를 하나도 읽지 못했다/],
+      [{ shortcutsUnreadable: ["old-paseo.lnk"] }, /old-paseo\.lnk/],
+      [
+        { unreadable: [{ pid: 77, name: "node.exe", missing: "environment" }] },
+        /node\.exe#77\(환경\)/,
+      ],
+    ] as const) {
+      t.setSystem(next);
+      refused = t.run(
+        "quarantine",
+        "--plan",
+        good.file,
+        "--kind",
+        "installs",
+        "--execute",
+      );
+      assert.equal(refused.code, 1, String(reason));
+      assert.match(refused.errors, reason);
+      assert.ok(fs.existsSync(path.join(t.installs, "old-a")));
+    }
+  } finally {
+    t.dispose();
+  }
+});
+
 test("데몬이 바뀐 plan, 다른 호스트·home 의 plan, 60분 지난 plan, 제자리 설치는 거부한다", () => {
   const t = sandbox();
   try {
@@ -748,6 +820,250 @@ function Get-ResidueTasks { @() }
       // A bare sibling folder (no file after it) is still a reference.
       assert.equal(action("../Paseo-TitleSync"), "KEEP");
       assert.equal(action("../Paseo-Orphan"), "PRUNE");
+    } finally {
+      child.kill();
+      await new Promise((resolve) => child.once("exit", resolve));
+      t.dispose();
+    }
+  },
+);
+
+// Collector stages that read nothing from this machine.
+const quietStages = String.raw`
+function Get-ResidueShortcutFiles { @() }
+function Get-ResidueRegistryValues([string]$Key) { @() }
+function Get-ResidueRegistryChildren([string]$Root) { @() }
+function Get-ResidueEnvironmentVariables([string]$Scope) { @{} }
+function Get-ResidueTasks { @() }
+`;
+const psQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+test(
+  "Windows 수집기는 lsass 같은 보호 프로세스·다른 세션의 일반 프로세스를 열지 않고, 읽지 못한 Paseo 계열 프로세스를 보고한다",
+  { skip: process.platform !== "win32" },
+  () => {
+    const t = sandbox();
+    try {
+      // Win32_Process as an unelevated shell in session 1 sees it.
+      const overrides = String.raw`${quietStages}
+function Get-ResidueSessionId { 1 }
+function Get-ResidueProcesses { @(
+  [pscustomobject]@{ ProcessId = 11; Name = 'lsass.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null },
+  # In the user's own session; over SSH the collector runs in session 0 with lsass.
+  [pscustomobject]@{ ProcessId = 18; Name = 'winlogon.exe'; SessionId = 1; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 12; Name = 'svchost.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 13; Name = 'RustDesk.exe'; SessionId = 1; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 14; Name = 'Paseo.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 15; Name = 'node.exe'; SessionId = 1; ExecutablePath = 'C:\x\Programs\Paseo\elevated\node.exe'; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 16; Name = 'codex.exe'; SessionId = 2; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 17; Name = 'node.exe'; SessionId = 1; ExecutablePath = 'C:\x\node.exe'; CommandLine = 'node' }
+) }
+# A process that is opened answers with a folder named after it, so opening a protected one shows.
+function Read-ResidueProcess([int]$Id) {
+  if ($Id -in 11, 12, 17, 18) { @("C:\x\Programs\Paseo\opened-$Id", "PATH=C:\x\Programs\Paseo\env-$Id") }
+}
+# 16 exited after the listing.
+function Test-ResidueProcessAlive([int]$Id) { $Id -ne 16 }
+`;
+      const collected = residue.collectWindows({ overrides });
+      assert.deepEqual(collected.errors, []);
+      const tokens = JSON.stringify(collected.items).toLowerCase();
+      for (const id of [11, 12, 18])
+        assert.ok(!tokens.includes(`opened-${id}`), `process ${id} was opened`);
+      assert.ok(tokens.includes("opened-17") && tokens.includes("env-17"));
+      assert.equal(collected.environmentRead, 1);
+      assert.equal(collected.environmentSkipped, 3);
+      assert.deepEqual(
+        collected.unreadable.map(
+          (entry: { pid: number; name: string; missing: string }) =>
+            `${entry.name}#${entry.pid}:${entry.missing}`,
+        ),
+        ["Paseo.exe#14:path+environment", "node.exe#15:environment"],
+      );
+
+      const lines: string[] = [];
+      residue.run(
+        [
+          "plan",
+          "--kind",
+          "installs",
+          "--json",
+          "--home",
+          t.home,
+          "--root-installs",
+          t.installs,
+          "--pins",
+          t.pins,
+        ],
+        {
+          log: (line: string) => lines.push(line),
+          collectSystem: () => collected,
+        },
+      );
+      const plan = JSON.parse(lines[0]);
+      assert.equal(plan.collection.ok, false);
+      assert.match(
+        plan.collection.errors.join(" "),
+        /Paseo\.exe#14\(경로·환경\), node\.exe#15\(환경\)/,
+      );
+    } finally {
+      t.dispose();
+    }
+  },
+);
+
+test(
+  "Windows 바로가기는 ANSI 코드 페이지 밖 이름도 유니코드로 읽고, 대상을 읽지 못한 바로가기가 있으면 수집을 불완전으로 본다",
+  { skip: process.platform !== "win32" },
+  () => {
+    const t = sandbox();
+    try {
+      const target = path.join(t.installs, "unicode-target", "Paseo.exe");
+      t.write(target);
+      t.write(path.join(t.installs, "orphan", "Paseo.exe"));
+      // WScript saves only names inside the ANSI code page (CI runners use 1252), so it
+      // saves an ASCII name and fs gives the copy a name outside every ANSI code page.
+      const ascii = path.join(t.box, "ascii.lnk");
+      const saved = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `$s = (New-Object -ComObject WScript.Shell).CreateShortcut(${psQuote(ascii)}); $s.TargetPath = ${psQuote(target)}; $s.Save()`,
+        ],
+        { encoding: "utf8", windowsHide: true },
+      );
+      assert.equal(saved.status, 0, saved.stderr);
+      const unicode = path.join(t.box, "ไทย-😀.lnk");
+      fs.copyFileSync(ascii, unicode);
+      // Not a shortcut at all: it must not pass as one that names no folder.
+      const broken = path.join(t.box, "broken.lnk");
+      fs.writeFileSync(broken, Buffer.alloc(200, 1));
+      const overrides = `
+function Get-ResidueSessionId { 1 }
+function Get-ResidueProcesses { @([pscustomobject]@{ ProcessId = 21; Name = 'node.exe'; SessionId = 1; ExecutablePath = 'C:\\x\\node.exe'; CommandLine = 'node' }) }
+function Read-ResidueProcess([int]$Id) { @('C:\\x', 'A=B') }
+function Get-ResidueShortcutFiles { @(${psQuote(unicode)}, ${psQuote(broken)}) }
+function Get-ResidueRegistryValues([string]$Key) { @() }
+function Get-ResidueRegistryChildren([string]$Root) { @() }
+function Get-ResidueEnvironmentVariables([string]$Scope) { @{} }
+function Get-ResidueTasks { @() }
+`;
+      const collected = residue.collectWindows({ overrides });
+      assert.deepEqual(collected.errors, []);
+      assert.ok(
+        collected.items.some(
+          (item: { src: string; tokens: string[] }) =>
+            item.src === "shortcut:ไทย-😀.lnk" &&
+            item.tokens.some((token) =>
+              token.toLowerCase().includes("unicode-target"),
+            ),
+        ),
+        `unicode shortcut read as empty: ${JSON.stringify(collected.items)}`,
+      );
+      assert.deepEqual(collected.shortcutsUnreadable, ["broken.lnk"]);
+
+      const lines: string[] = [];
+      residue.run(
+        [
+          "plan",
+          "--kind",
+          "installs",
+          "--json",
+          "--home",
+          t.home,
+          "--root-installs",
+          t.installs,
+          "--pins",
+          t.pins,
+          "--min-age-hours",
+          "0",
+        ],
+        {
+          log: (line: string) => lines.push(line),
+          collectSystem: () => collected,
+        },
+      );
+      const plan = JSON.parse(lines[0]);
+      assert.equal(plan.collection.ok, false);
+      assert.match(plan.collection.errors.join(" "), /broken\.lnk/);
+      for (const name of ["unicode-target", "orphan"])
+        assert.equal(
+          plan.kinds.installs.items.find(
+            (entry: { name: string }) => entry.name === name,
+          )?.action,
+          "KEEP",
+          name,
+        );
+    } finally {
+      t.dispose();
+    }
+  },
+);
+
+test(
+  "Windows 수집기는 실행 중인 exe 만 있는 설치 폴더도 지킨다(이 폴더의 이름 바꾸기는 OS 가 막지 않는다)",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const t = sandbox();
+    const folder = path.join(t.installs, "exe-only");
+    fs.mkdirSync(folder, { recursive: true });
+    const exe = path.join(folder, "ping.exe");
+    fs.copyFileSync(
+      path.join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "PING.EXE",
+      ),
+      exe,
+    );
+    t.write(path.join(t.installs, "orphan", "Paseo.exe"));
+    // Working directory elsewhere; only the running exe lives in the folder.
+    const child = spawn(exe, ["-n", "30", "127.0.0.1"], {
+      cwd: t.box,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { SystemRoot: process.env.SystemRoot },
+    });
+    await new Promise((resolve) => child.once("spawn", resolve));
+    try {
+      const collected = residue.collectWindows({
+        overrides: `${quietStages}
+function Get-ResidueProcesses { @(Get-CimInstance Win32_Process -Filter "ProcessId=${child.pid}") }
+`,
+      });
+      assert.deepEqual(collected.errors, []);
+      assert.deepEqual(collected.unreadable, []);
+      const lines: string[] = [];
+      residue.run(
+        [
+          "plan",
+          "--kind",
+          "installs",
+          "--json",
+          "--home",
+          t.home,
+          "--root-installs",
+          t.installs,
+          "--pins",
+          t.pins,
+          "--min-age-hours",
+          "0",
+        ],
+        {
+          log: (line: string) => lines.push(line),
+          collectSystem: () => collected,
+        },
+      );
+      const plan = JSON.parse(lines[0]);
+      assert.equal(plan.collection.ok, true, plan.collection.errors.join(" "));
+      const action = (name: string) =>
+        plan.kinds.installs.items.find(
+          (entry: { name: string }) => entry.name === name,
+        )?.action;
+      assert.equal(action("exe-only"), "KEEP");
+      assert.equal(action("orphan"), "PRUNE");
     } finally {
       child.kill();
       await new Promise((resolve) => child.once("exit", resolve));

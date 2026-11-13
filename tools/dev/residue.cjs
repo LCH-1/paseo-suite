@@ -5,6 +5,8 @@
  *
  * 기본 동작은 "목록만 출력"이다. --execute 를 주지 않으면 아무것도 옮기거나 지우지 않는다.
  * 프로세스를 종료하지 않고 데몬·앱을 재시작하지 않는다. 이름 바꾸기가 거부되면(사용 중) 건너뛴다.
+ * 다만 Windows 가 거부하는 것은 작업 폴더·열린 파일이 있는 폴더뿐이다(실행 중 exe·읽어 둔 모듈은
+ * 막지 않고, Linux 는 전혀 막지 않는다). 실제 보호는 아래 참조 수집이다.
  * 지우기는 2단계다: quarantine 이 같은 볼륨의 격리 폴더로 이름만 바꾸고, 유예(기본 7일)가
  * 지난 격리분만 purge 가 영구 삭제한다. 격리분은 restore 로 제자리에 되돌린다.
  * manifest 는 이름 바꾸기 전후로 쓰므로 도중에 끊겨도 원래 자리가 남고, purge 는 manifest 가
@@ -24,8 +26,10 @@
  * --root-server --trash --pins.
  *
  * 참조 수집은 경로에서 이름 "토큰"(설치 폴더 이름, 64자리 해시, 임시 폴더 이름)만 뽑는다.
- * 명령줄·설정·환경 변수 원문은 출력하지도 저장하지도 않는다. 참조 수집이 하나라도 실패하면
- * plan 은 전부 KEEP 으로 표시하고 quarantine 은 거부한다.
+ * 명령줄·설정·환경 변수 원문은 출력하지도 저장하지도 않는다. 참조 수집이 하나라도 실패하거나
+ * 불완전하면(경로·환경을 읽지 못한 Paseo 계열 프로세스, 환경 변수를 하나도 못 읽음, 대상을 읽지
+ * 못한 바로가기) plan 은 전부 KEEP 으로 표시하고 그 이유를 출력하며 quarantine 은 거부한다.
+ * lsass 같은 보호 프로세스와 다른 세션의 Paseo 계열이 아닌 프로세스는 메모리를 열지 않는다.
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -307,27 +311,51 @@ public static class ResiduePeb {
 }
 function Get-ResidueProcesses { @(Get-CimInstance Win32_Process) }
 function Read-ResidueProcess([int]$Id) { [ResiduePeb]::Get($Id) }
+function Get-ResidueSessionId { [Diagnostics.Process]::GetCurrentProcess().SessionId }
+function Test-ResidueProcessAlive([int]$Id) { [bool](Get-Process -Id $Id -ErrorAction SilentlyContinue) }
+# Paseo-family processes: the exe path and environment of each one must be read, wherever it runs.
+$script:ResidueFamily = '^(?:paseo[^\\/]*|node|bun|codex[^\\/]*|esbuild|claude)\.exe$'
+# Never opened for a memory read: kernel, session managers, credential and security services.
+$script:ResidueProtected = '^(?:system|system idle process|idle|registry|secure system|memory compression|smss|csrss|wininit|winlogon|services|lsass|lsaiso|fontdrvhost|dwm|logonui|msmpeng|nissrv|mssense|securityhealthservice|sgrmbroker)(?:\.exe)?$'
 function Invoke-ResidueProcessStage {
   Initialize-ResiduePeb
   $processes = @(Get-ResidueProcesses)
   if ($processes.Count -eq 0) { throw 'no process was listed' }
+  $session = Get-ResidueSessionId
   foreach ($process in $processes) {
     $id = [int]$process.ProcessId
+    $name = [string]$process.Name
     [void]$script:ResidueFacts.processIds.Add($id)
-    if ($process.Name -match '^(Paseo|node|bun)\.exe$' -and $process.CreationDate) {
+    if ($name -match '^(Paseo|node|bun)\.exe$' -and $process.CreationDate) {
       if (-not $script:ResidueFacts.earliest -or $process.CreationDate -lt $script:ResidueFacts.earliest) { $script:ResidueFacts.earliest = $process.CreationDate }
     }
-    $source = 'process:' + $process.Name + '#' + $id
+    $source = 'process:' + $name + '#' + $id
     Add-ResidueItem $source ([string]$process.ExecutablePath + '|' + [string]$process.CommandLine)
-    $memory = $null
-    try { $memory = Read-ResidueProcess $id } catch { $memory = $null }
-    if (-not $memory) { $script:ResidueFacts.environmentUnreadable++; continue }
-    $script:ResidueFacts.environmentRead++
-    Add-ResidueItem ($source + ':cwd') $memory[0]
-    # Long-lived tools can carry an old CLI or install path in variables such as PASEO_CLI or PATH.
-    foreach ($pair in ($memory[1] -split [char]0)) {
-      $at = $pair.IndexOf('=')
-      if ($at -gt 0) { Add-ResidueItem ($source + ':env:' + $pair.Substring(0, $at)) $pair.Substring($at + 1) }
+    $family = $name -match $script:ResidueFamily
+    $missing = @()
+    # An unprivileged shell gets no path for elevated, other-session or other-user processes.
+    if ($family -and -not $process.ExecutablePath) { $missing += 'path' }
+    if ($name -match $script:ResidueProtected -or (-not $family -and $process.SessionId -ne $session)) {
+      $script:ResidueFacts.environmentSkipped++
+    } else {
+      $memory = $null
+      try { $memory = Read-ResidueProcess $id } catch { $memory = $null }
+      if ($memory) {
+        $script:ResidueFacts.environmentRead++
+        Add-ResidueItem ($source + ':cwd') $memory[0]
+        # Long-lived tools can carry an old CLI or install path in variables such as PASEO_CLI or PATH.
+        foreach ($pair in ($memory[1] -split [char]0)) {
+          $at = $pair.IndexOf('=')
+          if ($at -gt 0) { Add-ResidueItem ($source + ':env:' + $pair.Substring(0, $at)) $pair.Substring($at + 1) }
+        }
+      } else {
+        $script:ResidueFacts.environmentUnreadable++
+        if ($family) { $missing += 'environment' }
+      }
+    }
+    # A process that already exited holds no folder. A live one that was not read may.
+    if ($missing.Count -and (Test-ResidueProcessAlive $id)) {
+      [void]$script:ResidueFacts.unreadable.Add([pscustomobject]@{ pid = $id; name = $name; session = $process.SessionId; missing = ($missing -join '+') })
     }
   }
 }
@@ -374,12 +402,82 @@ function Get-ResidueShortcutFiles {
   }
   @($files | Select-Object -Unique)
 }
+function Initialize-ResidueLink {
+  if ('ResidueLink' -as [type]) { return }
+  # IShellLinkW reads names and paths as Unicode. WScript.Shell goes through the ANSI code page and,
+  # for a name outside it, returns an empty new shortcut without an error.
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+public static class ResidueLink {
+  [ComImport, Guid("00021401-0000-0000-C000-000000000046")] class ShellLink {}
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+  interface IShellLinkW {
+    void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int size, IntPtr data, uint flags);
+    void GetIDList(out IntPtr list);
+    void SetIDList(IntPtr list);
+    void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int size);
+    void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+    void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder dir, int size);
+    void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+    void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int size);
+    void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+    void GetHotkey(out short key);
+    void SetHotkey(short key);
+    void GetShowCmd(out int show);
+    void SetShowCmd(int show);
+    void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int size, out int index);
+    void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string path, int index);
+    void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, uint reserved);
+    void Resolve(IntPtr window, uint flags);
+    void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+  }
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("45e2b4ae-b1c3-11d0-b92f-00a0c90312e1")]
+  interface IShellLinkDataList {
+    void AddDataBlock(IntPtr block);
+    void CopyDataBlock(uint signature, out IntPtr block);
+    void RemoveDataBlock(uint signature);
+    void GetFlags(out uint flags);
+    void SetFlags(uint flags);
+  }
+  // Read-only (STGM_READ). Returns raw path, path, arguments, working directory, icon, icon index, link flags.
+  public static string[] Read(string file) {
+    object link = new ShellLink();
+    try {
+      ((IPersistFile)link).Load(file, 0);
+      var shell = (IShellLinkW)link;
+      var raw = new StringBuilder(32768); var target = new StringBuilder(32768); var args = new StringBuilder(32768);
+      var dir = new StringBuilder(32768); var icon = new StringBuilder(32768); int index; uint flags;
+      shell.GetPath(raw, raw.Capacity, IntPtr.Zero, 4);
+      shell.GetPath(target, target.Capacity, IntPtr.Zero, 0);
+      shell.GetArguments(args, args.Capacity);
+      shell.GetWorkingDirectory(dir, dir.Capacity);
+      shell.GetIconLocation(icon, icon.Capacity, out index);
+      ((IShellLinkDataList)link).GetFlags(out flags);
+      return new string[] { raw.ToString(), target.ToString(), args.ToString(), dir.ToString(), icon.ToString(), index.ToString(), flags.ToString() };
+    } finally { Marshal.ReleaseComObject(link); }
+  }
+}
+'@
+}
+function Read-ResidueShortcut([string]$File) { [ResidueLink]::Read($File) }
 function Invoke-ResidueShortcutStage {
-  $shell = New-Object -ComObject WScript.Shell
+  Initialize-ResidueLink
   foreach ($file in @(Get-ResidueShortcutFiles)) {
-    $link = $shell.CreateShortcut($file)
+    $name = [IO.Path]::GetFileName($file)
+    $link = $null
+    try { $link = @(Read-ResidueShortcut $file) } catch { $link = $null }
+    # Without a path a shortcut is fine only as a shell item (Run, Control Panel) or an installer
+    # (MSI advertised) shortcut. Anything else, or a file that does not load, may name a folder.
+    if (-not $link -or $link.Count -lt 7 -or (-not $link[0] -and -not $link[1] -and -not ([uint32]$link[6] -band 0x1001))) {
+      [void]$script:ResidueFacts.shortcutsUnreadable.Add($name)
+      continue
+    }
     # The icon can name a different folder than the target (seen on the Start menu shortcut).
-    Add-ResidueItem ('shortcut:' + [IO.Path]::GetFileName($file)) ([string]$link.TargetPath + '|' + [string]$link.Arguments + '|' + [string]$link.WorkingDirectory + '|' + [string]$link.IconLocation)
+    $text = @($link[0], $link[1], $link[2], $link[3], ($link[4] + ',' + $link[5])) -join '|'
+    Add-ResidueItem ('shortcut:' + $name) ($text + '|' + [Environment]::ExpandEnvironmentVariables($text))
   }
 }
 function Get-ResidueEnvironmentVariables([string]$Scope) { [Environment]::GetEnvironmentVariables($Scope) }
@@ -398,7 +496,10 @@ function Invoke-ResidueTaskStage {
 function Invoke-ResidueCollector {
   $script:ResidueItems = New-Object System.Collections.ArrayList
   $errors = New-Object System.Collections.ArrayList
-  $script:ResidueFacts = @{ processIds = (New-Object System.Collections.ArrayList); earliest = $null; environmentRead = 0; environmentUnreadable = 0 }
+  $script:ResidueFacts = @{
+    processIds = (New-Object System.Collections.ArrayList); earliest = $null; environmentRead = 0; environmentUnreadable = 0; environmentSkipped = 0
+    unreadable = (New-Object System.Collections.ArrayList); shortcutsUnreadable = (New-Object System.Collections.ArrayList)
+  }
   foreach ($stage in 'Process', 'Registry', 'Shortcut', 'Environment', 'Task') {
     try { & ('Invoke-Residue' + $stage + 'Stage') } catch { [void]$errors.Add($stage + ': ' + $_.Exception.Message) }
   }
@@ -407,6 +508,8 @@ function Invoke-ResidueCollector {
   [pscustomobject]@{
     items = @($script:ResidueItems); errors = @($errors); processIds = @($script:ResidueFacts.processIds); earliest = $earliest
     environmentRead = $script:ResidueFacts.environmentRead; environmentUnreadable = $script:ResidueFacts.environmentUnreadable
+    environmentSkipped = $script:ResidueFacts.environmentSkipped; unreadable = @($script:ResidueFacts.unreadable)
+    shortcutsUnreadable = @($script:ResidueFacts.shortcutsUnreadable)
   } | ConvertTo-Json -Depth 6 -Compress
 }
 `;
@@ -456,6 +559,14 @@ function collectWindows({ overrides = "", timeoutMs = 180000 } = {}) {
     earliestMs: parsed.earliest ? Date.parse(parsed.earliest) : null,
     environmentRead: parsed.environmentRead ?? 0,
     environmentUnreadable: parsed.environmentUnreadable ?? 0,
+    environmentSkipped: parsed.environmentSkipped ?? 0,
+    unreadable: list(parsed.unreadable).map((entry) => ({
+      pid: Number(entry.pid),
+      name: String(entry.name),
+      session: entry.session ?? null,
+      missing: String(entry.missing),
+    })),
+    shortcutsUnreadable: list(parsed.shortcutsUnreadable).map(String),
   };
 }
 
@@ -527,6 +638,9 @@ function applySystem(refs, system, o, config) {
     processCount: system.processIds?.length ?? 0,
     environmentRead: system.environmentRead ?? 0,
     environmentUnreadable: system.environmentUnreadable ?? 0,
+    environmentSkipped: system.environmentSkipped ?? 0,
+    unreadable: system.unreadable ?? [],
+    shortcutsUnreadable: system.shortcutsUnreadable ?? [],
     serverRoot: system.serverRoot ?? null,
     sources: 0,
   };
@@ -547,6 +661,32 @@ function applySystem(refs, system, o, config) {
   )
     info.errors.push(`데몬 pid ${pid} 가 프로세스 목록에 없다(수집 불완전)`);
   if (!info.processCount) info.errors.push("프로세스 목록이 비었다");
+  else if (!info.environmentRead)
+    info.errors.push("프로세스 환경 변수를 하나도 읽지 못했다(수집 불완전)");
+  // 이름 바꾸기 거부는 작업 폴더·열린 파일에만 걸린다. 실행 중 exe 나 읽어 둔 모듈만 있는 폴더는
+  // OS 가 막지 않으므로, 읽지 못한 Paseo 계열 프로세스가 있으면 판정하지 않는다.
+  const missing = { path: "경로", environment: "환경" };
+  const listed = (entries, describe) =>
+    entries.slice(0, 8).map(describe).join(", ") +
+    (entries.length > 8 ? ` 외 ${entries.length - 8}개` : "");
+  if (info.unreadable.length)
+    info.errors.push(
+      `Paseo 계열 프로세스 ${info.unreadable.length}개를 읽지 못했다(권한 상승·다른 세션·다른 사용자): ${listed(
+        info.unreadable,
+        (entry) =>
+          `${entry.name}#${entry.pid}(${String(entry.missing)
+            .split("+")
+            .map((part) => missing[part] ?? part)
+            .join("·")})`,
+      )}. 관리자 PowerShell 에서 plan 을 다시 만들거나 그 프로세스가 끝난 뒤 다시 실행한다`,
+    );
+  if (info.shortcutsUnreadable.length)
+    info.errors.push(
+      `바로가기 ${info.shortcutsUnreadable.length}개의 대상을 읽지 못했다: ${listed(
+        info.shortcutsUnreadable,
+        (name) => name,
+      )}`,
+    );
   info.ok = info.errors.length === 0;
   return info;
 }
@@ -973,6 +1113,9 @@ function buildPlan(o, kinds, deps) {
           processes: system.processCount,
           environmentRead: system.environmentRead,
           environmentUnreadable: system.environmentUnreadable,
+          environmentSkipped: system.environmentSkipped,
+          unreadable: system.unreadable,
+          shortcutsUnreadable: system.shortcutsUnreadable,
         }
       : {
           ok: true,
@@ -1033,7 +1176,7 @@ function printPlan(plan, o, log) {
     );
   else if (plan.collection.processes)
     log(
-      `   참조 수집: 프로세스 ${plan.collection.processes}개, 환경 변수 읽음 ${plan.collection.environmentRead}·못 읽음 ${plan.collection.environmentUnreadable}`,
+      `   참조 수집: 프로세스 ${plan.collection.processes}개, 환경 변수 읽음 ${plan.collection.environmentRead}·못 읽음 ${plan.collection.environmentUnreadable}·열지 않음(보호·다른 세션) ${plan.collection.environmentSkipped ?? 0}`,
     );
   for (const [kind, section] of Object.entries(plan.kinds)) {
     const keepers = section.items.filter((entry) => entry.action === "KEEP");
@@ -1105,7 +1248,9 @@ function cmdQuarantine(o, deps) {
   if (o.now - Date.parse(saved.at) > PLAN_TTL_MS)
     throw new Error("plan 이 60분보다 오래됐다. plan 을 다시 만들어라");
   if (!saved.collection?.ok)
-    throw new Error("plan 을 만들 때 참조 수집이 실패했다");
+    throw new Error(
+      `plan 을 만들 때 참조 수집이 실패했다: ${(saved.collection?.errors ?? []).join("; ")}`,
+    );
   // 실행 직전 참조를 다시 모아 다시 판정한다.
   const fresh = buildPlan(
     o,
