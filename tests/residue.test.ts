@@ -830,6 +830,7 @@ function Get-ResidueTasks { @() }
 
 // Collector stages that read nothing from this machine.
 const quietStages = String.raw`
+function Get-ResidueServices { @() }
 function Get-ResidueShortcutFiles { @() }
 function Get-ResidueRegistryValues([string]$Key) { @() }
 function Get-ResidueRegistryChildren([string]$Root) { @() }
@@ -913,6 +914,108 @@ function Test-ResidueProcessAlive([int]$Id) { $Id -ne 16 }
 );
 
 test(
+  "Windows 수집기는 Paseo 폴더 밖에서 도는 등록 서비스(Codex 앱의 sandbox 서비스)를 읽지 못해도 불완전으로 보지 않고, Paseo 폴더의 서비스·PID 가 바뀐 서비스는 그대로 읽어야 한다",
+  { skip: process.platform !== "win32" },
+  () => {
+    const t = sandbox();
+    try {
+      t.write(path.join(t.installs, "orphan", "Paseo.exe"));
+      // An unelevated shell in session 1: LocalSystem services in session 0 give no path or
+      // environment, but Win32_Service gives their PID and image path.
+      const head = String.raw`${quietStages}
+function Get-ResidueSessionId { 1 }
+function Get-ResidueServices { @(
+  [pscustomobject]@{ Name = 'CodexSandboxService.OpenAI.Codex'; ProcessId = 31; PathName = '"C:\Program Files\WindowsApps\OpenAI.Codex_26.1106.6628.0_x64__2p2nqsd0c76g0\app\resources\codex-windows-sandbox-service.exe"' },
+  [pscustomobject]@{ Name = 'PaseoHelper'; ProcessId = 32; PathName = 'C:\x\Programs\Paseo\service-install\codex-helper.exe --run' },
+  # PID 33 changed hands between the process and service listings: node.exe is not this image.
+  [pscustomobject]@{ Name = 'Other'; ProcessId = 33; PathName = 'C:\Program Files\Other\other.exe' }
+) }
+# A process that is opened answers with a folder named after it.
+function Read-ResidueProcess([int]$Id) {
+  if ($Id -eq 31) { @("C:\x\Programs\Paseo\opened-$Id", 'A=B') }
+  elseif ($Id -eq 35) { @('C:\x', 'A=B') }
+}
+function Test-ResidueProcessAlive([int]$Id) { $true }
+`;
+      const service = String.raw`[pscustomobject]@{ ProcessId = 31; Name = 'codex-windows-sandbox-service.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null }`;
+      const own = String.raw`[pscustomobject]@{ ProcessId = 35; Name = 'node.exe'; SessionId = 1; ExecutablePath = 'C:\x\node.exe'; CommandLine = 'node' }`;
+
+      const collected = residue.collectWindows({
+        overrides: `${head}\nfunction Get-ResidueProcesses { @(${service}, ${own}) }\n`,
+      });
+      assert.deepEqual(collected.errors, []);
+      assert.deepEqual(collected.unreadable, []);
+      assert.ok(
+        !JSON.stringify(collected.items).includes("opened-31"),
+        "the service was opened",
+      );
+      assert.equal(collected.environmentSkipped, 1);
+      const lines: string[] = [];
+      residue.run(
+        [
+          "plan",
+          "--kind",
+          "installs",
+          "--json",
+          "--home",
+          t.home,
+          "--root-installs",
+          t.installs,
+          "--pins",
+          t.pins,
+          "--min-age-hours",
+          "0",
+        ],
+        {
+          log: (line: string) => lines.push(line),
+          collectSystem: () => collected,
+        },
+      );
+      const plan = JSON.parse(lines[0]);
+      assert.equal(plan.collection.ok, true, plan.collection.errors.join(" "));
+      assert.equal(
+        plan.kinds.installs.items.find(
+          (entry: { name: string }) => entry.name === "orphan",
+        )?.action,
+        "PRUNE",
+      );
+
+      const others = residue.collectWindows({
+        overrides: `${head}\nfunction Get-ResidueProcesses { @(
+  [pscustomobject]@{ ProcessId = 32; Name = 'codex-helper.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 33; Name = 'node.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null },
+  [pscustomobject]@{ ProcessId = 34; Name = 'codex.exe'; SessionId = 0; ExecutablePath = $null; CommandLine = $null },
+  ${own}
+) }\n`,
+      });
+      assert.deepEqual(others.errors, []);
+      assert.deepEqual(
+        others.unreadable.map(
+          (entry: { pid: number; name: string; missing: string }) =>
+            `${entry.name}#${entry.pid}:${entry.missing}`,
+        ),
+        [
+          "codex-helper.exe#32:path+environment",
+          "node.exe#33:path+environment",
+          "codex.exe#34:path+environment",
+        ],
+      );
+      // The image path of a service in a Paseo folder still protects that folder.
+      assert.ok(
+        others.items.some(
+          (item: { src: string; tokens: string[] }) =>
+            item.src === "service:PaseoHelper#32" &&
+            item.tokens.some((token) => token.includes("service-install")),
+        ),
+        JSON.stringify(others.items),
+      );
+    } finally {
+      t.dispose();
+    }
+  },
+);
+
+test(
   "Windows 바로가기는 ANSI 코드 페이지 밖 이름도 유니코드로 읽고, 대상을 읽지 못한 바로가기가 있으면 수집을 불완전으로 본다",
   { skip: process.platform !== "win32" },
   () => {
@@ -940,11 +1043,20 @@ test(
       // Not a shortcut at all: it must not pass as one that names no folder.
       const broken = path.join(t.box, "broken.lnk");
       fs.writeFileSync(broken, Buffer.alloc(200, 1));
+      // A valid shortcut that loads but names no path, no shell item and no installer entry.
+      const empty = path.join(t.box, "empty.lnk");
+      const header = Buffer.alloc(0x4c + 4);
+      header.writeUInt32LE(0x4c, 0);
+      Buffer.from("0114020000000000c000000000000046", "hex").copy(header, 4);
+      header.writeUInt32LE(0x80, 20); // IsUnicode only
+      header.writeUInt32LE(1, 60); // SW_SHOWNORMAL
+      fs.writeFileSync(empty, header);
       const overrides = `
 function Get-ResidueSessionId { 1 }
+function Get-ResidueServices { @() }
 function Get-ResidueProcesses { @([pscustomobject]@{ ProcessId = 21; Name = 'node.exe'; SessionId = 1; ExecutablePath = 'C:\\x\\node.exe'; CommandLine = 'node' }) }
 function Read-ResidueProcess([int]$Id) { @('C:\\x', 'A=B') }
-function Get-ResidueShortcutFiles { @(${psQuote(unicode)}, ${psQuote(broken)}) }
+function Get-ResidueShortcutFiles { @(${psQuote(unicode)}, ${psQuote(broken)}, ${psQuote(empty)}) }
 function Get-ResidueRegistryValues([string]$Key) { @() }
 function Get-ResidueRegistryChildren([string]$Root) { @() }
 function Get-ResidueEnvironmentVariables([string]$Scope) { @{} }
@@ -962,7 +1074,10 @@ function Get-ResidueTasks { @() }
         ),
         `unicode shortcut read as empty: ${JSON.stringify(collected.items)}`,
       );
-      assert.deepEqual(collected.shortcutsUnreadable, ["broken.lnk"]);
+      assert.deepEqual(collected.shortcutsUnreadable, [
+        "broken.lnk",
+        "empty.lnk",
+      ]);
 
       const lines: string[] = [];
       residue.run(
