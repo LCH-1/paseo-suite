@@ -4,7 +4,10 @@ import { join, resolve } from "node:path";
 // Paseo starts each Claude account with CLAUDE_CONFIG_DIR set to that account's profile, so the
 // CLI never reads ~/.claude/settings.json there. HND installs its hooks only into that user file;
 // a session Aster moves to another account therefore lost HND's policy context and work-session
-// identity (seen 2026-11-12). Only HND's own hook groups are mirrored into the profiles.
+// identity (seen 2026-11-12). The profiles also share ~/.claude/projects, and the CLI in a
+// profile without `cleanupPeriodDays` cleaned that shared history after its default 30 days
+// while the user's file asked for longer (seen 2026-11-13). Only HND's own hook groups and the
+// user's history retention are mirrored into the profiles.
 
 interface HookGroup {
   matcher?: string;
@@ -54,6 +57,21 @@ export function mergeHndHooks(target: Settings, source: Settings): Settings {
   return next;
 }
 
+/**
+ * The profile's settings with the user's HND hooks and, when the user set one, the user's history
+ * retention (`cleanupPeriodDays`). A profile keeps its own value while the user has none.
+ */
+export function mergeProfileSettings(
+  target: Settings,
+  source: Settings,
+): Settings {
+  const next = mergeHndHooks(target, source);
+  const days = source.cleanupPeriodDays;
+  if (typeof days === "number" && Number.isFinite(days))
+    next.cleanupPeriodDays = days;
+  return next;
+}
+
 async function readJson(file: string): Promise<Settings | null | undefined> {
   let raw: string;
   try {
@@ -73,11 +91,11 @@ async function readJson(file: string): Promise<Settings | null | undefined> {
 }
 
 /**
- * Mirrors the user's HND hooks into every account profile. A missing or unreadable user file
- * changes nothing (HND may be mid-update); an unreadable profile file is left alone.
- * Returns the profiles that were rewritten.
+ * Mirrors the user's HND hooks and history retention into every account profile. A missing or
+ * unreadable user file changes nothing (HND may be mid-update); an unreadable profile file is
+ * left alone. Returns the profiles that were rewritten.
  */
-export async function syncHndHooks(
+export async function syncProfileSettings(
   userHome: string,
   homes: string[],
 ): Promise<string[]> {
@@ -90,9 +108,8 @@ export async function syncHndHooks(
     const file = join(home, "settings.json");
     const current = await readJson(file);
     if (current === null) continue;
-    const next = mergeHndHooks(current ?? {}, source);
+    const next = mergeProfileSettings(current ?? {}, source);
     if (JSON.stringify(next) === JSON.stringify(current ?? {})) continue;
-    if (current === undefined && !next.hooks) continue;
     const temporary = `${file}.aster-${process.pid}.tmp`;
     try {
       await writeFile(temporary, JSON.stringify(next, null, 2) + "\n");

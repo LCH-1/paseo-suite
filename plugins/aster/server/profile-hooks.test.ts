@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { isHndGroup, mergeHndHooks, syncHndHooks } from "./profile-hooks";
+import {
+  isHndGroup,
+  mergeHndHooks,
+  mergeProfileSettings,
+  syncProfileSettings,
+} from "./profile-hooks";
 
 const hnd = (args: string) => ({
   hooks: [
@@ -91,7 +96,7 @@ test("sync writes missing profiles, skips the user directory and unreadable file
       join(root, "missing"),
       join(userHome, ".claude"),
     ];
-    assert.deepEqual(await syncHndHooks(userHome, homes), [fresh, kept]);
+    assert.deepEqual(await syncProfileSettings(userHome, homes), [fresh, kept]);
     const written = JSON.parse(
       await readFile(join(kept, "settings.json"), "utf8"),
     );
@@ -101,13 +106,66 @@ test("sync writes missing profiles, skips the user directory and unreadable file
       await readFile(join(broken, "settings.json"), "utf8"),
       "{ not json",
     );
-    assert.deepEqual(await syncHndHooks(userHome, homes), []);
+    assert.deepEqual(await syncProfileSettings(userHome, homes), []);
     await writeFile(join(userHome, ".claude", "settings.json"), "{ editing");
     await writeFile(
       join(kept, "settings.json"),
       JSON.stringify({ model: "sonnet" }),
     );
-    assert.deepEqual(await syncHndHooks(userHome, homes), []);
+    assert.deepEqual(await syncProfileSettings(userHome, homes), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("사용자 설정의 대화 기록 보존 기간을 프로필에 맞추고 사용자 값이 없으면 프로필 값을 그대로 둔다", () => {
+  assert.deepEqual(
+    mergeProfileSettings(
+      { model: "opus", cleanupPeriodDays: 30 },
+      { cleanupPeriodDays: 90 },
+    ),
+    { model: "opus", cleanupPeriodDays: 90 },
+  );
+  assert.deepEqual(
+    mergeProfileSettings({ cleanupPeriodDays: 365 }, { model: "sonnet" }),
+    { cleanupPeriodDays: 365 },
+  );
+  assert.deepEqual(
+    mergeProfileSettings({}, { cleanupPeriodDays: "90" as unknown as number }),
+    {},
+  );
+});
+
+test("동기화는 보존 기간만 있는 사용자 설정도 settings.json 이 없는 프로필에 쓰고 다시 쓰지 않는다", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aster-retention-"));
+  try {
+    const userHome = join(root, "user");
+    await mkdir(join(userHome, ".claude"), { recursive: true });
+    await writeFile(
+      join(userHome, ".claude", "settings.json"),
+      JSON.stringify({ cleanupPeriodDays: 90, statusLine: { type: "x" } }),
+    );
+    const fresh = join(root, "fresh"),
+      hooked = join(root, "hooked");
+    await mkdir(fresh);
+    await mkdir(hooked);
+    await writeFile(
+      join(hooked, "settings.json"),
+      JSON.stringify({ hooks: { Stop: [other] } }),
+    );
+    assert.deepEqual(await syncProfileSettings(userHome, [fresh, hooked]), [
+      fresh,
+      hooked,
+    ]);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(fresh, "settings.json"), "utf8")),
+      { cleanupPeriodDays: 90 },
+    );
+    assert.deepEqual(
+      JSON.parse(await readFile(join(hooked, "settings.json"), "utf8")),
+      { hooks: { Stop: [other] }, cleanupPeriodDays: 90 },
+    );
+    assert.deepEqual(await syncProfileSettings(userHome, [fresh, hooked]), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

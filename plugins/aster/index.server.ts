@@ -25,7 +25,7 @@ import {
 } from "./server/accounts";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { syncHndHooks } from "./server/profile-hooks";
+import { syncProfileSettings } from "./server/profile-hooks";
 import { accountKey, RoutingCache } from "./server/routing-cache";
 import {
   continuedAfterLimit,
@@ -120,25 +120,26 @@ export default function contribute(server: PluginServerContext) {
     fetch: profileUsage.fetchUsage,
   });
   const reader = new UsageReader();
-  // Account profiles never read ~/.claude/settings.json; keep HND's hooks in each of them.
-  const syncHooks = async () => {
+  // Account profiles never read ~/.claude/settings.json; keep HND's hooks and the user's history
+  // retention in each of them.
+  const syncProfiles = async () => {
     try {
-      const changed = await syncHndHooks(
+      const changed = await syncProfileSettings(
         homedir(),
         (await discoverAccounts()).map((account) => account.home),
       );
       if (changed.length)
         console.info(
-          `[aster] HND hook을 계정 프로필 ${changed.length}곳에 맞춤`,
+          `[aster] HND hook·대화 기록 보존 기간을 계정 프로필 ${changed.length}곳에 맞춤`,
         );
     } catch (error) {
       console.warn(
-        `[aster] HND hook 동기화 실패: ${String(error).slice(0, 200)}`,
+        `[aster] 계정 프로필 설정 동기화 실패: ${String(error).slice(0, 200)}`,
       );
     }
   };
-  void syncHooks();
-  const hookTimer = setInterval(() => void syncHooks(), 120_000);
+  void syncProfiles();
+  const hookTimer = setInterval(() => void syncProfiles(), 120_000);
   hookTimer.unref?.();
   const lifetime = new AbortController();
   // A login change elsewhere does not hold the next session open: the reports from just before
