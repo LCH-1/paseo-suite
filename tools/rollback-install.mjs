@@ -115,7 +115,8 @@ for (const id of own) {
 if (missing.length) {
   console.error(
     `Checkpoint plugin sources are missing; nothing was changed.\n  ${missing.join("\n  ")}\n` +
-      "Start the Paseo release that created them (reinstall it from its GitHub release tag with install.ps1 -Action Rollback -Version <x.y.z>) so it extracts its plugins again, then retry.",
+      "Start the Paseo release that created them (reinstall it from its GitHub release tag with install.ps1 -Action Rollback -Version <x.y.z>) so it extracts its plugins again, then retry.\n" +
+      "A version without a public release tag (1.0.6, 1.0.7) cannot be reinstalled; pick a checkpoint made by a published release instead.",
   );
   process.exit(1);
 }

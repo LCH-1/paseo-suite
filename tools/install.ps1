@@ -49,14 +49,15 @@ function Get-SuiteRelease {
     return [pscustomobject]@{ Version = [version]$version; Tag = "v$version"; Installer = $installer }
 }
 
-function Get-InstalledSuiteVersion {
-    $versions = @()
-    foreach ($key in @(
-        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+function Get-SuiteRegistrations {
+    # Scope Machine is an all-users (HKLM) install; this helper installs per user only.
+    $registrations = @()
+    foreach ($hive in @(
+        @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'; Scope = 'User' },
+        @{ Key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'; Scope = 'Machine' },
+        @{ Key = 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'; Scope = 'Machine' }
     )) {
-        foreach ($item in @(Get-ItemProperty -Path $key -ErrorAction SilentlyContinue)) {
+        foreach ($item in @(Get-ItemProperty -Path $hive.Key -ErrorAction SilentlyContinue)) {
             if ($item.PSObject.Properties['DisplayName'] -and $item.DisplayName -match '^Paseo(?: \d+\.\d+\.\d+)?$') {
                 $location = $null
                 if ($item.PSObject.Properties['InstallLocation'] -and $item.InstallLocation) {
@@ -67,12 +68,20 @@ function Get-InstalledSuiteVersion {
                 if (-not $location) { continue }
                 $lock = Join-Path $location 'resources\suite\suite-lock.json'
                 if (Test-Path -LiteralPath $lock) {
-                    $versions += [version](Get-Content -LiteralPath $lock -Raw | ConvertFrom-Json).suiteVersion
+                    $registrations += [pscustomobject]@{
+                        Version = [version](Get-Content -LiteralPath $lock -Raw | ConvertFrom-Json).suiteVersion
+                        Scope = $hive.Scope
+                        Location = $location
+                    }
                 }
             }
         }
     }
-    return $versions | Sort-Object -Descending | Select-Object -First 1
+    return $registrations
+}
+
+function Get-InstalledSuiteVersion {
+    return Get-SuiteRegistrations | ForEach-Object { $_.Version } | Sort-Object -Descending | Select-Object -First 1
 }
 
 function Assert-SuiteChecksum {
@@ -223,7 +232,20 @@ function Invoke-SuiteRollback {
         Write-Output 'No registered Suite installation found. Use -Action Install first.'
         return
     }
-    $release = Get-SuiteRelease -Tag "v$Version"
+    # NSIS /currentuser never touches an all-users install: the older release would
+    # land next to it as a second per-user copy, and the newer one would stay registered.
+    $machine = @(Get-SuiteRegistrations | Where-Object { $_.Scope -eq 'Machine' })
+    if ($machine.Count -gt 0) {
+        throw ("Rollback supports per-user installs only. Suite $($machine[0].Version) is installed for all users at $($machine[0].Location); " +
+            "nothing was downloaded or changed. Download Paseo-Suite-$Version-x64.exe from https://github.com/$script:Repository/releases/tag/v$Version " +
+            'and run it yourself; an all-users install asks for administrator approval.')
+    }
+    try { $release = Get-SuiteRelease -Tag "v$Version" }
+    catch {
+        # Some versions were never published (1.0.6 and 1.0.7 have no public tag).
+        throw ("Cannot use Suite v$Version for a rollback: $($_.Exception.Message) " +
+            "Only versions listed at https://github.com/$script:Repository/releases can be restored.")
+    }
     Write-Output "Rollback Suite: $($release.Version); installed: $installed"
     if ($release.Version -ge $installed) {
         Write-Output 'Rollback installs an older release only. Use -Action Update for the latest release.'
