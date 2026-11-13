@@ -702,6 +702,65 @@ test("동일 세대는 조회를 공유하고 실패 뒤 재시도하며 취소�
   });
 });
 
+test("호스트 캐시 끝에서 받은 Claude 보고서는 1분을 다 채우지 않고 점수에서 빠지기 전에 다시 조회하며 새 보고서는 1분 동안 재사용한다", async () => {
+  // The host answered from the end of its five-minute cache a report whose lookup took 15
+  // seconds: `fetchedAt` is when that lookup began, so it arrives five minutes 15 seconds old.
+  let clock = now;
+  const lookups: number[] = [];
+  const reader = new UsageReader(
+    async () => {
+      const fetchedAt = lookups.length ? clock : now - 5 * 60_000 - 15_000;
+      lookups.push(clock);
+      return JSON.stringify([
+        { ...report(), fetchedAt: new Date(fetchedAt).toISOString() },
+      ]);
+    },
+    () => clock,
+  );
+  const command = { file: "fixture-cli", args: [] };
+  const signal = new AbortController().signal;
+  for (let second = 0; second <= 60; second++) {
+    clock = now + second * 1000;
+    const reports = await reader.read(command, signal);
+    // What answers stays current for the session open that reads it, a while after.
+    assert.equal(
+      mapReports(accounts, reports, {}, clock + 20_000).length,
+      1,
+      `${second}s`,
+    );
+  }
+  // One new lookup before the old report runs out, then the new one answers a whole minute.
+  assert.equal(lookups.length, 2);
+  assert.ok(lookups[1] > now && lookups[1] <= now + 40_000, String(lookups[1]));
+
+  // A report no open would count anyway (another provider's, or one already past the limit)
+  // does not cut the minute short, which would send every open back to the host.
+  let calls = 0;
+  const mixed = new UsageReader(
+    async () => {
+      calls++;
+      return JSON.stringify([
+        report(),
+        {
+          ...report("b@example.test", "claude:account.org-b"),
+          fetchedAt: new Date(now - 7 * 60_000).toISOString(),
+        },
+        {
+          ...report("codex@example.test", "codex:account"),
+          sourceId: "codex",
+          fetchedAt: new Date(now - 5 * 60_000 - 50_000).toISOString(),
+        },
+      ]);
+    },
+    () => clock,
+  );
+  for (const second of [0, 30, 59]) {
+    clock = now + second * 1000;
+    await mixed.read(command, signal);
+  }
+  assert.equal(calls, 1);
+});
+
 test("실패한 조회는 잠시 그대로 돌려줘 줄 선 세션 열기가 각자 다시 기다리지 않는다", async () => {
   let calls = 0;
   let clock = now;
