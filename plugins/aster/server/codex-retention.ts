@@ -10,7 +10,8 @@ import * as zlib from "node:zlib";
 // when the user opts in, and through the official app-server `thread/delete`: that also drops the
 // thread from Codex's state database and its spawned sub-agent threads, keeps forks readable,
 // and refuses a thread another Codex process holds ("already has an active writer"). A sub-agent
-// thread stays as long as the thread that spawned it does.
+// thread stays as long as the thread that spawned it does, and a thread that spawned one that
+// stays stays too, or deleting it would take that one along.
 
 const ROLLOUT =
   /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i;
@@ -177,13 +178,16 @@ export interface RetentionResult {
   kept: number;
   /** Old sub-agent threads kept with the thread that spawned them, which stays. */
   children: number;
+  /** Old threads kept because a sub-agent thread they spawned stays. */
+  parents: number;
   reason?: string;
 }
 
 /**
  * Removes the threads whose every rollout file is older than `days`, except those of open Paseo
- * conversations and the sub-agent threads of any thread that stays, and reports what disappeared.
- * `remove` asks Codex to delete the given threads; nothing is started when no thread is old enough.
+ * conversations, the sub-agent threads of any thread that stays and the threads that spawned
+ * one that stays, and reports what disappeared. `remove` asks Codex to delete the given threads;
+ * nothing is started when no thread is old enough.
  */
 export async function pruneCodexHistory(input: {
   codexHome: string;
@@ -195,35 +199,46 @@ export async function pruneCodexHistory(input: {
   const before = await codexRollouts(input.codexHome);
   const open = await openPaseoThreads(input.paseoHome);
   const cutoff = input.now - input.days * DAY;
-  const old = [...before].filter(([, files]) =>
-    files.every((file) => file.modified < cutoff),
+  const aged = new Set(
+    [...before]
+      .filter(([, files]) => files.every((file) => file.modified < cutoff))
+      .map(([id]) => id),
   );
-  const aged = new Set(old.map(([id]) => id));
-  // A sub-agent thread goes with the thread that spawned it (Codex deletes them together), so one
-  // whose parent stays (recent, or open in Paseo) stays too, however old it is.
-  const parents = new Map<string, string>();
-  for (const [id, files] of old)
-    if (!open.has(id)) {
-      const parent = await rolloutParent(files);
-      if (parent) parents.set(id, parent);
-    }
-  const children = new Set<string>();
-  const stays = (id: string) =>
-    open.has(id) || children.has(id) || (before.has(id) && !aged.has(id));
-  for (let grown = true; grown; ) {
-    grown = false;
-    for (const [id, parent] of parents)
-      if (!children.has(id) && stays(parent)) {
-        children.add(id);
-        grown = true;
-      }
+  const kept = [...aged].filter((id) => open.has(id)).length;
+  if ([...aged].every((id) => open.has(id)))
+    return { removed: 0, bytes: 0, skipped: 0, kept, children: 0, parents: 0 };
+  // A sub-agent thread goes with the thread that spawned it (Codex deletes them together). So the
+  // sub-agent threads of a thread that stays (recent, or open in Paseo) stay however old they
+  // are, and so do the threads that spawned one that stays, up to the first.
+  const parentOf = new Map<string, string>();
+  const spawned = new Map<string, string[]>();
+  for (const [id, files] of before) {
+    const parent = await rolloutParent(files);
+    if (!parent || parent === id) continue;
+    parentOf.set(id, parent);
+    spawned.set(parent, [...(spawned.get(parent) ?? []), id]);
   }
-  const candidates = old
-    .filter(([id]) => !open.has(id) && !children.has(id))
-    .map(([id]) => id);
-  const kept = old.length - candidates.length - children.size;
-  if (!candidates.length)
-    return { removed: 0, bytes: 0, skipped: 0, kept, children: children.size };
+  const stays = new Set([
+    ...open,
+    ...[...before.keys()].filter((id) => !aged.has(id)),
+  ]);
+  const children = new Set<string>(),
+    parents = new Set<string>(),
+    queue = [...stays];
+  const keep = (id: string, why: Set<string>) => {
+    if (stays.has(id) || !aged.has(id)) return;
+    stays.add(id);
+    why.add(id);
+    queue.push(id);
+  };
+  for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+    const parent = parentOf.get(id);
+    if (parent) keep(parent, parents);
+    for (const child of spawned.get(id) ?? []) keep(child, children);
+  }
+  const candidates = [...aged].filter((id) => !stays.has(id));
+  const held = { kept, children: children.size, parents: parents.size };
+  if (!candidates.length) return { removed: 0, bytes: 0, skipped: 0, ...held };
   const { reason } = await input.remove(candidates);
   const after = await codexRollouts(input.codexHome);
   let removed = 0,
@@ -237,8 +252,7 @@ export async function pruneCodexHistory(input: {
     removed,
     bytes,
     skipped: candidates.filter((id) => after.has(id)).length,
-    kept,
-    children: children.size,
+    ...held,
     ...(reason ? { reason } : {}),
   };
 }
@@ -253,6 +267,9 @@ export function retentionSummary(days: number, result: RetentionResult) {
       : null,
     result.kept ? `Paseo 열린 대화 ${result.kept}개 보존` : null,
     result.children ? `남는 대화의 하위 작업 ${result.children}개 보존` : null,
+    result.parents
+      ? `남는 하위 작업을 띄운 대화 ${result.parents}개 보존`
+      : null,
   ]
     .filter((part) => part !== null)
     .join(", ");

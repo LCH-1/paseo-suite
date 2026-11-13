@@ -135,6 +135,7 @@ test("Codex 대화 기록 보존은 모든 rollout 이 기간을 넘긴 대화�
       skipped: 1,
       kept: 1,
       children: 0,
+      parents: 0,
       reason: `thread ${thread(6)} already has an active writer`,
     });
     for (const file of [recent, open, resumedOld, busy, other])
@@ -251,6 +252,66 @@ test("Codex 대화 기록 보존은 남는 대화가 띄운 하위 작업 대화
     );
   }));
 
+test("Codex 대화 기록 보존은 기간 안이거나 Paseo에서 열린 하위 작업 대화를 띄운 대화를 첫 대화까지 남겨 함께 지워지지 않게 한다", async () =>
+  workspace(async (root) => {
+    const codexHome = join(root, "codex"),
+      paseoHome = join(root, "paseo");
+    const file = (n: number, ageDays: number, parent?: number, zst = false) => {
+      const body = meta(
+        thread(n),
+        parent === undefined ? undefined : thread(parent),
+      );
+      return rollout(
+        codexHome,
+        `sessions/2026/08/01/rollout-2026-08-01T01-02-03-{id}.jsonl${zst ? ".zst" : ""}`,
+        thread(n),
+        ageDays,
+        zst ? zstdCompressSync(Buffer.from(body)) : body,
+      );
+    };
+    // 12 was spawned by 11 and continued on its own within the period.
+    const parent = await file(11, 120);
+    await file(12, 1, 11);
+    // 14, spawned by 13, is open in Paseo.
+    const openParent = await file(13, 120);
+    await file(14, 120, 13);
+    await mkdir(join(paseoHome, "agents", "project"), { recursive: true });
+    await writeFile(
+      join(paseoHome, "agents", "project", "open.json"),
+      JSON.stringify({ id: "a", persistence: { sessionId: thread(14) } }),
+    );
+    // 17 is recent, spawned by 16, spawned by 15; 18 is 16's other old sub-agent.
+    const first = await file(15, 120);
+    const middle = await file(16, 120, 15, true);
+    const sibling = await file(18, 120, 16);
+    await file(17, 1, 16);
+    // 19 and its sub-agent 20 have nothing recent or open below them.
+    await file(19, 120);
+    await file(20, 120, 19);
+
+    const asked: string[][] = [];
+    const result = await pruneCodexHistory({
+      codexHome,
+      paseoHome,
+      days: 90,
+      now,
+      remove: async (threadIds) => {
+        asked.push([...threadIds].sort());
+        return {};
+      },
+    });
+    assert.deepEqual(asked, [[thread(19), thread(20)]]);
+    assert.equal(result.kept, 1);
+    assert.equal(result.children, 1);
+    assert.equal(result.parents, 4);
+    for (const kept of [parent, openParent, first, middle, sibling])
+      assert.ok(existsSync(kept), kept);
+    assert.match(
+      retentionSummary(90, result),
+      /: 0개 대화 0\.0MB 삭제, 2개 건너뜀\(사용 중·삭제 거부\), Paseo 열린 대화 1개 보존, 남는 대화의 하위 작업 1개 보존, 남는 하위 작업을 띄운 대화 4개 보존$/,
+    );
+  }));
+
 test("지울 대화가 없으면 Codex를 띄우지 않고 Paseo 기록을 읽을 수 없으면 아무것도 지우지 않는다", async () =>
   workspace(async (root) => {
     const codexHome = join(root, "codex"),
@@ -268,7 +329,7 @@ test("지울 대화가 없으면 Codex를 띄우지 않고 Paseo 기록을 읽�
     };
     assert.deepEqual(
       await pruneCodexHistory({ codexHome, paseoHome, days: 90, now, remove }),
-      { removed: 0, bytes: 0, skipped: 0, kept: 0, children: 0 },
+      { removed: 0, bytes: 0, skipped: 0, kept: 0, children: 0, parents: 0 },
     );
     assert.equal(
       retentionSummary(90, {
@@ -277,6 +338,7 @@ test("지울 대화가 없으면 Codex를 띄우지 않고 Paseo 기록을 읽�
         skipped: 0,
         kept: 0,
         children: 0,
+        parents: 0,
       }),
       "[aster] Codex 대화 기록 보존 90일: 0개 대화 0.0MB 삭제",
     );
