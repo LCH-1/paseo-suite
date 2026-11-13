@@ -469,9 +469,17 @@ test("재시작 뒤에도 디스크의 최근 허용 판정으로 바로 열고 
     assert.equal(await settles(restarted), true);
     assert.deepEqual(await restarted, [account]);
     await profiles.answer(true);
-    await new Promise((resolve) => setImmediate(resolve));
-    // Only the newest observations stay.
-    assert.equal((await readdir(join(cache, key))).length, 2);
+    // The background answer is written as a third observation, and only the newest two stay.
+    const written = String(now).padStart(16, "0");
+    const files = async () => (await readdir(join(cache, key))).sort();
+    await until(async () =>
+      (await files()).some((file) => file.startsWith(written)),
+    ).catch(() => undefined);
+    for (let turn = 0; turn < 20 && (await files()).length > 2; turn++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    const kept = await files();
+    assert.equal(kept.length, 2);
+    assert.ok(kept[1].startsWith(written), kept.join(", "));
 
     // Past six hours without an answer the open waits again.
     now += 6 * 3_600_000 + 1;
