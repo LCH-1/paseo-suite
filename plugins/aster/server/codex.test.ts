@@ -23,10 +23,13 @@ import {
   codexNodeLauncher,
   codexLauncherCommand,
   codexOriginalCommand,
+  codexReadingReuse,
   discoverCodexAccounts,
+  registerCodexRouting,
   resumableCodexAccount,
   retryingBridge,
 } from "./codex";
+import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 
 test("Codex 실행 모듈은 시작 시 실패해도 다음 세션에서 한 번만 다시 준비한다", async () => {
   let calls = 0;
@@ -1043,4 +1046,241 @@ test("Codex 창에 초기화 시각과 길이가 모두 없으면 남은 %를 �
     ),
     null,
   );
+});
+
+/** The Codex session-open hook with every host, CLI and settings dependency replaced. */
+function codexRouting(
+  accounts: { id: string; home: string; identity: string }[],
+) {
+  let clock = now;
+  const lookups: Array<{
+    identity: string;
+    answer: (value: Omit<CodexReading, "id" | "identity" | "at">) => void;
+  }> = [];
+  type Open = (
+    input: { request: PluginSessionOpenRequest },
+    context: unknown,
+  ) => Promise<PluginSessionOpenRequest | undefined>;
+  let hook: Open | null = null;
+  const routes = registerCodexRouting(
+    {
+      before: (_name: string, handler: Open) => {
+        hook = handler;
+        return () => {};
+      },
+      on: () => () => {},
+    } as never,
+    {
+      discover: async () => accounts,
+      installBridge: async () => {},
+      settings: async () => ({ capacities: {} }),
+      now: () => clock,
+      inspect: (_command, _home, identity) =>
+        new Promise((resolve) => {
+          lookups.push({ identity, answer: resolve });
+        }),
+    },
+  );
+  const context = {
+    signal: new AbortController().signal,
+    paseo: {
+      config: { get: async () => ({ config: { providers: { codex: {} } } }) },
+    },
+  };
+  const logs: string[] = [];
+  const info = console.info;
+  console.info = (message: string) => void logs.push(message);
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  return {
+    logs,
+    advance: (ms: number) => {
+      clock += ms;
+    },
+    /** Lookups started and not yet answered. */
+    waiting: () => lookups.map((lookup) => lookup.identity).sort(),
+    /** Answers every open lookup of `identity`: `used` percent spent in both windows. */
+    answer: async (identity: string, used: number) => {
+      for (
+        let turn = 0;
+        turn < 20 && !lookups.some((lookup) => lookup.identity === identity);
+        turn++
+      )
+        await tick();
+      for (const lookup of lookups.filter(
+        (entry) => entry.identity === identity,
+      )) {
+        lookups.splice(lookups.indexOf(lookup), 1);
+        lookup.answer({
+          plan: "pro",
+          allowed: true,
+          blocked: used >= 100,
+          windows: [
+            {
+              usedPercent: used,
+              windowDurationMins: 300,
+              resetsAt: clock + 3_600_000,
+            },
+            {
+              usedPercent: used,
+              windowDurationMins: 10080,
+              resetsAt: clock + 86_400_000,
+            },
+          ],
+        });
+      }
+      for (let turn = 0; turn < 5; turn++) await tick();
+    },
+    open: (agentId: string, reason: PluginSessionOpenRequest["reason"]) =>
+      hook!(
+        {
+          request: {
+            agentId,
+            workspaceId: null,
+            provider: "codex",
+            cwd: "/workspace",
+            reason,
+            purpose: "interactive",
+            env: {},
+          },
+        },
+        context,
+      ),
+    dispose: () => {
+      console.info = info;
+      routes.dispose();
+    },
+  };
+}
+/** Whether the open answers while every lookup it could wait for is unanswered. */
+const answersAtOnce = async (promise: Promise<unknown>) =>
+  Promise.race([
+    promise.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+  ]);
+const openedOn = (opened: PluginSessionOpenRequest | undefined) =>
+  opened?.env.ASTER_CODEX_ACCOUNT_ID;
+
+test("Codex 판독 재사용 한도는 6분 폐기 기준보다 짧고 계정이 여럿이면 더 짧다", () => {
+  assert.equal(codexReadingReuse(1), 300_000);
+  assert.equal(codexReadingReuse(2), 120_000);
+  assert.ok(codexReadingReuse(1) < 360_000);
+});
+
+test("Codex 계정이 하나면 재개는 판독을 기다리지 않고 새 대화는 5분 안 판독을 재사용하며 열기 소요를 한 줄 남긴다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/codex", identity: "a" },
+  ]);
+  try {
+    // Never read: a new conversation waits for the official lookup.
+    const first = routing.open("first", "create");
+    assert.equal(await answersAtOnce(first), false);
+    await routing.answer("a", 20);
+    assert.equal(openedOn(await first), "a");
+    assert.match(
+      routing.logs.at(-1)!,
+      /^\[aster\] Codex 계정 확인 first \d+ms \(create · 판독 대기 · codex\)$/,
+    );
+
+    // Four minutes later the reading still chooses, and is renewed behind the open.
+    routing.advance(4 * 60_000);
+    const second = routing.open("second", "create");
+    assert.equal(await answersAtOnce(second), true);
+    assert.equal(openedOn(await second), "a");
+    assert.match(
+      routing.logs.at(-1)!,
+      /second \d+ms \(create · 최근 판독 · codex\)/,
+    );
+    assert.deepEqual(routing.waiting(), ["a"]);
+
+    // A resume goes back to the only account whatever the readings say.
+    routing.advance(10 * 60_000);
+    const resumed = routing.open("third", "resume");
+    assert.equal(await answersAtOnce(resumed), true);
+    assert.equal(openedOn(await resumed), "a");
+    assert.match(
+      routing.logs.at(-1)!,
+      /third \d+ms \(resume · 유일 계정 · codex\)/,
+    );
+    assert.deepEqual(routing.waiting(), ["a"]);
+
+    // Past five minutes a new conversation waits again, on the lookup already running.
+    const late = routing.open("fourth", "create");
+    assert.equal(await answersAtOnce(late), false);
+    await routing.answer("a", 30);
+    assert.equal(openedOn(await late), "a");
+
+    // A recent reading that would refuse never refuses: the open waits for a new one.
+    routing.advance(90_000);
+    await routing.open("spending", "create");
+    await routing.answer("a", 100);
+    // Past a minute the spent reading is renewed instead of refusing the new conversation.
+    routing.advance(61_000);
+    const spent = routing.open("fifth", "create");
+    assert.equal(await answersAtOnce(spent), false);
+    await routing.answer("a", 10);
+    assert.equal(openedOn(await spent), "a");
+  } finally {
+    routing.dispose();
+  }
+});
+
+test("Codex 계정이 여럿이면 2분 안 판독만 재사용해 분배하고 묵은 판독과 한도 근처 기존 계정은 새 판독을 기다린다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+  ]);
+  try {
+    const first = routing.open("one", "create");
+    assert.equal(await answersAtOnce(first), false);
+    await routing.answer("a", 80);
+    await routing.answer("b", 10);
+    assert.equal(openedOn(await first), "b");
+
+    // Within two minutes the readings choose at once and are renewed behind the open.
+    routing.advance(90_000);
+    const second = routing.open("two", "create");
+    assert.equal(await answersAtOnce(second), true);
+    assert.equal(openedOn(await second), "b");
+    assert.deepEqual(routing.waiting(), ["a", "b"]);
+
+    // Past two minutes the old readings would still send it to b, which another client has
+    // just spent: the open waits, and the new readings send it to a.
+    routing.advance(60_000);
+    const third = routing.open("three", "create");
+    assert.equal(await answersAtOnce(third), false);
+    await routing.answer("a", 80);
+    await routing.answer("b", 100);
+    assert.equal(openedOn(await third), "a");
+
+    // A resume of a session bound to b, last seen spent, waits and moves to a as before.
+    routing.advance(3 * 60_000);
+    const moved = routing.open("one", "resume");
+    assert.equal(await answersAtOnce(moved), false);
+    await routing.answer("a", 80);
+    await routing.answer("b", 100);
+    assert.equal(openedOn(await moved), "a");
+
+    // A resume of a session bound to a, last seen with room, opens there at once.
+    routing.advance(3 * 60_000);
+    const kept = routing.open("three", "resume");
+    assert.equal(await answersAtOnce(kept), true);
+    assert.equal(openedOn(await kept), "a");
+    assert.match(
+      routing.logs.at(-1)!,
+      /three \d+ms \(resume · 기존 계정 · codex\)/,
+    );
+    assert.deepEqual(routing.waiting(), ["a", "b"]);
+
+    // A resume with no binding left (as after a restart) waits to choose among the accounts.
+    const unbound = routing.open("unknown", "resume");
+    assert.equal(await answersAtOnce(unbound), false);
+    await routing.answer("a", 80);
+    await routing.answer("b", 20);
+    assert.equal(openedOn(await unbound), "b");
+  } finally {
+    routing.dispose();
+  }
 });
