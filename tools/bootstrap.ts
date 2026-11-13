@@ -569,14 +569,16 @@ export async function prepare(context: Context) {
     }
     // Nothing of this attempt is left to undo, so its checkpoint is no rollback
     // point. Kept, every failed start would add one more copy of the config.
-    // A config this attempt wrote and someone then replaced keeps it.
+    // A config this attempt wrote and someone then replaced keeps it. Renamed
+    // first, a removal that stops half way leaves no valid checkpoint name.
     if (
       !pluginsTouched &&
       (offlineConfig === undefined || (await optional(configPath)) === raw)
     )
-      await fs
-        .rm(checkpoint, { recursive: true, force: true })
-        .catch(() => undefined);
+      await removeOwned(path.dirname(checkpoint), path.basename(checkpoint), {
+        removed: [],
+        failed: [],
+      });
     throw error;
   }
   if (!running) await cleanupResidue(home, release, lock.treeHash);

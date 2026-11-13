@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { prepare } from "../tools/bootstrap";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -704,6 +704,133 @@ test("오프라인 이전이 설정을 쓴 뒤 실패하면 설정을 되돌리�
     assert.equal(await fs.readFile(configPath, "utf8"), raw);
     assert.deepEqual(await box.checkpoints(), []);
   } finally {
+    await box.dispose();
+  }
+});
+
+test("설치 기록이 가리키는 체크포인트는 더 새 체크포인트와 설정이 같아도 지우지 않는다", async () => {
+  const box = await sandbox();
+  try {
+    const fromInstalled = await box.release(hex("installed-point"), 9 * DAY);
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    const same = {
+      plugins: { ui: { path: path.join(fromInstalled, "plugins/ui") } },
+    };
+    // A rollback named the older point; a later attempt copied the same config.
+    const installed = await box.checkpoint(uuid("1"), 5 * DAY, same);
+    const newer = await box.checkpoint(uuid("2"), 1 * DAY, same);
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash: box.treeHash,
+        checkpoint: installed,
+        nativeUsagePending: false,
+      }),
+    );
+
+    await prepare(box.context());
+
+    assert.ok(await box.exists(installed), "installed checkpoint removed");
+    assert.equal(
+      await fs.readFile(path.join(installed, "config.json"), "utf8"),
+      JSON.stringify(same),
+    );
+    for (const kept of [newer, fromInstalled])
+      assert.ok(await box.exists(kept), `kept: ${path.basename(kept)}`);
+  } finally {
+    await box.dispose();
+  }
+});
+
+test("오프라인 이전이 쓴 설정을 다른 쪽이 다시 바꾼 뒤 실패하면 그 설정과 이전 설정의 유일한 사본인 체크포인트를 남긴다", async () => {
+  const box = await sandbox();
+  const configPath = path.join(box.home, "config.json");
+  const statePath = path.join(box.home, "suite/installed.json");
+  const raw = JSON.stringify({ custom: { preserved: true } });
+  const edited = JSON.stringify({ custom: { edited: "elsewhere" } });
+  // Between the migration's config write and its state write, another
+  // session replaces the config; then the state write fails.
+  const rename = fs.rename;
+  const replaced = mock.method(
+    fs,
+    "rename",
+    async (from: string, to: string) => {
+      if (path.resolve(to) === path.resolve(statePath)) {
+        await fs.writeFile(configPath, edited);
+        throw Object.assign(Error("injected state write failure"), {
+          code: "EIO",
+        });
+      }
+      return rename(from, to);
+    },
+  );
+  try {
+    await fs.writeFile(configPath, raw);
+    await fs.mkdir(path.join(box.home, "suite/checkpoints"), {
+      recursive: true,
+    });
+    await assert.rejects(prepare(box.context()), /injected state write/);
+    assert.ok(replaced.mock.callCount() > 0);
+    assert.equal(await fs.readFile(configPath, "utf8"), edited);
+    const left = await box.checkpoints();
+    assert.equal(left.length, 1, "the only copy of the old config was removed");
+    assert.equal(
+      await fs.readFile(
+        path.join(box.home, "suite/checkpoints", left[0], "config.json"),
+        "utf8",
+      ),
+      raw,
+    );
+  } finally {
+    replaced.mock.restore();
+    await box.dispose();
+  }
+});
+
+test("실패한 시도의 체크포인트를 지우다 멈춰도 유효한 이름의 반쯤 지운 체크포인트를 남기지 않고 다음 정리가 마저 지운다", async () => {
+  const box = await sandbox();
+  const checkpoints = path.join(box.home, "suite/checkpoints");
+  // A locked file (or a crash) stops the removal half way.
+  const remove = fs.rm;
+  const stopped = mock.method(
+    fs,
+    "rm",
+    async (target: string, options?: Parameters<typeof fs.rm>[1]) => {
+      if (path.dirname(path.resolve(target)) === path.resolve(checkpoints)) {
+        await fs.unlink(path.join(target, "config.json")).catch(() => {});
+        throw Object.assign(Error("injected busy file"), { code: "EBUSY" });
+      }
+      return remove(target, options);
+    },
+  );
+  try {
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    await fs.mkdir(checkpoints, { recursive: true });
+    let calls = 0;
+    await assert.rejects(
+      prepare(box.context({ isDaemonRunning: async () => ++calls === 2 })),
+      /daemon started during offline migration/,
+    );
+    assert.ok(stopped.mock.callCount() > 0);
+    const valid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    assert.deepEqual(
+      (await box.checkpoints()).filter((name) => valid.test(name)),
+      [],
+      "a half-removed checkpoint kept a valid name",
+    );
+    stopped.mock.restore();
+
+    await prepare(box.context());
+    const state = JSON.parse(
+      await fs.readFile(path.join(box.home, "suite/installed.json"), "utf8"),
+    );
+    assert.deepEqual(await box.checkpoints(), [
+      path.basename(state.checkpoint),
+    ]);
+  } finally {
+    stopped.mock.restore();
     await box.dispose();
   }
 });
