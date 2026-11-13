@@ -119,6 +119,43 @@ function Save-SuiteRelease {
     return Join-Path $directory $Release.Installer
 }
 
+function Remove-SuiteEmptyFolder {
+    param([string]$Path)
+    # Remove-Item would prompt for a folder that still has unknown children.
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -eq 0) { Remove-Item -LiteralPath $Path -Force }
+}
+
+function Remove-SuiteDownloads {
+    param([string]$KeepTag)
+    # Runs under update.lock. Only v<x.y.z> folders and the files this helper
+    # downloads are removed; links and unknown files stay. updater\install.ps1,
+    # status.json and update.lock live outside these folders. Never fails an update.
+    try {
+        $cutoff = (Get-Date).AddDays(-1)
+        $owned = @(Get-ChildItem -LiteralPath $script:UpdaterRoot -Directory -ErrorAction Stop | Where-Object {
+            $_.Name -match '^v\d+\.\d+\.\d+$' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        })
+        foreach ($folder in $owned) {
+            # An interrupted download leaves its GUID folder; a day-old one has no owner.
+            foreach ($temporary in @(Get-ChildItem -LiteralPath $folder.FullName -Directory | Where-Object {
+                $_.Name -match '^[0-9a-f]{32}$' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $_.LastWriteTime -lt $cutoff
+            })) {
+                Get-ChildItem -LiteralPath $temporary.FullName -File -Force | Remove-Item -Force
+                Remove-SuiteEmptyFolder $temporary.FullName
+            }
+            if ($folder.Name -eq $KeepTag) { continue }
+            $version = $folder.Name.Substring(1)
+            foreach ($name in @("Paseo-Suite-$version-x64.exe", 'install.ps1', 'SHA256SUMS')) {
+                $file = Join-Path $folder.FullName $name
+                if (Test-Path -LiteralPath $file -PathType Leaf) { Remove-Item -LiteralPath $file -Force }
+            }
+            Remove-SuiteEmptyFolder $folder.FullName
+        }
+    } catch {
+        Write-Output "Suite download cleanup skipped; it is retried on the next run: $($_.Exception.Message)"
+    }
+}
+
 function Test-SuiteRunning {
     # Include background daemons, providers and other users. Never stop them for an update.
     return @(Get-Process -Name Paseo -ErrorAction SilentlyContinue).Count -gt 0
@@ -193,6 +230,8 @@ function Invoke-SuiteSetup {
             # Direct exe installs may have no command helper, or an old authenticated one.
             if ($installed -eq $release.Version) { Save-SuiteHelper }
             if ($EnableAutoUpdate) { Set-SuiteAutoUpdate $true }
+            # Also clears installers that earlier helper versions left behind.
+            Remove-SuiteDownloads
             Write-Output 'Suite is already up to date; downgrades are blocked.'
             return
         }
@@ -203,6 +242,11 @@ function Invoke-SuiteSetup {
         if ($status -eq 'installed') {
             $actual = Get-InstalledSuiteVersion
             if (-not $actual -or $actual -ne $release.Version) { throw 'Installer completed, but the registered Suite version does not match.' }
+            # Any release can be downloaded again from its public tag; keep no copy.
+            Remove-SuiteDownloads
+        } else {
+            # A pending or downloaded installer is reused; only older tags go.
+            Remove-SuiteDownloads -KeepTag $release.Tag
         }
         if ($EnableAutoUpdate) { Set-SuiteAutoUpdate $true }
         $result = [ordered]@{ version = "$($release.Version)"; status = $status; installer = $installer; checkedAt = [DateTime]::UtcNow.ToString('o') }
