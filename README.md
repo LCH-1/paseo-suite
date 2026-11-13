@@ -34,7 +34,7 @@ Invoke-WebRequest -UseBasicParsing 'https://github.com/LCH-1/paseo-suite/release
 powershell -NoProfile -ExecutionPolicy Bypass -File $paseoSetup -Action Install
 ```
 
-그다음 수동 업데이트는 다음 명령으로 실행합니다. 설치된 버전보다 오래된 릴리스로 내려가지 않으며, 앱·백그라운드 로컬 호스트가 실행 중이면 다운로드만 하고 설치를 보류합니다. 설치는 계정·대화·프로젝트 파일을 삭제하지 않습니다.
+그다음 수동 업데이트는 다음 명령으로 실행합니다. 설치된 버전보다 오래된 릴리스로 내려가지 않으며, 앱·백그라운드 로컬 호스트가 실행 중이면 다운로드만 하고 설치를 보류합니다. 설치는 계정·대화·프로젝트 파일을 삭제하지 않습니다. 이 도우미는 사용자별 설치만 다룹니다. 모든 사용자용(HKLM)으로 설치한 PC(예: 회사 PC)에서는 사용자별 사본이 옆에 생기고 이후 업데이트·제거 때 같은 폴더의 다른 설치까지 지워질 수 있어 Install·Update·EnableAutoUpdate·Rollback 모두 아무것도 받기 전에 거부합니다. 그런 PC는 Release의 설치 파일을 직접 실행하거나 그 PC에서 쓰던 교체 절차로 바꿉니다.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action Update
@@ -65,6 +65,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuit
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action DisableAutoUpdate
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PaseoSuite\updater\install.ps1" -Action Rollback -Version 1.0.9
 ```
+
+앱 안 업데이트나 설치 파일로만 올린 PC는 이 도우미가 없거나 `Rollback`을 모르는 옛 도우미일 수 있습니다. 그때는 위 설치 명령의 첫 두 줄로 최신 도우미를 `%TEMP%`에 받아 `-File $paseoSetup -Action Rollback -Version 1.0.9`로 실행합니다.
 
 설치 파일은 같은 태그의 SHA256SUMS로 확인합니다. 앱이나 로컬 호스트가 실행 중이면 설치를 보류하므로 모두 종료한 뒤 같은 명령을 다시 실행합니다. 되돌린 앱을 시작하면 그 버전에 포함된 플러그인으로 다시 맞춥니다.
 

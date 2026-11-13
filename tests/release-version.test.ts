@@ -128,9 +128,10 @@ async function runInstallerProbe(body: string) {
   );
   const file = path.join(directory, "probe.ps1");
   const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  // No uninstall entries unless a test defines them: the real registry is never read.
   await writeFile(
     file,
-    `\uFEFF$ErrorActionPreference = 'Stop'\n. ${quote(path.join(root, "tools/install.ps1"))}\n$script:UpdaterRoot = ${quote(directory)}\nfunction Assert($condition, $message) { if (-not $condition) { throw $message } }\n${body}\n`,
+    `\uFEFF$ErrorActionPreference = 'Stop'\n. ${quote(path.join(root, "tools/install.ps1"))}\n$script:UpdaterRoot = ${quote(directory)}\nfunction Assert($condition, $message) { if (-not $condition) { throw $message } }\nfunction Get-ItemProperty { }\n${body}\n`,
   );
   try {
     return await promisify(execFile)(
@@ -582,5 +583,72 @@ Invoke-SuiteSetup
 Assert ($script:requests -contains 'v1.2.1/suite-lock.json') 'per-user rollback refused'
 `);
     assert.match(stdout, /Suite rollback pending/);
+  },
+);
+
+test(
+  "Windows 설치·업데이트·자동 업데이트 켜기·롤백은 모든 사용자(HKLM) 설치가 있으면 아무것도 받거나 바꾸기 전에 거부한다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { stdout } = await runInstallerProbe(`${olderReleaseAssets}
+function New-App([string]$Name, [string]$Version) {
+  $folder = Join-Path $script:UpdaterRoot $Name
+  New-Item -ItemType Directory -Path (Join-Path $folder 'resources/suite') -Force | Out-Null
+  Set-Content (Join-Path $folder 'resources/suite/suite-lock.json') ('{"suiteVersion":"' + $Version + '"}')
+  $folder
+}
+$script:hives = @{}
+function Get-ItemProperty {
+  param([string]$Path)
+  $hive = if ($Path -like 'HKCU:*') { 'user' } elseif ($Path -like '*WOW6432Node*') { 'wow' } else { 'machine' }
+  if ($script:hives[$hive]) { $script:hives[$hive] }
+}
+function Save-SuiteRelease { throw 'must not download next to an all-users install' }
+function Save-SuiteHelper { throw 'must not replace the command helper' }
+function Set-SuiteAutoUpdate { throw 'must not change the scheduled task' }
+function Start-Process { throw 'must not run the installer' }
+function Expect-Refusal($Pattern) {
+  $caught = $null
+  try { Invoke-SuiteSetup } catch { $caught = $_.Exception.Message }
+  Assert ($caught -like $Pattern) "expected refusal $Pattern, got $caught"
+}
+# An all-users install as on the company PC: NSIS DisplayIcon, no InstallLocation.
+$script:hives['machine'] = [pscustomobject]@{ DisplayName='Paseo 1.0.7'; DisplayIcon=(Join-Path (New-App 'all users' '1.0.7') 'Paseo.exe') + ',0' }
+foreach ($name in 'Install', 'Update', 'EnableAutoUpdate') {
+  $Action = $name
+  Expect-Refusal "$name supports per-user installs only. Suite 1.0.7 is installed for all users at *nothing was downloaded or changed. *releases*"
+}
+$Action = 'Install'
+$EnableAutoUpdate = $true
+Expect-Refusal '*per-user installs only*'
+$EnableAutoUpdate = $false
+# Rollback names the all-users install even while automatic updates are on, so turning
+# them off first is never asked for in vain.
+function Get-ScheduledTask { 'enabled' }
+$Action = 'Rollback'
+$Version = '1.0.4'
+Expect-Refusal 'Rollback supports per-user installs only*releases/tag/v1.0.4*'
+function Get-ScheduledTask { }
+Assert ($script:requests.Count -eq 0) 'release metadata requested before refusing'
+Assert (-not (Test-Path (Join-Path $script:UpdaterRoot 'install.ps1'))) 'command helper written'
+Assert (-not (Test-Path (Join-Path $script:UpdaterRoot 'status.json'))) 'status written'
+Assert (-not (Get-ChildItem $script:UpdaterRoot -Directory -Filter 'v*')) 'release folder created'
+
+# Per-user only: Install goes on to the latest release as before.
+$script:hives = @{}
+$script:hives['user'] = [pscustomobject]@{ DisplayName='Paseo 1.0.7'; DisplayIcon=(Join-Path (New-App 'per user' '1.0.7') 'Paseo.exe') + ',0' }
+function Get-SuiteRelease { $script:requests += 'latest'; [pscustomobject]@{ Version=[version]'1.2.3'; Tag='v1.2.3'; Installer='Paseo-Suite-1.2.3-x64.exe' } }
+function Save-SuiteRelease($Release) {
+  $folder = Join-Path $script:UpdaterRoot $Release.Tag
+  New-Item -ItemType Directory -Path $folder -Force | Out-Null
+  foreach ($name in @($Release.Installer, 'install.ps1')) { Set-Content (Join-Path $folder $name) 'owned' }
+  Join-Path $folder $Release.Installer
+}
+$Action = 'Install'
+$DownloadOnly = $true
+Invoke-SuiteSetup
+Assert ($script:requests -contains 'latest') 'per-user install refused'
+`);
+    assert.match(stdout, /Suite downloaded/);
   },
 );

@@ -84,6 +84,18 @@ function Get-InstalledSuiteVersion {
     return Get-SuiteRegistrations | ForEach-Object { $_.Version } | Sort-Object -Descending | Select-Object -First 1
 }
 
+function Assert-SuiteUserScope {
+    # NSIS /currentuser never touches an all-users install. The per-user copy lands next to it in
+    # %LOCALAPPDATA%\Programs\Paseo, a folder that may already hold other installs and that a later
+    # per-user update or uninstall empties, while the all-users one stays registered.
+    param([string]$Operation, [string]$Advice)
+    $machine = @(Get-SuiteRegistrations | Where-Object { $_.Scope -eq 'Machine' })
+    if ($machine.Count -gt 0) {
+        throw ("$Operation supports per-user installs only. Suite $($machine[0].Version) is installed for all users at $($machine[0].Location); " +
+            "nothing was downloaded or changed. $Advice")
+    }
+}
+
 function Assert-SuiteChecksum {
     param([string]$File, [string]$Checksums)
     $name = [IO.Path]::GetFileName($File)
@@ -223,6 +235,9 @@ function Invoke-SuiteRollback {
     # The public GitHub release tag is the rollback source; no local installer copy is kept.
     if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Rollback needs -Version <major.minor.patch> of a published Suite release.' }
     if ($EnableAutoUpdate) { throw 'Rollback cannot enable automatic updates; they would reinstall the latest release.' }
+    # Before the task check: disabling updates would not make an all-users rollback possible.
+    Assert-SuiteUserScope 'Rollback' ("Download Paseo-Suite-$Version-x64.exe from https://github.com/$script:Repository/releases/tag/v$Version " +
+        'and run it yourself; an all-users install asks for administrator approval.')
     # The scheduled update would reinstall the latest release within 30 minutes.
     if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
         throw 'Automatic updates are enabled and would undo the rollback. Run -Action DisableAutoUpdate first.'
@@ -231,14 +246,6 @@ function Invoke-SuiteRollback {
     if (-not $installed) {
         Write-Output 'No registered Suite installation found. Use -Action Install first.'
         return
-    }
-    # NSIS /currentuser never touches an all-users install: the older release would
-    # land next to it as a second per-user copy, and the newer one would stay registered.
-    $machine = @(Get-SuiteRegistrations | Where-Object { $_.Scope -eq 'Machine' })
-    if ($machine.Count -gt 0) {
-        throw ("Rollback supports per-user installs only. Suite $($machine[0].Version) is installed for all users at $($machine[0].Location); " +
-            "nothing was downloaded or changed. Download Paseo-Suite-$Version-x64.exe from https://github.com/$script:Repository/releases/tag/v$Version " +
-            'and run it yourself; an all-users install asks for administrator approval.')
     }
     try { $release = Get-SuiteRelease -Tag "v$Version" }
     catch {
@@ -280,6 +287,11 @@ function Invoke-SuiteSetup {
     }
     try {
         if ($Action -eq 'DisableAutoUpdate') { Set-SuiteAutoUpdate $false; return }
+        # Scheduled updates run -Action Update, so they are refused there as well.
+        if ($Action -in @('Install', 'Update', 'EnableAutoUpdate')) {
+            Assert-SuiteUserScope $Action ("To update it, run Paseo-Suite-<version>-x64.exe from https://github.com/$script:Repository/releases " +
+                'yourself (an all-users install asks for administrator approval), or uninstall it before using this helper.')
+        }
         if ($Action -eq 'EnableAutoUpdate') { Save-SuiteHelper; Set-SuiteAutoUpdate $true; return }
         if ($Action -eq 'Rollback') { Invoke-SuiteRollback; return }
         $release = Get-SuiteRelease
