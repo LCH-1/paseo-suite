@@ -128,6 +128,8 @@ async function openFixture(
     gate: null as null | ((agentId: string) => Promise<void> | undefined),
     /** What holds a usage lookup's answer back. */
     usageGate: null as null | (() => Promise<void> | undefined),
+    /** The options of each subscription check: who reuses a known answer, and who waits. */
+    subscriptionCalls: [] as Array<{ reuse?: boolean } | undefined>,
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
     reloadRequest: {} as Record<string, unknown>,
     reload: async (..._args: unknown[]) => "",
@@ -166,7 +168,7 @@ async function openFixture(
     ],
     [
       "./server/subscription",
-      "export class SubscriptionGuard{async filter(accounts){return accounts} dispose(){}} export const needsSubscriptionRecovery=()=>false",
+      `export class SubscriptionGuard{async filter(accounts,_providers,_signal,options){globalThis[${JSON.stringify(key)}].subscriptionCalls.push(options); options?.onWait?.({waited:0,background:1}); return accounts} dispose(){}} export const needsSubscriptionRecovery=()=>false`,
     ],
     ["./server/auth-recovery", `export * from ${actual("./auth-recovery.ts")}`],
     [
@@ -340,6 +342,7 @@ async function openFixture(
       shared.reloadRequest = next;
     },
     lookups: () => shared.lookups,
+    subscriptionCalls: () => shared.subscriptionCalls,
     setGate: (next: typeof shared.gate) => {
       shared.gate = next;
     },
@@ -441,6 +444,35 @@ const logged = (fixture: { logs: string[] }, pattern: RegExp) =>
     `${pattern} not in\n${fixture.logs.join("\n")}`,
   );
 const throughCli = /불완전하거나 만료된 사용량을 CLI 정상 확인 경로로 재개/;
+
+test("세션 열기는 알려진 구독 판정으로 바로 열고 소요 시간을 한 줄 남기며 턴 종료는 지난 확인을 기다린다", async () => {
+  const fixture = await openFixture("two-available");
+  try {
+    assert.ok((await fixture.open({ reason: "create" }))?.env.ASTER_ACCOUNT_ID);
+    assert.deepEqual(
+      fixture.subscriptionCalls().map((options) => options?.reuse === true),
+      [true],
+    );
+    logged(
+      fixture,
+      /^\[aster\] 계정 확인 fixture-agent \d+ms \(create · 구독 \d+ms·배경 확인 1 · 사용량 \d+ms\)$/,
+    );
+    await fixture.turn("fixture-agent", "turn-1", "완료");
+    assert.deepEqual(
+      fixture.subscriptionCalls().map((options) => options?.reuse === true),
+      [true, false],
+    );
+    // A dry run decides only and leaves no line.
+    const lines = fixture.logs.length;
+    await fixture.open({ reason: "create", preflight: true } as never);
+    assert.equal(
+      fixture.logs.slice(lines).filter((line) => /계정 확인/.test(line)).length,
+      0,
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
 
 test("주간 창이 빠진 불완전한 사용량뿐인 계정으로도 기존 소진 대화를 CLI 정상 확인 경로로 재개한다", async () => {
   const fixture = await openFixture("partial-reset");

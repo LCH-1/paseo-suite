@@ -46,6 +46,17 @@ const stateSchema = z
   .strict();
 type AccessState = z.infer<typeof stateSchema>;
 const interval = 60_000;
+/**
+ * How long an allowed answer may open sessions while a due check runs in the background. A denial
+ * is always checked again before it refuses, so a renewed subscription is not turned away, and an
+ * account never answered is waited for. Checks stay due every `interval`; only who waits changes.
+ */
+const reuseAllowed = 6 * 3_600_000;
+/** An unchanged answer is written again this often, so a restart starts from a recent one. */
+const persistUnchanged = 10 * 60_000;
+/** Observations kept per account; the newest one alone decides. */
+const keptObservations = 2;
+const observation = /^\d{16}-[01]-[a-f0-9-]{36}\.json$/;
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -141,6 +152,8 @@ export class SubscriptionGuard {
   private states = new Map<string, AccessState>();
   private checked = new Map<string, number>();
   private loaded = new Set<string>();
+  /** When the newest observation on disk was made, per account. */
+  private persisted = new Map<string, number>();
   private pending = new Map<string, Promise<void>>();
   private readonly now;
   private readonly fetchApi;
@@ -187,7 +200,7 @@ export class SubscriptionGuard {
       return;
     // Immutable observations prevent an old plugin instance's late response overwriting newer denial.
     const files = (await readdir(dir))
-      .filter((file) => /^\d{16}-[01]-[a-f0-9-]{36}\.json$/.test(file))
+      .filter((file) => observation.test(file))
       .sort()
       .reverse();
     if (!files.length) return;
@@ -201,6 +214,7 @@ export class SubscriptionGuard {
       )
     )
       throw Error("Invalid subscription observation");
+    this.persisted.set(key, Math.max(this.persisted.get(key) ?? 0, state.at));
     const previous = this.states.get(key);
     if (
       !previous ||
@@ -231,7 +245,11 @@ export class SubscriptionGuard {
       return;
     const state: AccessState = { version: 1, at, denied };
     this.states.set(key, state);
-    if (previous?.denied === denied) return;
+    if (
+      previous?.denied === denied &&
+      at - (this.persisted.get(key) ?? -Infinity) < persistUnchanged
+    )
+      return;
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       await this.regular(this.directory, true);
@@ -252,11 +270,22 @@ export class SubscriptionGuard {
       } finally {
         await rm(temporary, { force: true });
       }
+      this.persisted.set(key, Math.max(this.persisted.get(key) ?? 0, at));
+      await this.prune(dir);
     } catch {
       console.warn(
         "[aster] 구독 상태 캐시 저장에 실패했습니다. 현재 인스턴스의 계정 제외는 유지합니다.",
       );
     }
+  }
+  /** Only the newest observation is read, so older ones go once newer ones exist. */
+  private async prune(dir: string) {
+    const files = (await readdir(dir))
+      .filter((file) => observation.test(file))
+      .sort()
+      .reverse();
+    for (const file of files.slice(keptObservations))
+      await rm(join(dir, file), { force: true }).catch(() => undefined);
   }
   async deny(account: Account, current = () => true) {
     if (this.lifetime.signal.aborted) return;
@@ -269,10 +298,20 @@ export class SubscriptionGuard {
   dispose() {
     this.lifetime.abort();
   }
+  /**
+   * The accounts whose subscription is not known to have ended. With `reuse`, an account last
+   * answered as allowed (within `reuseAllowed`) is not waited for: its due check runs in the
+   * background and a denial it finds applies from the next call on. `onWait` learns whether this
+   * call waited for a check and how many ran in the background.
+   */
   async filter(
     accounts: Account[],
     providers: () => Promise<CredentialProviders>,
     signal: AbortSignal,
+    options: {
+      reuse?: boolean;
+      onWait?: (plan: { waited: number; background: number }) => void;
+    } = {},
   ) {
     signal = AbortSignal.any([signal, this.lifetime.signal]);
     signal.throwIfAborted();
@@ -309,100 +348,118 @@ export class SubscriptionGuard {
     const operationSignal = this.lifetime.signal;
     const coreSnapshot = () =>
       (core ??= this.readProfiles!(requested, operationSignal));
-    await sharedResult(
-      Promise.all(
-        due.map(([key, account]) => {
-          if (this.pending.has(key)) return this.pending.get(key);
-          const at = this.now();
-          const task = (async () => {
-            try {
-              if (this.readProfiles) {
-                const profiles = await coreSnapshot();
-                operationSignal.throwIfAborted();
-                if (profiles !== null) {
-                  const ids = accounts
-                    .filter((candidate) => accountKey(candidate) === key)
-                    .map((candidate) => candidate.id);
-                  const entries = profiles.filter((entry) =>
-                    ids.includes(entry.providerId),
-                  );
-                  const current = entries.find(
-                    (entry) =>
-                      entry.status === "ready" &&
-                      "profile" in entry &&
-                      matchesAccount(account, entry.profile),
-                  );
-                  if (current && "profile" in current) {
-                    const allowed = subscriptionAccess(
-                      current.profile,
-                      current.identity,
-                      this.now(),
-                    );
-                    if (allowed !== null)
-                      await this.remember(key, !allowed, at);
-                  } else if (entries.some((entry) => entry.status === 402))
-                    await this.remember(key, true, at);
-                  return;
-                }
-              }
-              const state = await capture();
-              operationSignal.throwIfAborted();
+    const now = this.now();
+    const settled = (key: string) => {
+      const state = this.states.get(key);
+      const at = Math.max(state?.at ?? -Infinity, this.checked.get(key) ?? 0);
+      return (
+        options.reuse === true &&
+        !!state &&
+        !state.denied &&
+        now >= at &&
+        now - at < reuseAllowed
+      );
+    };
+    const background = new Set(
+      due.filter(([key]) => settled(key)).map(([key]) => key),
+    );
+    const checks = due.map(([key, account]) => {
+      if (this.pending.has(key)) return this.pending.get(key)!;
+      const at = this.now();
+      const task = (async () => {
+        try {
+          if (this.readProfiles) {
+            const profiles = await coreSnapshot();
+            operationSignal.throwIfAborted();
+            if (profiles !== null) {
               const ids = accounts
                 .filter((candidate) => accountKey(candidate) === key)
                 .map((candidate) => candidate.id);
-              const record = state.accounts
-                .filter((own) => own.providerIds.some((id) => ids.includes(id)))
-                .map((own) => own.record)
-                .filter((record) => record && record.expiresAt! > this.now())
-                .sort((a, b) => b!.expiresAt! - a!.expiresAt!)[0];
-              const oauth = record?.credential.claudeAiOauth;
-              if (
-                !record ||
-                !object(oauth) ||
-                typeof oauth.accessToken !== "string"
-              )
-                return;
-              const response = await this.fetchApi(
-                "https://api.anthropic.com/api/oauth/profile",
-                {
-                  redirect: "error",
-                  headers: {
-                    Authorization: `Bearer ${oauth.accessToken}`,
-                    Accept: "application/json",
-                    "anthropic-beta": "oauth-2025-04-20",
-                  },
-                  signal: AbortSignal.any([
-                    operationSignal,
-                    AbortSignal.timeout(5000),
-                  ]),
-                },
+              const entries = profiles.filter((entry) =>
+                ids.includes(entry.providerId),
               );
-              operationSignal.throwIfAborted();
-              if (response.status === 402) {
+              const current = entries.find(
+                (entry) =>
+                  entry.status === "ready" &&
+                  "profile" in entry &&
+                  matchesAccount(account, entry.profile),
+              );
+              if (current && "profile" in current) {
+                const allowed = subscriptionAccess(
+                  current.profile,
+                  current.identity,
+                  this.now(),
+                );
+                if (allowed !== null) await this.remember(key, !allowed, at);
+              } else if (entries.some((entry) => entry.status === 402))
                 await this.remember(key, true, at);
-                return;
-              }
-              if (!response.ok) return;
-              const allowed = subscriptionAccess(
-                await response.json(),
-                record.identity,
-                this.now(),
-              );
-              operationSignal.throwIfAborted();
-              if (allowed !== null) await this.remember(key, !allowed, at);
-            } catch {
-              operationSignal.throwIfAborted(); /* A network/auth error never clears a known denial or affects another account. */
+              return;
             }
-          })().finally(() => {
-            if (!operationSignal.aborted) this.checked.set(key, this.now());
-            if (this.pending.get(key) === task) this.pending.delete(key);
-          });
-          this.pending.set(key, task);
-          return task;
-        }),
-      ),
-      signal,
-    );
+          }
+          const state = await capture();
+          operationSignal.throwIfAborted();
+          const ids = accounts
+            .filter((candidate) => accountKey(candidate) === key)
+            .map((candidate) => candidate.id);
+          const record = state.accounts
+            .filter((own) => own.providerIds.some((id) => ids.includes(id)))
+            .map((own) => own.record)
+            .filter((record) => record && record.expiresAt! > this.now())
+            .sort((a, b) => b!.expiresAt! - a!.expiresAt!)[0];
+          const oauth = record?.credential.claudeAiOauth;
+          if (
+            !record ||
+            !object(oauth) ||
+            typeof oauth.accessToken !== "string"
+          )
+            return;
+          const response = await this.fetchApi(
+            "https://api.anthropic.com/api/oauth/profile",
+            {
+              redirect: "error",
+              headers: {
+                Authorization: `Bearer ${oauth.accessToken}`,
+                Accept: "application/json",
+                "anthropic-beta": "oauth-2025-04-20",
+              },
+              signal: AbortSignal.any([
+                operationSignal,
+                AbortSignal.timeout(5000),
+              ]),
+            },
+          );
+          operationSignal.throwIfAborted();
+          if (response.status === 402) {
+            await this.remember(key, true, at);
+            return;
+          }
+          if (!response.ok) return;
+          const allowed = subscriptionAccess(
+            await response.json(),
+            record.identity,
+            this.now(),
+          );
+          operationSignal.throwIfAborted();
+          if (allowed !== null) await this.remember(key, !allowed, at);
+        } catch (error) {
+          operationSignal.throwIfAborted(); /* A network/auth error never clears a known denial or affects another account. */
+          // Background checks fail with nobody waiting, so the reason is not lost.
+          console.warn(
+            `[aster] Claude 구독 확인 실패, 직전 판정 유지 (${account.id}): ${String(error).slice(0, 120)}`,
+          );
+        }
+      })().finally(() => {
+        if (!operationSignal.aborted) this.checked.set(key, this.now());
+        if (this.pending.get(key) === task) this.pending.delete(key);
+      });
+      this.pending.set(key, task);
+      return task;
+    });
+    // A background check settles after this call returns; disposal ends it without a waiter.
+    for (const check of checks) check.catch(() => undefined);
+    const waited = checks.filter((_, index) => !background.has(due[index][0]));
+    options.onWait?.({ waited: waited.length, background: background.size });
+    await sharedResult(Promise.all(waited), signal);
     signal.throwIfAborted();
     return accounts.filter(
       (account) => !this.states.get(accountKey(account))?.denied,
