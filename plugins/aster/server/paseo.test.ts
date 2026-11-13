@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultCommand, portableCommand, runPaseo } from "./paseo.ts";
 import { readSettings } from "./accounts.ts";
 
-test("설정 파일 없이 설치된 Paseo 명령을 사용하고 개발 프로젝트 경로를 요구하지 않는다", async () => {
+test("설정 파일 없이 설치된 Paseo 명령을 사용하고 개발 프로젝트 경로를 요구하지 않는다", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "aster-default-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   assert.deepEqual(await readSettings(join(root, "missing.json")), { command: defaultCommand(), capacities: {} });
   const file = join(root, "settings.json");
   await writeFile(file, JSON.stringify({ capacities: { example: 5 } }));
@@ -22,15 +23,17 @@ test("기존 개발용 CLI 경로는 대상 PC의 Paseo로 바꾸고 사용자 �
   assert.deepEqual(portableCommand(custom), custom);
 });
 
-test("손상된 설정 파일은 기본값으로 숨기지 않는다", async () => {
+test("손상된 설정 파일은 기본값으로 숨기지 않는다", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "aster-invalid-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "settings.json");
   await writeFile(file, "{");
   await assert.rejects(readSettings(file), SyntaxError);
 });
 
-test("외부 Node CLI 없이 명령 실행과 공백·한글 인수를 보존한다", async () => {
+test("외부 Node CLI 없이 명령 실행과 공백·한글 인수를 보존한다", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "aster-command-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "command.cjs");
   await writeFile(file, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
   const args = ["usage", "공백 포함 인수", "--home", join(root, "테스트 홈")];
