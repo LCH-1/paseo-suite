@@ -439,6 +439,8 @@ export interface CodexRoutingOptions {
   installBridge?: () => Promise<void>;
   settings?: () => Promise<{ capacities: Record<string, number> }>;
   now?: () => number;
+  /** The official `paseo agent reload` that moves a session after a turn. */
+  reload?: (agentId: string, signal: AbortSignal) => Promise<void>;
   /** Whether the opt-in Codex history retention runs (at start and daily). */
   retention?: boolean;
 }
@@ -454,7 +456,18 @@ export function registerCodexRouting(
       options.discover ??
       ((providers: Providers) => discoverCodexAccounts(providers)),
     settingsOf = options.settings ?? readSettings,
-    now = options.now ?? Date.now;
+    now = options.now ?? Date.now,
+    reloadAgent =
+      options.reload ??
+      (async (agentId: string, signal: AbortSignal) => {
+        const settings = await readSettings();
+        await runPaseo(
+          settings.command,
+          ["agent", "reload", agentId, "--json", "--home", paseoHome],
+          signal,
+          20000,
+        );
+      });
   const lifetime = new AbortController(),
     bindings = new Map<string, CodexBinding>(),
     busy = new Set<string>(),
@@ -642,7 +655,11 @@ export function registerCodexRouting(
       ),
     );
   }
-  /** No block and no reading near a limit: nothing suggests the account would refuse a turn. */
+  /**
+   * No block, and a last reading with room: nothing suggests the account would refuse a turn. No
+   * reading is not room: a failed lookup or a turn's failed login dropped it, and that account is
+   * looked up again before a session goes back to it.
+   */
   const roomLooksLeft = (account: CodexAccount, at: number) => {
     if (
       (blockedHomes.get(account.home) ?? 0) > at ||
@@ -651,22 +668,24 @@ export function registerCodexRouting(
       return false;
     const last = readings.get(readingKey(account));
     return (
-      !last ||
-      (!last.blocked &&
-        last.allowed !== false &&
-        hasCodexSubscription(last.plan) &&
-        last.windows.every(
-          (window) =>
-            window.usedPercent < NEAR_LIMIT ||
-            (window.resetsAt !== null && window.resetsAt <= at),
-        ))
+      !!last &&
+      !last.blocked &&
+      last.allowed !== false &&
+      hasCodexSubscription(last.plan) &&
+      last.windows.every(
+        (window) =>
+          window.usedPercent < NEAR_LIMIT ||
+          (window.resetsAt !== null && window.resetsAt <= at),
+      )
     );
   };
   /**
    * The account a session opens on without waiting for a new reading, or null to wait as before:
    * every account has a reading recent enough to choose with, or an existing conversation goes
-   * back to the only account, or to the one it is bound to unless that one was last seen near a
-   * limit. Readings past a minute are renewed in the background, and a turn that hits a limit or a
+   * back to the only account, or to the one it is bound to while every account has a reading and
+   * the bound one was last seen with room. A reload Aster started to move the session after a
+   * turn never takes the bound account this way, or it would stay where it was moved from.
+   * Readings past a minute are renewed in the background, and a turn that hits a limit or a
    * failed login still blocks the account and moves the session when it ends.
    */
   async function chooseNow(
@@ -712,7 +731,16 @@ export function registerCodexRouting(
             account.home === previous.home,
         )
       : undefined;
-    if (!bound || !roomLooksLeft(bound, at)) return null;
+    // Aster's own reload after a turn, or any account without a reading (its lookup failed),
+    // leaves the choice to a full one: the session goes where the turn end found a better
+    // account instead of staying where it was.
+    if (
+      !bound ||
+      reloading.has(agentId) ||
+      candidates.some((account) => !readings.has(readingKey(account))) ||
+      !roomLooksLeft(bound, at)
+    )
+      return null;
     renewOld();
     return { account: bound, how: "기존 계정" };
   }
@@ -872,15 +900,9 @@ export function registerCodexRouting(
           version !== turns.get(agent.id)
         )
           return;
-        const settings = await readSettings();
         reloading.add(agent.id);
         try {
-          await runPaseo(
-            settings.command,
-            ["agent", "reload", agent.id, "--json", "--home", paseoHome],
-            signal,
-            20000,
-          );
+          await reloadAgent(agent.id, signal);
         } finally {
           reloading.delete(agent.id);
         }
