@@ -349,15 +349,16 @@ export class SubscriptionGuard {
     const coreSnapshot = () =>
       (core ??= this.readProfiles!(requested, operationSignal));
     const now = this.now();
+    // Counted from the allowed answer itself: checks that answer nothing (a failed request, an
+    // unknown profile) never stretch it.
     const settled = (key: string) => {
       const state = this.states.get(key);
-      const at = Math.max(state?.at ?? -Infinity, this.checked.get(key) ?? 0);
       return (
         options.reuse === true &&
         !!state &&
         !state.denied &&
-        now >= at &&
-        now - at < reuseAllowed
+        now >= state.at &&
+        now - state.at < reuseAllowed
       );
     };
     const background = new Set(
