@@ -619,7 +619,7 @@ test(
     );
     await new Promise((resolve) => child.once("spawn", resolve));
     const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-    const link = path.join(t.box, "파세오.lnk");
+    const link = path.join(t.box, "Paseo-icon-test.lnk");
     const overrides = `
 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut(${quote(link)})
 $shortcut.TargetPath = ${quote(path.join(programs, "target", "Paseo.exe"))}
@@ -654,7 +654,7 @@ function Get-ResidueTasks { @() }
           )
           .map((item: { src: string }) => item.src);
       assert.ok(
-        sources("icon-only").includes("shortcut:파세오.lnk"),
+        sources("icon-only").includes("shortcut:Paseo-icon-test.lnk"),
         "IconLocation ignored",
       );
       assert.ok(
