@@ -318,13 +318,13 @@ function gatedProfiles() {
       new Promise((resolve) => {
         waiting.push(resolve);
       }),
-    /** Answers the oldest lookup, once one has been asked. */
-    answer: async (paid: boolean | 402) => {
+    /** Answers the oldest lookup, once one has been asked; "unknown" settles nothing. */
+    answer: async (paid: boolean | 402 | "unknown") => {
       for (let turn = 0; !waiting.length && turn < 50; turn++)
         await new Promise((resolve) => setImmediate(resolve));
       waiting.shift()!(
-        paid === 402
-          ? [{ providerId: "claude", status: 402 }]
+        paid === 402 || paid === "unknown"
+          ? [{ providerId: "claude", status: paid }]
           : [
               {
                 providerId: "claude",
@@ -482,6 +482,50 @@ test("재시작 뒤에도 디스크의 최근 허용 판정으로 바로 열고 
     assert.deepEqual(await stale, [account]);
   } finally {
     guards.at(-1)?.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("허용 판정 뒤 결론 없는 확인만 이어져도 그 판정에서 6시간이 지난 세션 열기는 확인을 기다린다", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "aster-subscription-unsettled-"),
+  );
+  const account = {
+    id: "claude",
+    home: directory,
+    email: "synthetic@example.invalid",
+    identity: "organization|account",
+  };
+  let now = 1800000000000;
+  const profiles = gatedProfiles();
+  const guard = new SubscriptionGuard(join(directory, "cache"), directory, {
+    now: () => now,
+    readProfiles: profiles.read,
+  });
+  const open = () =>
+    guard.filter([account], async () => ({}), new AbortController().signal, {
+      reuse: true,
+    });
+  try {
+    const first = open();
+    await profiles.answer(true);
+    assert.deepEqual(await first, [account]);
+
+    // Three hours on, a check runs behind the open and answers nothing either way.
+    now += 3 * 3_600_000;
+    const unsettled = open();
+    assert.equal(await settles(unsettled), true);
+    await profiles.answer("unknown");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Six hours after the allowed answer itself, the open waits for a check again.
+    now += 3 * 3_600_000 + 60_000;
+    const late = open();
+    assert.equal(await settles(late), false);
+    await profiles.answer(true);
+    assert.deepEqual(await late, [account]);
+  } finally {
+    guard.dispose();
     await rm(directory, { recursive: true, force: true });
   }
 });
