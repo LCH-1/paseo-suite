@@ -57,6 +57,10 @@ const CHECKPOINT_NAME =
 const REMOVING =
   /^\.(?:[a-f0-9]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[a-f0-9]{32}\.removing$/i;
 const RELEASE_REFERENCE = /releases[\\/]+([a-f0-9]{64})(?![a-f0-9])/gi;
+// The packaged main process console reaches no log file, so every run that
+// removes, fails or stops is kept here (newest last) for diagnosis.
+const CLEANUP_RECORD = "residue-cleanup.json";
+const CLEANUP_RECORD_RUNS = 20;
 
 export interface ResidueReport {
   removed: string[];
@@ -99,14 +103,17 @@ async function removeOwned(root: string, name: string, report: ResidueReport) {
  * is current, younger than 24 hours, or named by the config, installed state or
  * any checkpoint still on disk. A checkpoint that survives (or fails removal)
  * keeps its releases, so a retained rollback point never loses its plugins.
+ * Without config.json no release is judged unused. A passed report keeps what
+ * was already removed when a later step throws.
  */
 export async function pruneSuiteResidue(options: {
   home: string;
   releases: string;
   treeHash: string;
   now?: number;
+  report?: ResidueReport;
 }): Promise<ResidueReport> {
-  const report: ResidueReport = { removed: [], failed: [] };
+  const report: ResidueReport = options.report ?? { removed: [], failed: [] };
   const now = options.now ?? Date.now();
   const suite = path.join(options.home, "suite");
   const installedText = await optional(path.join(suite, "installed.json"));
@@ -134,19 +141,18 @@ export async function pruneSuiteResidue(options: {
   }
 
   // Raw text keeps every string, including provider commands and malformed JSON.
+  // A missing config (reset or mid-restore) would hide every plugin path in it.
+  const config = await optional(path.join(options.home, "config.json"));
   const referenced = new Set([options.treeHash.toLowerCase()]);
   const sources = [
-    path.join(options.home, "config.json"),
     path.join(suite, "installed.json"),
     path.join(suite, "rolled-back.json"),
     ...(await directories(checkpoints))
       .filter((name) => !REMOVING.test(name))
       .map((name) => path.join(checkpoints, name, "config.json")),
   ];
-  for (const source of sources)
-    for (const match of ((await optional(source)) ?? "").matchAll(
-      RELEASE_REFERENCE,
-    ))
+  for (const text of [config, ...(await Promise.all(sources.map(optional)))])
+    for (const match of (text ?? "").matchAll(RELEASE_REFERENCE))
       referenced.add(match[1].toLowerCase());
 
   for (const name of await directories(options.releases)) {
@@ -154,7 +160,11 @@ export async function pruneSuiteResidue(options: {
       await removeOwned(options.releases, name, report);
       continue;
     }
-    if (!RELEASE_NAME.test(name) || referenced.has(name.toLowerCase()))
+    if (
+      config === null ||
+      !RELEASE_NAME.test(name) ||
+      referenced.has(name.toLowerCase())
+    )
       continue;
     const { mtimeMs } = await fs.lstat(path.join(options.releases, name));
     if (now - mtimeMs < RELEASE_GRACE_MS) continue;
@@ -173,27 +183,68 @@ function isDefaultHome(home: string) {
     : actual === expected;
 }
 
+interface CleanupRun extends ResidueReport {
+  at: string;
+  treeHash: string;
+  error?: string;
+}
+
+async function recordCleanup(file: string, run: CleanupRun) {
+  let runs: unknown[] = [];
+  try {
+    const previous = JSON.parse((await optional(file)) ?? "{}") as {
+      runs?: unknown;
+    };
+    if (Array.isArray(previous.runs)) runs = previous.runs;
+  } catch {
+    // A damaged history is replaced; it never decides what is removed.
+  }
+  await atomic(
+    file,
+    JSON.stringify(
+      { schemaVersion: 1, runs: [...runs, run].slice(-CLEANUP_RECORD_RUNS) },
+      null,
+      2,
+    ) + "\n",
+  );
+}
+
 async function cleanupResidue(home: string, release: string, treeHash: string) {
   if (!isDefaultHome(home)) return;
+  const run: CleanupRun = {
+    at: new Date().toISOString(),
+    treeHash,
+    removed: [],
+    failed: [],
+  };
   try {
-    const report = await pruneSuiteResidue({
+    await pruneSuiteResidue({
       home,
       releases: path.dirname(release),
       treeHash,
+      report: run,
     });
-    if (report.removed.length || report.failed.length)
-      console.info(
-        `[suite] residue cleanup removed ${report.removed.length}` +
-          (report.failed.length
-            ? `, kept ${report.failed.length} in use or locked (${report.failed
-                .map((entry) => `${entry.name}: ${entry.code}`)
-                .join(", ")}); retried at next start`
-            : ""),
-      );
   } catch (error) {
     // Cleanup must never block startup; the next start retries.
+    run.error = (error as Error).message ?? String(error);
+  }
+  if (!run.removed.length && !run.failed.length && !run.error) return;
+  const file = path.join(home, "suite", CLEANUP_RECORD);
+  const summary =
+    `[suite] residue cleanup removed ${run.removed.length}` +
+    (run.failed.length
+      ? `, kept ${run.failed.length} in use or locked (${run.failed
+          .map((entry) => `${entry.name}: ${entry.code}`)
+          .join(", ")}); retried at next start`
+      : "") +
+    (run.error ? `; stopped: ${run.error}` : "");
+  if (run.error) console.warn(`${summary} (details: ${file})`);
+  else console.info(`${summary} (details: ${file})`);
+  try {
+    await recordCleanup(file, run);
+  } catch (error) {
     console.warn(
-      `[suite] residue cleanup skipped: ${(error as Error).message}`,
+      `[suite] residue cleanup record not saved: ${(error as Error).message}`,
     );
   }
 }

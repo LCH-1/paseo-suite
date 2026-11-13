@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import { prepare } from "../tools/bootstrap";
 
@@ -82,6 +82,13 @@ async function sandbox() {
     release,
     checkpoint,
     exists,
+    record: async () =>
+      JSON.parse(
+        await fs.readFile(
+          path.join(home, "suite/residue-cleanup.json"),
+          "utf8",
+        ),
+      ),
     context: (overrides: Partial<{ home: string; running: boolean }> = {}) => ({
       home: overrides.home ?? home,
       resourcesPath,
@@ -277,6 +284,7 @@ test("사용 중이거나 읽을 수 없는 잔여물은 건너뛰고 앱 시작
     );
     const free = await box.release(hex("free"), 3 * DAY);
     await fs.mkdir(path.join(box.home, "suite"), { recursive: true });
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
     await fs.writeFile(
       path.join(box.home, "suite/installed.json"),
       JSON.stringify({
@@ -309,6 +317,17 @@ test("사용 중이거나 읽을 수 없는 잔여물은 건너뛰고 앱 시작
           `a release in use was partially deleted: ${file}`,
         );
     assert.equal(await box.exists(free), false);
+    // The packaged main process console reaches no log file; the record does.
+    const first = (await box.record()).runs.at(-1);
+    assert.match(first.at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(first.treeHash, box.treeHash);
+    assert.deepEqual(first.removed, [`releases/${hex("free")}`]);
+    if (process.platform === "win32")
+      assert.deepEqual(
+        first.failed.map((entry: { name: string }) => entry.name),
+        [`releases/${hex("busy")}`],
+      );
+    for (const entry of first.failed) assert.match(entry.code, /^E[A-Z]+$/);
 
     // An unreadable checkpoint root stops this cleanup; startup still succeeds.
     const orphan = await box.release(hex("orphan"), 3 * DAY);
@@ -325,7 +344,154 @@ test("사용 중이거나 읽을 수 없는 잔여물은 건너뛰고 앱 시작
       await box.exists(orphan),
       "cleanup continued after an unreadable checkpoint root",
     );
+    const { runs } = await box.record();
+    assert.equal(runs.length, 2);
+    assert.match(runs[1].error, /checkpoints/);
+    assert.deepEqual(runs[1].removed, []);
   } finally {
+    await box.dispose();
+  }
+});
+
+test("정리 기록은 할 일이 없으면 쓰지 않고 손상돼도 새로 쓰며 최근 20회만 남긴다", async () => {
+  const box = await sandbox();
+  try {
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    await box.checkpoint(uuid("1"), 1 * DAY, {});
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash: box.treeHash,
+        checkpoint: path.join(box.home, "suite/checkpoints", uuid("1")),
+        nativeUsagePending: false,
+      }),
+    );
+    const file = path.join(box.home, "suite/residue-cleanup.json");
+    await prepare(box.context());
+    assert.equal(await box.exists(file), false, "idle start wrote a record");
+
+    await fs.writeFile(file, "{ damaged");
+    await box.release(hex("first"), 3 * DAY);
+    await prepare(box.context());
+    assert.deepEqual(
+      (await box.record()).runs.map(
+        (run: { removed: string[] }) => run.removed,
+      ),
+      [[`releases/${hex("first")}`]],
+    );
+
+    const old = Array.from({ length: 25 }, (_, index) => ({
+      at: `old-${index}`,
+      removed: [],
+      failed: [],
+    }));
+    await fs.writeFile(file, JSON.stringify({ schemaVersion: 1, runs: old }));
+    await box.release(hex("second"), 3 * DAY);
+    await prepare(box.context());
+    const { runs } = await box.record();
+    assert.equal(runs.length, 20);
+    assert.equal(runs[0].at, "old-6");
+    assert.deepEqual(runs.at(-1).removed, [`releases/${hex("second")}`]);
+  } finally {
+    await box.dispose();
+  }
+});
+
+test("config.json 이 없으면 release 를 쓰이지 않는다고 판정하지 않는다", async () => {
+  const box = await sandbox();
+  try {
+    const orphan = await box.release(hex("only-in-config"), 3 * DAY);
+    await box.checkpoint(uuid("1"), 1 * DAY, {});
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash: box.treeHash,
+        checkpoint: path.join(box.home, "suite/checkpoints", uuid("1")),
+        nativeUsagePending: false,
+      }),
+    );
+    await prepare(box.context());
+    assert.ok(await box.exists(orphan), "release removed without a config");
+
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    await prepare(box.context());
+    assert.equal(await box.exists(orphan), false);
+  } finally {
+    await box.dispose();
+  }
+});
+
+test("release 형식이 아닌 폴더·rolled-back.json 이 가리키는 release·release 이름의 링크·삭제에 실패한 체크포인트가 가리키는 release 는 남긴다", async () => {
+  const box = await sandbox();
+  let holder: ChildProcess | undefined;
+  try {
+    const { releases, treeHash } = box;
+    const foreign = path.join(releases, "manual-backup");
+    await fs.mkdir(foreign, { recursive: true });
+    await fs.utimes(
+      foreign,
+      new Date(Date.now() - 9 * DAY),
+      new Date(Date.now() - 9 * DAY),
+    );
+    const rolledBack = await box.release(hex("rolled-back"), 9 * DAY);
+    // A link named like a release is neither followed nor removed.
+    const outside = path.join(box.root, "outside");
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, "keep.txt"), "not owned");
+    const link = path.join(releases, hex("link"));
+    await fs.symlink(outside, link, "junction");
+    const at = new Date(Date.now() - 9 * DAY);
+    await fs.lutimes(link, at, at);
+    const fromLocked = await box.release(hex("locked-checkpoint"), 9 * DAY);
+
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    const installed = await box.checkpoint(uuid("1"), 1 * DAY, {});
+    for (const digit of ["2", "3"]) await box.checkpoint(uuid(digit), 2 * DAY);
+    const locked = await box.checkpoint(uuid("4"), 9 * DAY, {
+      plugins: { ui: { path: path.join(fromLocked, "plugins/ui") } },
+    });
+    const pruned = await box.checkpoint(uuid("5"), 10 * DAY, {});
+    await fs.writeFile(
+      path.join(box.home, "suite/rolled-back.json"),
+      JSON.stringify({ release: rolledBack }),
+    );
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash,
+        checkpoint: installed,
+        nativeUsagePending: false,
+      }),
+    );
+    holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], {
+      cwd: locked,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    await new Promise((resolve) => holder!.once("spawn", resolve));
+    await prepare(box.context());
+
+    for (const kept of [foreign, rolledBack, link])
+      assert.ok(await box.exists(kept), `kept: ${path.basename(kept)}`);
+    assert.ok(
+      await box.exists(path.join(outside, "keep.txt")),
+      "link was followed",
+    );
+    assert.equal(await box.exists(pruned), false);
+    if (process.platform === "win32") {
+      // Windows refuses to rename a checkpoint in use; it stays a rollback point.
+      assert.ok(await box.exists(locked), "checkpoint in use was removed");
+      assert.ok(
+        await box.exists(fromLocked),
+        "release of a checkpoint that failed removal was removed",
+      );
+    }
+  } finally {
+    holder?.kill();
+    if (holder) await new Promise((resolve) => holder!.once("exit", resolve));
     await box.dispose();
   }
 });
