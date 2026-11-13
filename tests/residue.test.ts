@@ -383,7 +383,9 @@ test("격리는 미리보기가 기본이고 실행 직전 다시 판정해 사�
       fs.existsSync(path.join(t.installs, "old-b")),
       "folder pinned after the plan was moved",
     );
-    if (process.platform === "win32") {
+    // The rename refusal is only a last line of defence, and only where the OS enforces it:
+    // some Windows runners let a directory that is another process's cwd be renamed.
+    if (process.platform === "win32" && (await renameOfBusyDirectoryFails())) {
       assert.ok(
         fs.existsSync(path.join(t.installs, "busy", "Paseo.exe")),
         "folder in use was moved",
@@ -991,3 +993,28 @@ test(
     }
   },
 );
+
+/** Whether this machine refuses to rename a directory that a live process uses as its cwd. */
+async function renameOfBusyDirectoryFails(): Promise<boolean> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "residue-rename-probe-"));
+  const busy = path.join(root, "busy");
+  fs.mkdirSync(busy);
+  const holder = spawn(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 10000)"],
+    { cwd: busy, stdio: "ignore", windowsHide: true },
+  );
+  try {
+    await new Promise((resolve) => holder.once("spawn", resolve));
+    try {
+      fs.renameSync(busy, path.join(root, "moved"));
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    holder.kill();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
