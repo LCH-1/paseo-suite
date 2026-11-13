@@ -47,6 +47,157 @@ interface Lock {
   compatibility?: Lock["plugins"];
 }
 
+const RELEASE_GRACE_MS = 24 * 60 * 60 * 1000;
+const RECENT_CHECKPOINTS = 3;
+const RELEASE_NAME = /^[a-f0-9]{64}$/i;
+const CHECKPOINT_NAME =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A removal is a same-directory rename first, so a half-deleted folder never
+// keeps a valid name. Leftovers of an interrupted removal are retried here.
+const REMOVING =
+  /^\.(?:[a-f0-9]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[a-f0-9]{32}\.removing$/i;
+const RELEASE_REFERENCE = /releases[\\/]+([a-f0-9]{64})(?![a-f0-9])/gi;
+
+export interface ResidueReport {
+  removed: string[];
+  failed: Array<{ name: string; code: string }>;
+}
+
+async function directories(root: string) {
+  const entries = await fs
+    .readdir(root, { withFileTypes: true })
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+  // Junctions and symbolic links are reported as links and never followed.
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+}
+
+async function removeOwned(root: string, name: string, report: ResidueReport) {
+  const staging = REMOVING.test(name)
+    ? path.join(root, name)
+    : path.join(root, `.${name}.${randomUUID().replaceAll("-", "")}.removing`);
+  try {
+    // Windows refuses to rename a folder that a process still uses.
+    if (staging !== path.join(root, name))
+      await fs.rename(path.join(root, name), staging);
+    await fs.rm(staging, { recursive: true, force: true });
+    report.removed.push(`${path.basename(root)}/${name}`);
+  } catch (error) {
+    report.failed.push({
+      name: `${path.basename(root)}/${name}`,
+      code: (error as NodeJS.ErrnoException).code ?? "unknown",
+    });
+  }
+}
+
+/**
+ * Keeps the installed checkpoint plus the newest three, then every release that
+ * is current, younger than 24 hours, or named by the config, installed state or
+ * any checkpoint still on disk. A checkpoint that survives (or fails removal)
+ * keeps its releases, so a retained rollback point never loses its plugins.
+ */
+export async function pruneSuiteResidue(options: {
+  home: string;
+  releases: string;
+  treeHash: string;
+  now?: number;
+}): Promise<ResidueReport> {
+  const report: ResidueReport = { removed: [], failed: [] };
+  const now = options.now ?? Date.now();
+  const suite = path.join(options.home, "suite");
+  const installedText = await optional(path.join(suite, "installed.json"));
+  if (installedText === null) return report;
+  const installed = JSON.parse(installedText) as { checkpoint?: unknown };
+  const current =
+    typeof installed.checkpoint === "string"
+      ? path.basename(installed.checkpoint).toLowerCase()
+      : null;
+
+  const checkpoints = path.join(suite, "checkpoints");
+  const candidates: Array<{ name: string; modified: number }> = [];
+  for (const name of await directories(checkpoints)) {
+    if (REMOVING.test(name)) await removeOwned(checkpoints, name, report);
+    else if (CHECKPOINT_NAME.test(name))
+      candidates.push({
+        name,
+        modified: (await fs.lstat(path.join(checkpoints, name))).mtimeMs,
+      });
+  }
+  candidates.sort((a, b) => b.modified - a.modified);
+  for (const [index, { name }] of candidates.entries()) {
+    if (index < RECENT_CHECKPOINTS || name.toLowerCase() === current) continue;
+    await removeOwned(checkpoints, name, report);
+  }
+
+  // Raw text keeps every string, including provider commands and malformed JSON.
+  const referenced = new Set([options.treeHash.toLowerCase()]);
+  const sources = [
+    path.join(options.home, "config.json"),
+    path.join(suite, "installed.json"),
+    path.join(suite, "rolled-back.json"),
+    ...(await directories(checkpoints))
+      .filter((name) => !REMOVING.test(name))
+      .map((name) => path.join(checkpoints, name, "config.json")),
+  ];
+  for (const source of sources)
+    for (const match of ((await optional(source)) ?? "").matchAll(
+      RELEASE_REFERENCE,
+    ))
+      referenced.add(match[1].toLowerCase());
+
+  for (const name of await directories(options.releases)) {
+    if (REMOVING.test(name)) {
+      await removeOwned(options.releases, name, report);
+      continue;
+    }
+    if (!RELEASE_NAME.test(name) || referenced.has(name.toLowerCase()))
+      continue;
+    const { mtimeMs } = await fs.lstat(path.join(options.releases, name));
+    if (now - mtimeMs < RELEASE_GRACE_MS) continue;
+    await removeOwned(options.releases, name, report);
+  }
+  return report;
+}
+
+// The releases folder is shared by every PASEO_HOME of this OS user, so only the
+// default home decides which releases are still needed.
+function isDefaultHome(home: string) {
+  const expected = path.resolve(os.homedir(), ".paseo");
+  const actual = path.resolve(home);
+  return process.platform === "win32"
+    ? actual.toLowerCase() === expected.toLowerCase()
+    : actual === expected;
+}
+
+async function cleanupResidue(home: string, release: string, treeHash: string) {
+  if (!isDefaultHome(home)) return;
+  try {
+    const report = await pruneSuiteResidue({
+      home,
+      releases: path.dirname(release),
+      treeHash,
+    });
+    if (report.removed.length || report.failed.length)
+      console.info(
+        `[suite] residue cleanup removed ${report.removed.length}` +
+          (report.failed.length
+            ? `, kept ${report.failed.length} in use or locked (${report.failed
+                .map((entry) => `${entry.name}: ${entry.code}`)
+                .join(", ")}); retried at next start`
+            : ""),
+      );
+  } catch (error) {
+    // Cleanup must never block startup; the next start retries.
+    console.warn(
+      `[suite] residue cleanup skipped: ${(error as Error).message}`,
+    );
+  }
+}
+
 export async function prepare(context: Context) {
   const { home, executable, resourcesPath } = context;
   const bundle = context.bundlePath ?? path.join(resourcesPath, "suite");
@@ -128,8 +279,12 @@ export async function prepare(context: Context) {
     oldState &&
     JSON.parse(oldState).treeHash === lock.treeHash &&
     (!JSON.parse(oldState).nativeUsagePending || running)
-  )
+  ) {
+    // A pending native usage switch keeps the old host's sources until restart.
+    if (!JSON.parse(oldState).nativeUsagePending)
+      await cleanupResidue(home, release, lock.treeHash);
     return;
+  }
   const configPath = path.join(home, "config.json");
   const raw = await optional(configPath);
   const config: Config = raw === null ? {} : JSON.parse(raw);
@@ -338,4 +493,5 @@ export async function prepare(context: Context) {
     }
     throw error;
   }
+  if (!running) await cleanupResidue(home, release, lock.treeHash);
 }
