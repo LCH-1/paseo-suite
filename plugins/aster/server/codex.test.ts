@@ -1075,6 +1075,7 @@ function codexRouting(
       installBridge: async () => {},
       settings: async () => ({ capacities: {} }),
       now: () => clock,
+      retention: false,
       inspect: (_command, _home, identity) =>
         new Promise((resolve) => {
           lookups.push({ identity, answer: resolve });
