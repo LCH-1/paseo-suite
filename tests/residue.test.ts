@@ -468,6 +468,30 @@ test("체크포인트를 먼저 격리하면 그 체크포인트만 가리키던
   }
 });
 
+test("체크포인트는 bootstrap 과 같이 설정이 같은 사본(실패한 이전 시도의 흔적)을 최근 개수에 세지 않는다", () => {
+  const t = sandbox();
+  try {
+    seed(t);
+    // Two newer copies of the newest checkpoint's config.
+    for (const digit of ["6", "7"]) {
+      const target = path.join(t.checkpoints, uuid(digit));
+      t.write(path.join(target, "config.json"), JSON.stringify({}));
+      t.age(target, 1.5 * DAY);
+    }
+    const { action, reasons } = t.plan("checkpoints");
+    for (const digit of ["1", "2", "3", "4"])
+      assert.equal(
+        action("checkpoints", uuid(digit)),
+        "KEEP",
+        `${digit}: ${reasons("checkpoints", uuid(digit)).join("; ")}`,
+      );
+    for (const digit of ["5", "6", "7"])
+      assert.equal(action("checkpoints", uuid(digit)), "PRUNE", digit);
+  } finally {
+    t.dispose();
+  }
+});
+
 test("참조 수집이 실패하거나 살아 있는 데몬이 목록에 없으면 모두 KEEP 이고 격리를 거부한다", () => {
   const t = sandbox();
   try {

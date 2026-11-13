@@ -89,11 +89,22 @@ async function sandbox() {
           "utf8",
         ),
       ),
-    context: (overrides: Partial<{ home: string; running: boolean }> = {}) => ({
+    resourcesPath,
+    checkpoints: async () =>
+      (await fs.readdir(path.join(home, "suite/checkpoints"))).sort(),
+    context: (
+      overrides: Partial<{
+        home: string;
+        running: boolean;
+        executable: string;
+        isDaemonRunning: () => Promise<boolean>;
+      }> = {},
+    ) => ({
       home: overrides.home ?? home,
       resourcesPath,
-      executable: "unused",
-      isDaemonRunning: async () => overrides.running ?? false,
+      executable: overrides.executable ?? "unused",
+      isDaemonRunning:
+        overrides.isDaemonRunning ?? (async () => overrides.running ?? false),
     }),
     async dispose() {
       for (const [key, value] of Object.entries(saved)) {
@@ -218,8 +229,9 @@ test("업데이트 완료 경로도 정리하고 새 체크포인트를 남긴�
   try {
     const orphan = await box.release(hex("previous-update"), 3 * DAY);
     const stale = [];
+    // Distinct configs: each one is a separate rollback point.
     for (const digit of ["5", "6", "7", "8"])
-      stale.push(await box.checkpoint(uuid(digit), 5 * DAY, {}));
+      stale.push(await box.checkpoint(uuid(digit), 5 * DAY, { digit }));
     await prepare(box.context());
     const state = JSON.parse(
       await fs.readFile(path.join(box.home, "suite/installed.json"), "utf8"),
@@ -448,7 +460,8 @@ test("release 형식이 아닌 폴더·rolled-back.json 이 가리키는 release
 
     await fs.writeFile(path.join(box.home, "config.json"), "{}");
     const installed = await box.checkpoint(uuid("1"), 1 * DAY, {});
-    for (const digit of ["2", "3"]) await box.checkpoint(uuid(digit), 2 * DAY);
+    for (const digit of ["2", "3"])
+      await box.checkpoint(uuid(digit), 2 * DAY, { digit });
     const locked = await box.checkpoint(uuid("4"), 9 * DAY, {
       plugins: { ui: { path: path.join(fromLocked, "plugins/ui") } },
     });
@@ -492,6 +505,205 @@ test("release 형식이 아닌 폴더·rolled-back.json 이 가리키는 release
   } finally {
     holder?.kill();
     if (holder) await new Promise((resolve) => holder!.once("exit", resolve));
+    await box.dispose();
+  }
+});
+
+test("실패한 이전 시도는 체크포인트를 남기지 않아 정상 롤백 지점과 그 release 를 밀어내지 않는다", async () => {
+  const box = await sandbox();
+  try {
+    const running = await box.release(hex("running-release"), 9 * DAY);
+    const fromB = await box.release(hex("rollback-b"), 9 * DAY);
+    const fromC = await box.release(hex("rollback-c"), 9 * DAY);
+    const pointB = await box.checkpoint(uuid("b"), 5 * DAY, {
+      plugins: { ui: { path: path.join(fromB, "plugins/ui") } },
+    });
+    const pointC = await box.checkpoint(uuid("c"), 4 * DAY, {
+      plugins: { ui: { path: path.join(fromC, "plugins/ui") } },
+    });
+    const configPath = path.join(box.home, "config.json");
+    const config = {
+      plugins: { ui: { path: path.join(running, "plugins/ui") } },
+    };
+    await fs.writeFile(configPath, JSON.stringify(config));
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash: hex("previous-lock"),
+        checkpoint: pointC,
+        nativeUsagePending: false,
+      }),
+    );
+    const before = await box.checkpoints();
+
+    // The offline migration sees a daemon start, then a config edit, half way.
+    let calls = 0;
+    await assert.rejects(
+      prepare(box.context({ isDaemonRunning: async () => ++calls === 2 })),
+      /daemon started during offline migration/,
+    );
+    calls = 0;
+    await assert.rejects(
+      prepare(
+        box.context({
+          isDaemonRunning: async () => {
+            if (++calls === 2)
+              await fs.writeFile(
+                configPath,
+                JSON.stringify({ ...config, edited: true }),
+              );
+            return false;
+          },
+        }),
+      ),
+      /Config changed during Suite migration/,
+    );
+    assert.deepEqual(
+      await box.checkpoints(),
+      before,
+      "a failed attempt left a checkpoint",
+    );
+
+    await prepare(box.context());
+    const state = JSON.parse(
+      await fs.readFile(path.join(box.home, "suite/installed.json"), "utf8"),
+    );
+    assert.deepEqual(
+      await box.checkpoints(),
+      [path.basename(state.checkpoint), ...before].sort(),
+    );
+    for (const kept of [pointB, pointC, fromB, fromC, running])
+      assert.ok(await box.exists(kept), `kept: ${path.basename(kept)}`);
+  } finally {
+    await box.dispose();
+  }
+});
+
+test("같은 설정을 복사한 체크포인트(실패하거나 끊긴 이전 시도의 흔적)는 최근 3개 자리를 차지하지 않고 지워진다", async () => {
+  const box = await sandbox();
+  try {
+    const fromA = await box.release(hex("rollback-a"), 9 * DAY);
+    const fromB = await box.release(hex("rollback-b"), 9 * DAY);
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    const same = {
+      plugins: {
+        ui: { path: path.join(box.releases, box.treeHash, "plugins/ui") },
+      },
+    };
+    const installed = await box.checkpoint(uuid("1"), 1 * DAY, same);
+    const copies = [];
+    for (const digit of ["2", "3", "4"])
+      copies.push(await box.checkpoint(uuid(digit), 2 * DAY, same));
+    const pointB = await box.checkpoint(uuid("5"), 5 * DAY, {
+      plugins: { ui: { path: path.join(fromB, "plugins/ui") } },
+    });
+    const pointA = await box.checkpoint(uuid("6"), 6 * DAY, {
+      plugins: { ui: { path: path.join(fromA, "plugins/ui") } },
+    });
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash: box.treeHash,
+        checkpoint: installed,
+        nativeUsagePending: false,
+      }),
+    );
+
+    await prepare(box.context());
+
+    for (const kept of [installed, pointB, pointA, fromB, fromA])
+      assert.ok(await box.exists(kept), `kept: ${path.basename(kept)}`);
+    for (const copy of copies)
+      assert.equal(
+        await box.exists(copy),
+        false,
+        `duplicate kept: ${path.basename(copy)}`,
+      );
+  } finally {
+    await box.dispose();
+  }
+});
+
+test("실행 중 호스트에서 플러그인을 바꾸기 전에 실패한 시도는 체크포인트를 지우고 바꾸기 시작한 뒤 실패하면 남긴다", async () => {
+  const box = await sandbox();
+  try {
+    const runner = path.join(
+      box.resourcesPath,
+      "app.asar.unpacked/dist/daemon/node-entrypoint-runner.js",
+    );
+    await fs.mkdir(path.dirname(runner), { recursive: true });
+    // A fake CLI: argv is [node, runner, "node-script", entry, "--home", home, ...command].
+    const cli = (list: boolean) =>
+      fs.writeFile(
+        runner,
+        `const command = process.argv.slice(6);\n` +
+          `if (${list} && command[0] === "plugin" && command[1] === "ls") console.log("[]");\n` +
+          `else process.exit(3);\n`,
+      );
+    await fs.writeFile(path.join(box.home, "config.json"), "{}");
+    await fs.mkdir(path.join(box.home, "suite/checkpoints"), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(box.home, "suite/installed.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        treeHash: hex("previous-lock"),
+        nativeUsagePending: false,
+      }),
+    );
+    const context = box.context({
+      running: true,
+      executable: process.execPath,
+    });
+
+    await cli(false);
+    await assert.rejects(prepare(context));
+    assert.deepEqual(
+      await box.checkpoints(),
+      [],
+      "nothing was changed, yet the checkpoint stayed",
+    );
+
+    await cli(true);
+    await assert.rejects(prepare(context));
+    assert.equal(
+      (await box.checkpoints()).length,
+      1,
+      "a plugin change was attempted, but its checkpoint was removed",
+    );
+  } finally {
+    await box.dispose();
+  }
+});
+
+test("오프라인 이전이 설정을 쓴 뒤 실패하면 설정을 되돌리고 그 체크포인트도 지운다", async () => {
+  const box = await sandbox();
+  try {
+    const configPath = path.join(box.home, "config.json");
+    const raw = JSON.stringify({ custom: { preserved: true } });
+    await fs.writeFile(configPath, raw);
+    await fs.mkdir(path.join(box.home, "suite/checkpoints"), {
+      recursive: true,
+    });
+    // Right before the config is written, installed.json turns into a folder,
+    // so the state write after it fails.
+    let calls = 0;
+    const context = box.context({
+      isDaemonRunning: async () => {
+        if (++calls === 2)
+          await fs.mkdir(path.join(box.home, "suite/installed.json/blocker"), {
+            recursive: true,
+          });
+        return false;
+      },
+    });
+    await assert.rejects(prepare(context));
+    assert.equal(await fs.readFile(configPath, "utf8"), raw);
+    assert.deepEqual(await box.checkpoints(), []);
+  } finally {
     await box.dispose();
   }
 });

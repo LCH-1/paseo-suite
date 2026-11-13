@@ -85,7 +85,9 @@ async function removeOwned(root: string, name: string, report: ResidueReport) {
     ? path.join(root, name)
     : path.join(root, `.${name}.${randomUUID().replaceAll("-", "")}.removing`);
   try {
-    // Windows refuses to rename a folder that a process still uses.
+    // Windows refuses this rename only while a process works in the folder or
+    // holds a file open there, not for a running exe or a loaded module; the
+    // reference checks above are the real protection.
     if (staging !== path.join(root, name))
       await fs.rename(path.join(root, name), staging);
     await fs.rm(staging, { recursive: true, force: true });
@@ -99,12 +101,15 @@ async function removeOwned(root: string, name: string, report: ResidueReport) {
 }
 
 /**
- * Keeps the installed checkpoint plus the newest three, then every release that
- * is current, younger than 24 hours, or named by the config, installed state or
- * any checkpoint still on disk. A checkpoint that survives (or fails removal)
- * keeps its releases, so a retained rollback point never loses its plugins.
- * Without config.json no release is judged unused. A passed report keeps what
- * was already removed when a later step throws.
+ * Keeps the installed checkpoint plus the newest three distinct rollback points,
+ * then every release that is current, younger than 24 hours, or named by the
+ * config, installed state or any checkpoint still on disk. A checkpoint whose
+ * config.json equals a newer kept one (a failed or interrupted migration copied
+ * the same config) restores nothing else, so it takes no place and goes. A
+ * checkpoint that survives (or fails removal) keeps its releases, so a retained
+ * rollback point never loses its plugins. Without config.json no release is
+ * judged unused. A passed report keeps what was already removed when a later
+ * step throws.
  */
 export async function pruneSuiteResidue(options: {
   home: string;
@@ -125,18 +130,34 @@ export async function pruneSuiteResidue(options: {
       : null;
 
   const checkpoints = path.join(suite, "checkpoints");
-  const candidates: Array<{ name: string; modified: number }> = [];
+  const candidates: Array<{
+    name: string;
+    modified: number;
+    config: string | null;
+  }> = [];
   for (const name of await directories(checkpoints)) {
     if (REMOVING.test(name)) await removeOwned(checkpoints, name, report);
-    else if (CHECKPOINT_NAME.test(name))
+    else if (CHECKPOINT_NAME.test(name)) {
+      const body = await optional(path.join(checkpoints, name, "config.json"));
       candidates.push({
         name,
         modified: (await fs.lstat(path.join(checkpoints, name))).mtimeMs,
+        config: body === null ? null : hash(body),
       });
+    }
   }
   candidates.sort((a, b) => b.modified - a.modified);
-  for (const [index, { name }] of candidates.entries()) {
-    if (index < RECENT_CHECKPOINTS || name.toLowerCase() === current) continue;
+  const kept = new Set<string | null>();
+  for (const { name, config } of candidates) {
+    const installedPoint = name.toLowerCase() === current;
+    if (
+      !kept.has(config) &&
+      (installedPoint || kept.size < RECENT_CHECKPOINTS)
+    ) {
+      kept.add(config);
+      continue;
+    }
+    if (installedPoint) continue;
     await removeOwned(checkpoints, name, report);
   }
 
@@ -371,6 +392,8 @@ export async function prepare(context: Context) {
   }> = [];
   let onlineAdapter: PluginAdapter | undefined;
   let onlineApplied = false;
+  // Set before the first plugin is removed or installed on the running host.
+  let pluginsTouched = false;
   let offlineConfig: string | undefined;
   const seed = async (relative: string, body: string) => {
     const target = path.join(home, relative);
@@ -488,11 +511,13 @@ export async function prepare(context: Context) {
             ]),
           ),
         remove: async (id: string) => {
+          pluginsTouched = true;
           await preserveSettings(id);
           await cli("plugin", "remove", id);
           await restoreSettings(id);
         },
         install: async (id: string, source: PluginSource) => {
+          pluginsTouched = true;
           await restoreSettings(id);
           await cli("plugin", "install", source.path, "--id", id);
           if (source.enabled === false) await cli("plugin", "disable", id);
@@ -542,6 +567,16 @@ export async function prepare(context: Context) {
       if ((await optional(file.path)) === file.written)
         await fs.unlink(file.path);
     }
+    // Nothing of this attempt is left to undo, so its checkpoint is no rollback
+    // point. Kept, every failed start would add one more copy of the config.
+    // A config this attempt wrote and someone then replaced keeps it.
+    if (
+      !pluginsTouched &&
+      (offlineConfig === undefined || (await optional(configPath)) === raw)
+    )
+      await fs
+        .rm(checkpoint, { recursive: true, force: true })
+        .catch(() => undefined);
     throw error;
   }
   if (!running) await cleanupResidue(home, release, lock.treeHash);

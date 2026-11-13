@@ -565,6 +565,36 @@ function checkpointOrder(o) {
   return entries;
 }
 
+// 남는 체크포인트 = installed.json 이 가리키는 것 + config.json 내용이 서로 다른 최근 N개
+// (tools/bootstrap.ts 와 같은 규칙). 실패·중단된 이전 시도가 남긴 같은 설정 사본은 자리를 차지하지 않는다.
+function retainedCheckpoints(o, current) {
+  const kept = new Set();
+  const retained = new Set();
+  for (const { name } of checkpointOrder(o)) {
+    let key = null;
+    try {
+      key = crypto
+        .createHash("sha256")
+        .update(
+          fs.readFileSync(path.join(o.roots.checkpoints, name, "config.json")),
+        )
+        .digest("hex");
+    } catch (error) {
+      // 읽지 못한 설정은 다른 것과 같다고 보지 않는다.
+      if (error.code !== "ENOENT") key = `unreadable:${name}`;
+    }
+    const lower = name.toLowerCase();
+    if (
+      !kept.has(key) &&
+      (lower === current || kept.size < o.keepCheckpoints)
+    ) {
+      kept.add(key);
+      retained.add(lower);
+    } else if (lower === current) retained.add(lower);
+  }
+  return retained;
+}
+
 function collectConfigRefs(refs, o) {
   const info = {
     daemon: null,
@@ -594,12 +624,7 @@ function collectConfigRefs(refs, o) {
     path.join(o.home, "suite", "rolled-back.json"),
     "rolled-back.json",
   );
-  // 남는 체크포인트 = installed.json 이 가리키는 것 + 최근 N개(tools/bootstrap.ts 와 같은 규칙).
-  const order = checkpointOrder(o);
-  const retained = new Set(
-    order.slice(0, o.keepCheckpoints).map((entry) => entry.name.toLowerCase()),
-  );
-  if (info.currentCheckpoint) retained.add(info.currentCheckpoint);
+  const retained = retainedCheckpoints(o, info.currentCheckpoint);
   info.retainedCheckpoints = [...retained];
   // 디스크에 있는 모든 체크포인트의 모든 문자열(plugins·providers)을 보호한다. 정리 후보 체크포인트의
   // 참조도 그 체크포인트가 실제로 격리될 때까지는 지킨다(체크포인트 → release 순서로 정리).
@@ -813,7 +838,8 @@ function planReleases(ctx) {
 function planCheckpoints(ctx) {
   const { o } = ctx;
   // 제품(bootstrap)이 만든 UUID 이름만 다룬다. 사람이 둔 다른 폴더(예: 대화 기록 사본)는 대상이 아니다.
-  const items = checkpointOrder(o).map((entry, index) => {
+  const retained = new Set(ctx.config.retainedCheckpoints);
+  const items = checkpointOrder(o).map((entry) => {
     const result = item(
       o,
       "checkpoints",
@@ -821,9 +847,11 @@ function planCheckpoints(ctx) {
       path.join(o.roots.checkpoints, entry.name),
     );
     result.sizeMb = sizeMb(result.path);
-    if (ctx.config.currentCheckpoint === entry.name.toLowerCase())
+    const name = entry.name.toLowerCase();
+    if (ctx.config.currentCheckpoint === name)
       keep(result, "installed.json 현재 checkpoint");
-    if (index < o.keepCheckpoints) keep(result, `최근 ${o.keepCheckpoints}개`);
+    else if (retained.has(name))
+      keep(result, `설정이 서로 다른 최근 ${o.keepCheckpoints}개`);
     return result;
   });
   return { items };
