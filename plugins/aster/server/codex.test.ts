@@ -1342,6 +1342,51 @@ test("Codex 계정이 여럿이면 2분 안 판독만 재사용해 분배하고 
   }
 });
 
+test("Codex 계정이 여럿이면 차단 전이어도 90% 이상 쓴 것으로 마지막에 본 기존 계정으로는 바로 재개하지 않고 새 판독을 기다려 여유 계정으로 옮긴다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+  ]);
+  try {
+    const first = routing.open("s", "create");
+    await routing.answer("a", 10);
+    await routing.answer("b", 50);
+    assert.equal(openedOn(await first), "a");
+
+    // Past the ten-minute hold another open finds a nearly spent, though not blocked yet.
+    routing.advance(11 * 60_000);
+    const other = routing.open("other", "create");
+    await routing.answer("a", 95);
+    await routing.answer("b", 10);
+    assert.equal(openedOn(await other), "b");
+
+    // Three minutes on, the old reading would send the resume back to a: it waits instead.
+    routing.advance(3 * 60_000);
+    const resumed = routing.open("s", "resume");
+    assert.equal(await answersAtOnce(resumed), false);
+    await routing.answer("a", 95);
+    await routing.answer("b", 10);
+    assert.equal(openedOn(await resumed), "b");
+    assert.match(
+      routing.logs.at(-1)!,
+      /s \d+ms \(resume · 판독 대기 · codex-second\)$/,
+    );
+
+    // Just under the line the bound account still takes the resume at once.
+    routing.advance(11 * 60_000);
+    const third = routing.open("third", "create");
+    await routing.answer("a", 10);
+    await routing.answer("b", 89);
+    assert.equal(openedOn(await third), "a");
+    routing.advance(3 * 60_000);
+    const kept = routing.open("s", "resume");
+    assert.equal(await answersAtOnce(kept), true);
+    assert.equal(openedOn(await kept), "b");
+  } finally {
+    routing.dispose();
+  }
+});
+
 test("Codex 계정이 여럿이면 조회에 실패한 기존 계정으로 재개하지 않고 새 판독을 기다려 다른 계정으로 옮긴다", async () => {
   const routing = codexRouting([
     { id: "codex", home: "/a", identity: "a" },
