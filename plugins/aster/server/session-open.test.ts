@@ -130,6 +130,9 @@ async function openFixture(
     usageGate: null as null | (() => Promise<void> | undefined),
     /** The options of each subscription check: who reuses a known answer, and who waits. */
     subscriptionCalls: [] as Array<{ reuse?: boolean } | undefined>,
+    /** How the usage cache was dropped, and the login change notice Aster registered. */
+    usageDrops: [] as string[],
+    revisionChanged: (() => {}) as () => void,
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
     reloadRequest: {} as Record<string, unknown>,
     reload: async (..._args: unknown[]) => "",
@@ -150,7 +153,7 @@ async function openFixture(
       export const paseoHome="/fixture", stateDirectory="/fixture";
       export async function discoverAccounts(){return ${JSON.stringify(accounts)}}
       export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{},...globalThis[${JSON.stringify(key)}].settings}}
-      export class UsageReader{async read(){await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){} dispose(){}}
+      export class UsageReader{async read(){await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
     `,
     ],
     [
@@ -185,7 +188,7 @@ async function openFixture(
     ],
     [
       "./server/usage-revision",
-      "export const usageRevision=()=>async()=>false",
+      `export const usageRevision=(_home,onChange)=>{globalThis[${JSON.stringify(key)}].revisionChanged=onChange; return async()=>false}`,
     ],
     [
       "./server/legacy-credential-rpc",
@@ -343,6 +346,8 @@ async function openFixture(
     },
     lookups: () => shared.lookups,
     subscriptionCalls: () => shared.subscriptionCalls,
+    usageDrops: () => shared.usageDrops,
+    changeLogin: () => shared.revisionChanged(),
     setGate: (next: typeof shared.gate) => {
       shared.gate = next;
     },
@@ -462,6 +467,9 @@ test("세션 열기는 알려진 구독 판정으로 바로 열고 소요 시간
       fixture.subscriptionCalls().map((options) => options?.reuse === true),
       [true, false],
     );
+    // A login changed elsewhere: usage is renewed in the background, not dropped.
+    fixture.changeLogin();
+    assert.deepEqual(fixture.usageDrops(), ["revalidate"]);
     // A dry run decides only and leaves no line.
     const lines = fixture.logs.length;
     await fixture.open({ reason: "create", preflight: true } as never);
