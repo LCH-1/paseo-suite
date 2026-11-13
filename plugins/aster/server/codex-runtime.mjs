@@ -104,7 +104,10 @@ export async function codexTokens(home, expectedIdentity) {
   };
 }
 
-/** Official CLI owns refresh and persistence. This client sends no thread or model requests. */
+/**
+ * Official CLI owns refresh and persistence. This client never asks for a model turn; its only
+ * thread request is the opt-in history retention's `thread/delete`.
+ */
 export class CodexAccountClient {
   constructor(command, home, options = {}) {
     const [file, args] = codexCommand(command, [
