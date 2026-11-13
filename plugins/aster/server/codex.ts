@@ -515,12 +515,15 @@ export function registerCodexRouting(
       pruning = false;
     }
   };
-  let retentionTimer: ReturnType<typeof setInterval> | undefined;
+  const retentionTimers: Array<ReturnType<typeof setTimeout>> = [];
   if (options.retention !== false) {
-    // The daemon answers once the bridge is in place; after that, once a day.
-    void bridgeReady().then(() => pruneHistory());
-    retentionTimer = setInterval(() => void pruneHistory(), DAY);
-    retentionTimer.unref?.();
+    // Shortly after start, once the daemon accepts connections (asking the bridge would retry
+    // its install early), and once a day after that.
+    retentionTimers.push(
+      setTimeout(() => void pruneHistory(), 120_000),
+      setInterval(() => void pruneHistory(), DAY),
+    );
+    for (const timer of retentionTimers) timer.unref?.();
   }
   const readingKey = (account: CodexAccount) =>
     `${account.identity}:${account.home}`;
@@ -887,7 +890,7 @@ export function registerCodexRouting(
   return {
     dispose: () => {
       bridgeReady.dispose();
-      if (retentionTimer) clearInterval(retentionTimer);
+      for (const timer of retentionTimers) clearTimeout(timer);
       lifetime.abort();
       removals.forEach((remove) => remove());
     },
