@@ -446,7 +446,7 @@ Assert (Test-Download '1.2.2') 'locked file vanished'
 );
 
 // Release v1.2.1 as published: installer + SHA256SUMS; older tags have no helper.
-const olderReleaseFixture = `
+const olderReleaseAssets = `
 $script:requests = @()
 function Invoke-SuiteRequest($Asset, $Tag, $OutFile) {
   $script:requests += "$Tag/$Asset"
@@ -456,8 +456,12 @@ function Invoke-SuiteRequest($Asset, $Tag, $OutFile) {
   throw "missing release asset: $Tag/$Asset"
 }
 function Get-ScheduledTask { }
+`;
+// A per-user install of 1.2.3; the real registry is never read.
+const olderReleaseFixture = `${olderReleaseAssets}
 $script:installed = [version]'1.2.3'
 function Get-InstalledSuiteVersion { $script:installed }
+function Get-SuiteRegistrations { if ($script:installed) { [pscustomobject]@{ Version=$script:installed; Scope='User'; Location='per-user app' } } }
 `;
 
 test(
@@ -516,6 +520,10 @@ Expect-Refusal '*cannot enable automatic updates*'
 $EnableAutoUpdate = $false
 function Invoke-SuiteRequest($Asset, $Tag, $OutFile) { [pscustomobject]@{ schemaVersion=1; suiteVersion='1.2.2' } }
 Expect-Refusal '*does not describe Suite v1.2.1*'
+# An unpublished version (1.0.6, 1.0.7) has no public tag to download from.
+function Invoke-SuiteRequest($Asset, $Tag, $OutFile) { throw "Cannot download public Suite release asset: $Asset. Check your internet connection and retry." }
+$Version = '1.0.7'
+Expect-Refusal '*Suite v1.0.7 for a rollback: Cannot download*Only versions listed at https://github.com/LCH-1/paseo-suite/releases can be restored.'
 $Version = '1.2.4'
 function Invoke-SuiteRequest($Asset, $Tag, $OutFile) { [pscustomobject]@{ schemaVersion=1; suiteVersion='1.2.4' } }
 Invoke-SuiteSetup
@@ -526,5 +534,53 @@ Invoke-SuiteSetup
     assert.match(stdout, /Suite rollback pending/);
     assert.match(stdout, /Rollback installs an older release only/);
     assert.match(stdout, /No registered Suite installation found/);
+  },
+);
+
+test(
+  "Windows 롤백은 모든 사용자(HKLM) 설치가 있으면 내려받기 전에 거부해 사용자별 사본을 옆에 만들지 않는다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { stdout } = await runInstallerProbe(`${olderReleaseAssets}
+function New-App([string]$Name, [string]$Version) {
+  $folder = Join-Path $script:UpdaterRoot $Name
+  New-Item -ItemType Directory -Path (Join-Path $folder 'resources/suite') -Force | Out-Null
+  Set-Content (Join-Path $folder 'resources/suite/suite-lock.json') ('{"suiteVersion":"' + $Version + '"}')
+  $folder
+}
+$script:hives = @{}
+# Uninstall entries per registry view; real keys are never read.
+function Get-ItemProperty {
+  param([string]$Path)
+  $hive = if ($Path -like 'HKCU:*') { 'user' } elseif ($Path -like '*WOW6432Node*') { 'wow' } else { 'machine' }
+  Assert ($Path -like '*CurrentVersion?Uninstall?[*]') "unexpected registry path $Path"
+  if ($script:hives[$hive]) { $script:hives[$hive] }
+}
+function Save-SuiteRelease { throw 'must not download next to an all-users install' }
+function Start-Process { throw 'must not run the installer' }
+function Expect-Refusal($Pattern) {
+  $caught = $null
+  try { Invoke-SuiteSetup } catch { $caught = $_.Exception.Message }
+  Assert ($caught -like $Pattern) "expected refusal $Pattern, got $caught"
+}
+$Action = 'Rollback'
+$Version = '1.2.1'
+$script:hives['machine'] = [pscustomobject]@{ DisplayName='Paseo 1.2.3'; InstallLocation=(New-App 'all users' '1.2.3') }
+Expect-Refusal '*per-user installs only*Suite 1.2.3 is installed for all users*releases/tag/v1.2.1*'
+Assert ($script:requests.Count -eq 0) 'release metadata requested before refusing'
+# A 32-bit registry view or an older all-users copy next to a per-user one is still all-users.
+$script:hives = @{}
+$script:hives['user'] = [pscustomobject]@{ DisplayName='Paseo 1.2.3'; DisplayIcon=(Join-Path (New-App 'per user' '1.2.3') 'Paseo.exe') + ',0' }
+$script:hives['wow'] = [pscustomobject]@{ DisplayName='Paseo'; InstallLocation=(New-App 'wow all users' '1.2.0') }
+Expect-Refusal '*Suite 1.2.0 is installed for all users*'
+Assert ($script:requests.Count -eq 0) 'release metadata requested before refusing'
+# Per-user only: the rollback proceeds to the public tag as before.
+$script:hives.Remove('wow')
+function Save-SuiteRelease($Release) { Join-Path $script:UpdaterRoot $Release.Installer }
+function Get-Process { [pscustomobject]@{ Id=123 } }
+Invoke-SuiteSetup
+Assert ($script:requests -contains 'v1.2.1/suite-lock.json') 'per-user rollback refused'
+`);
+    assert.match(stdout, /Suite rollback pending/);
   },
 );
