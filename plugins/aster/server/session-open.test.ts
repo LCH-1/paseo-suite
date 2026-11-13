@@ -3,6 +3,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { LIMIT_CONTINUATION } from "./auth-recovery.ts";
 
@@ -24,6 +27,8 @@ async function openFixture(
     | "partial-reset"
     | "two-available"
     | "fable",
+  /** Where the login change marker is read, as the real reader does; none never changes. */
+  options: { revisionHome?: string } = {},
 ) {
   const now = Date.now();
   const recovered = {
@@ -133,6 +138,10 @@ async function openFixture(
     /** How the usage cache was dropped, and the login change notice Aster registered. */
     usageDrops: [] as string[],
     revisionChanged: (() => {}) as () => void,
+    revisionHome: options.revisionHome,
+    /** How many marker checks have finished, and how many usage reads started. */
+    revisionChecks: 0,
+    usageReads: 0,
     /** Whether each usage read let the reports from before a login change stand in. */
     standIns: [] as Array<boolean | undefined>,
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
@@ -155,7 +164,7 @@ async function openFixture(
       export const paseoHome="/fixture", stateDirectory="/fixture";
       export async function discoverAccounts(){return ${JSON.stringify(accounts)}}
       export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{},...globalThis[${JSON.stringify(key)}].settings}}
-      export class UsageReader{async read(_command,_signal,standIn){await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); globalThis[${JSON.stringify(key)}].standIns.push(standIn?.(reports)); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
+      export class UsageReader{async read(_command,_signal,standIn){globalThis[${JSON.stringify(key)}].usageReads++; await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); globalThis[${JSON.stringify(key)}].standIns.push(standIn?.(reports)); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
     `,
     ],
     [
@@ -190,7 +199,7 @@ async function openFixture(
     ],
     [
       "./server/usage-revision",
-      `export const usageRevision=(_home,onChange)=>{globalThis[${JSON.stringify(key)}].revisionChanged=onChange; return async()=>false}`,
+      `import {usageRevision as actualRevision} from ${actual("./usage-revision.ts")}; export const usageRevision=(_home,onChange)=>{const shared=globalThis[${JSON.stringify(key)}]; shared.revisionChanged=onChange; const check=shared.revisionHome?actualRevision(shared.revisionHome,onChange):async()=>false; return async()=>{try{return await check()}finally{shared.revisionChecks++}}}`,
     ],
     [
       "./server/legacy-credential-rpc",
@@ -350,6 +359,8 @@ async function openFixture(
     subscriptionCalls: () => shared.subscriptionCalls,
     usageDrops: () => shared.usageDrops,
     changeLogin: () => shared.revisionChanged(),
+    revisionChecks: () => shared.revisionChecks,
+    usageReads: () => shared.usageReads,
     standIns: () => shared.standIns,
     setGate: (next: typeof shared.gate) => {
       shared.gate = next;
@@ -501,6 +512,66 @@ test("로그인 변경 전 사용량은 세션이 열 수 있는 모든 계정�
     assert.deepEqual(fixture.standIns(), [true, false]);
   } finally {
     fixture.dispose();
+  }
+});
+
+/** Waits a little for `done`, and goes on without it: the assertions after it say what failed. */
+async function until(done: () => boolean) {
+  for (let turn = 0; turn < 200 && !done(); turn++)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+/** A Settings Sync login change marker in a temporary Paseo home, at `value`. */
+async function revisionMarker(value: string) {
+  const home = await mkdtemp(join(tmpdir(), "aster-open-revision-"));
+  const file = join(home, "settings-sync", "credential-revision");
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, value);
+  return {
+    home,
+    change: (next: string) => writeFile(file, next),
+    remove: () => rm(home, { recursive: true, force: true }),
+  };
+}
+
+test("인증 변경 표식의 기준값은 플러그인을 불러올 때 잡아 그 직후의 로그인 변경도 다음 세션 열기의 강제 새로고침으로 이어진다", async () => {
+  const marker = await revisionMarker("1");
+  const fixture = await openFixture("two-available", {
+    revisionHome: marker.home,
+  });
+  try {
+    await until(() => fixture.revisionChecks() >= 1);
+    // Settings Sync relays a login in the first seconds after the plugin loads.
+    await marker.change("2");
+    await fixture.open({ reason: "create" });
+    assert.deepEqual(fixture.usageDrops(), ["revalidate"]);
+  } finally {
+    fixture.dispose();
+    await marker.remove();
+  }
+});
+
+test("30초 감시는 인증 변경 표식이 바뀌면 세션 열기 전에 배경에서 사용량을 다시 읽고 바뀌지 않으면 읽지 않는다", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const marker = await revisionMarker("1");
+  const fixture = await openFixture("two-available", {
+    revisionHome: marker.home,
+  });
+  try {
+    await until(() => fixture.revisionChecks() >= 1);
+    await marker.change("2");
+    t.mock.timers.tick(30_000);
+    await until(() => fixture.usageReads() >= 1);
+    assert.deepEqual(fixture.usageDrops(), ["revalidate"]);
+    assert.equal(fixture.usageReads(), 1);
+    // The next watch finds no change and reads nothing.
+    t.mock.timers.tick(30_000);
+    await until(() => fixture.revisionChecks() >= 3);
+    assert.equal(fixture.revisionChecks(), 3);
+    assert.equal(fixture.usageReads(), 1);
+  } finally {
+    fixture.dispose();
+    await marker.remove();
   }
 });
 
