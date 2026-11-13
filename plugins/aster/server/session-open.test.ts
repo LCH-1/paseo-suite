@@ -133,6 +133,8 @@ async function openFixture(
     /** How the usage cache was dropped, and the login change notice Aster registered. */
     usageDrops: [] as string[],
     revisionChanged: (() => {}) as () => void,
+    /** Whether each usage read let the reports from before a login change stand in. */
+    standIns: [] as Array<boolean | undefined>,
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
     reloadRequest: {} as Record<string, unknown>,
     reload: async (..._args: unknown[]) => "",
@@ -153,7 +155,7 @@ async function openFixture(
       export const paseoHome="/fixture", stateDirectory="/fixture";
       export async function discoverAccounts(){return ${JSON.stringify(accounts)}}
       export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{},...globalThis[${JSON.stringify(key)}].settings}}
-      export class UsageReader{async read(){await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
+      export class UsageReader{async read(_command,_signal,standIn){await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); globalThis[${JSON.stringify(key)}].standIns.push(standIn?.(reports)); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
     `,
     ],
     [
@@ -348,6 +350,7 @@ async function openFixture(
     subscriptionCalls: () => shared.subscriptionCalls,
     usageDrops: () => shared.usageDrops,
     changeLogin: () => shared.revisionChanged(),
+    standIns: () => shared.standIns,
     setGate: (next: typeof shared.gate) => {
       shared.gate = next;
     },
@@ -477,6 +480,25 @@ test("세션 열기는 알려진 구독 판정으로 바로 열고 소요 시간
       fixture.logs.slice(lines).filter((line) => /계정 확인/.test(line)).length,
       0,
     );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("로그인 변경 전 사용량은 세션이 열 수 있는 모든 계정을 담을 때만 강제 조회 대신 쓰인다", async () => {
+  const fixture = await openFixture("two-available");
+  try {
+    await fixture.open({ reason: "create" });
+    // A report for each account: the open may go on with them while the lookup runs.
+    assert.deepEqual(fixture.standIns(), [true]);
+    // An account the reports from before the change never saw makes the open wait for it.
+    fixture.setReports(
+      fixture.initialReports.filter(
+        (report) => report.id !== "claude:recovered.org-recovered",
+      ),
+    );
+    await fixture.open({ reason: "create" });
+    assert.deepEqual(fixture.standIns(), [true, false]);
   } finally {
     fixture.dispose();
   }

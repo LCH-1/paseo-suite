@@ -147,11 +147,11 @@ export default function contribute(server: PluginServerContext) {
   const checkUsageRevision = usageRevision(paseoHome, () =>
     reader.revalidate(),
   );
-  const readUsage: UsageReader["read"] = async (command, signal) => {
+  const readUsage: UsageReader["read"] = async (command, signal, standIn) => {
     for (;;) {
       signal.throwIfAborted();
       await checkUsageRevision();
-      const reports = await reader.read(command, signal);
+      const reports = await reader.read(command, signal, standIn);
       if (!(await checkUsageRevision())) return reports;
     }
   };
@@ -547,7 +547,11 @@ export default function contribute(server: PluginServerContext) {
             let reports;
             const usageStarted = Date.now();
             try {
-              reports = await readUsage(settings.command, signal);
+              // Reports from before a login change decide only when they cover every account
+              // this session may open on: a login they never saw waits for the forced lookup.
+              reports = await readUsage(settings.command, signal, (previous) =>
+                eligible.every((account) => !needsLogin(account, previous)),
+              );
               timing.usage = Date.now() - usageStarted;
             } catch (error) {
               timing.usage = Date.now() - usageStarted;
