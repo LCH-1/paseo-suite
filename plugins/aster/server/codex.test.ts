@@ -1137,12 +1137,19 @@ function codexRouting(
     },
     /** Lookups started and not yet answered. */
     waiting: () => lookups.map((lookup) => lookup.identity).sort(),
-    /** Answers every open lookup of `identity`: `used` percent spent in both windows. */
-    answer: (identity: string, used: number) =>
+    /**
+     * Answers every open lookup of `identity`: `used` percent spent in both windows, on a paid plan
+     * Codex allows unless `access` says otherwise.
+     */
+    answer: (
+      identity: string,
+      used: number,
+      access: { plan?: string; allowed?: boolean | null } = {},
+    ) =>
       settle(identity, (lookup) =>
         lookup.answer({
-          plan: "pro",
-          allowed: true,
+          plan: access.plan ?? "pro",
+          allowed: access.allowed === undefined ? true : access.allowed,
           blocked: used >= 100,
           windows: [
             {
@@ -1382,6 +1389,43 @@ test("Codex 계정이 여럿이면 차단 전이어도 90% 이상 쓴 것으로 
     const kept = routing.open("s", "resume");
     assert.equal(await answersAtOnce(kept), true);
     assert.equal(openedOn(await kept), "b");
+  } finally {
+    routing.dispose();
+  }
+});
+
+test("Codex 계정이 여럿이면 구독이 끝났거나 Codex가 이용을 막은 것으로 마지막에 본 기존 계정으로는 바로 재개하지 않고 새 판독을 기다린다", async () => {
+  const routing = codexRouting([
+    { id: "codex", home: "/a", identity: "a" },
+    { id: "codex-second", home: "/b", identity: "b" },
+  ]);
+  try {
+    for (const [index, access] of [
+      { plan: "free" },
+      { allowed: false },
+    ].entries()) {
+      const agentId = `s-${index}`;
+      const first = routing.open(agentId, "create");
+      await routing.answer("a", 10);
+      await routing.answer("b", 50);
+      assert.equal(openedOn(await first), "a");
+
+      // Past the ten-minute hold another open finds a's subscription over, or its use refused.
+      routing.advance(11 * 60_000);
+      const other = routing.open("other", "create");
+      await routing.answer("a", 10, access);
+      await routing.answer("b", 50);
+      assert.equal(openedOn(await other), "b");
+
+      // Three minutes on, the resume of the session bound to a waits for new readings.
+      routing.advance(3 * 60_000);
+      const resumed = routing.open(agentId, "resume");
+      assert.equal(await answersAtOnce(resumed), false, JSON.stringify(access));
+      await routing.answer("a", 10, access);
+      await routing.answer("b", 50);
+      assert.equal(openedOn(await resumed), "b");
+      routing.advance(11 * 60_000);
+    }
   } finally {
     routing.dispose();
   }
