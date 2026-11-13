@@ -59,7 +59,9 @@ export function mergeHndHooks(target: Settings, source: Settings): Settings {
 
 /**
  * The profile's settings with the user's HND hooks and, when the user set one, the user's history
- * retention (`cleanupPeriodDays`). A profile keeps its own value while the user has none.
+ * retention (`cleanupPeriodDays`). A profile keeps its own value while the user has none, or one
+ * the CLI rejects (it takes whole days from 1; 0 no longer means "keep"), which would only put a
+ * settings error into every profile.
  */
 export function mergeProfileSettings(
   target: Settings,
@@ -67,7 +69,7 @@ export function mergeProfileSettings(
 ): Settings {
   const next = mergeHndHooks(target, source);
   const days = source.cleanupPeriodDays;
-  if (typeof days === "number" && Number.isFinite(days))
+  if (Number.isInteger(days) && (days as number) >= 1)
     next.cleanupPeriodDays = days;
   return next;
 }
