@@ -335,15 +335,16 @@ export async function discoverAccounts() {
   return accounts;
 }
 
+/** The usage sources whose reports describe Claude accounts. */
+const claudeSources = ["claude", "claude-windows", "claude-profiles"];
+
 function matchingReports(
   account: Account,
   reports: z.infer<typeof reportsSchema>,
 ) {
   const candidates = reports.filter(
     (entry) =>
-      ["claude", "claude-windows", "claude-profiles"].includes(
-        entry.sourceId,
-      ) &&
+      claudeSources.includes(entry.sourceId) &&
       account.email !== null &&
       entry.account.label?.toLowerCase() === account.email.toLowerCase(),
   );
@@ -901,11 +902,20 @@ export function bootstrapAccounts(
 
 /**
  * Whether reports from before a login change can still decide while the forced lookup it needs
- * runs: every report must stay current for the scheduler (`policy.maxAge`) with a minute to spare.
+ * runs: every report must stay current for the scheduler (`policy.maxAge`) with a minute to spare,
+ * and every Claude report must answer with usage. A login or subscription problem, or a failed
+ * answer, may be what that change just fixed (Settings Sync restoring a login), so those reports
+ * wait for the lookup as before instead of turning the session away.
  */
 function stillCurrent(reports: z.infer<typeof reportsSchema>, now: number) {
+  const claude = reports.filter((report) =>
+    claudeSources.includes(report.sourceId),
+  );
   return (
-    reports.length > 0 &&
+    claude.length > 0 &&
+    claude.every(
+      (report) => report.report.status === "available" && !deniesUsage(report),
+    ) &&
     reports.every((report) => {
       const at = Date.parse(report.fetchedAt);
       return (
@@ -962,26 +972,43 @@ export class UsageReader {
     this.failed = null;
   }
 
+  /**
+   * The current reports. `standIn` decides whether the reports from before a login change may
+   * answer while the forced lookup runs (by default whenever they are still current), so a caller
+   * that knows its accounts can make it wait for one of them the old reports do not cover.
+   */
   async read(
     command: Command,
     signal: AbortSignal,
+    standIn?: (reports: z.infer<typeof reportsSchema>) => boolean,
   ): Promise<z.infer<typeof reportsSchema>> {
     signal = AbortSignal.any([signal, this.lifetime.signal]);
     signal.throwIfAborted();
     const cached = this.cached;
     if (cached && !cached.superseded && this.now() - cached.at < 60_000)
       return cached.reports;
+    // After a login change the reports from just before it decide while the forced lookup runs.
+    const standing =
+      cached?.superseded &&
+      stillCurrent(cached.reports, this.now()) &&
+      (standIn?.(cached.reports) ?? true)
+        ? cached.reports
+        : null;
     // Session opens run one at a time, so each would otherwise wait out its own failing
-    // lookup behind the previous one and run past the host's hook time limit.
+    // lookup behind the previous one and run past the host's hook time limit. Reports that still
+    // stand in answer instead: a failed background lookup is retried by the next open past it.
     const elapsed = this.failed ? this.now() - this.failed.at : -1;
-    if (this.failed && elapsed >= 0 && elapsed < 15_000)
+    if (this.failed && elapsed >= 0 && elapsed < 15_000) {
+      if (standing) return standing;
       throw this.failed.error;
+    }
     const generation = this.generation;
     if (!this.pending || this.pending.generation !== generation) {
       const request = {
         generation,
         task: Promise.resolve([] as z.infer<typeof reportsSchema>),
       };
+      const forced = this.forceRefresh;
       request.task = (async () => {
         try {
           const reports = parseReports(
@@ -1006,8 +1033,14 @@ export class UsageReader {
           }
           return reports;
         } catch (error) {
-          if (generation === this.generation && !this.lifetime.signal.aborted)
+          if (generation === this.generation && !this.lifetime.signal.aborted) {
             this.failed = { at: this.now(), error };
+            // A forced lookup after a login change often runs with nobody waiting for it.
+            if (forced)
+              console.warn(
+                `[aster] 사용량 강제 새로고침 실패: ${String(error).slice(0, 200)}`,
+              );
+          }
           throw error;
         }
       })().finally(() => {
@@ -1015,15 +1048,14 @@ export class UsageReader {
       });
       this.pending = request;
     }
-    // After a login change the reports from just before it decide while the forced lookup runs.
-    if (cached?.superseded && stillCurrent(cached.reports, this.now())) {
+    if (standing) {
       this.pending.task.catch(() => undefined);
-      return cached.reports;
+      return standing;
     }
     const reports = await sharedResult(this.pending.task, signal);
     signal.throwIfAborted();
     return generation === this.generation
       ? reports
-      : this.read(command, signal);
+      : this.read(command, signal, standIn);
   }
 }

@@ -2034,3 +2034,150 @@ test("다른 곳의 로그인 변경 뒤에는 직전 보고서로 바로 답하
   runs[3].resolve(JSON.stringify([{ ...report(), id: "forced" }]));
   assert.equal((await forced)[0].id, "forced");
 });
+
+/** A reader whose host lookups wait for the test to settle them, and a check for a held read. */
+function heldReader(clock: () => number) {
+  const runs: Array<{
+    args: string[];
+    resolve: (value: string) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  const reader = new UsageReader(
+    async (_command, args) =>
+      new Promise<string>((resolve, reject) => {
+        runs.push({ args, resolve, reject });
+      }),
+    clock,
+  );
+  const answered = async <T>(promise: Promise<T>) =>
+    Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+  return {
+    runs,
+    reader,
+    answered,
+    command: { file: "fixture-cli", args: [] },
+    signal: new AbortController().signal,
+  };
+}
+
+test("로그인 변경 뒤 직전 Claude 보고서가 로그인·구독 문제나 실패 응답이면 대신 쓰지 않고 강제 조회를 기다린다", async () => {
+  const lost = {
+    ...report(),
+    report: { status: "unavailable", problem: { kind: "rejected" } },
+  };
+  const free = report();
+  free.report.planLabel = "Free";
+  const failed = {
+    ...report(),
+    report: { status: "error", error: "Usage fetch timed out" },
+  };
+  for (const previous of [lost, free, failed]) {
+    let clock = now;
+    const { runs, reader, answered, command, signal } = heldReader(() => clock);
+    const first = reader.read(command, signal);
+    runs[0].resolve(JSON.stringify([previous]));
+    await first;
+    // Settings Sync restored the login: the open waits for the forced lookup that sees it.
+    clock = now + 30_000;
+    reader.revalidate();
+    const after = reader.read(command, signal);
+    assert.equal(await answered(after), false, previous.report.status);
+    assert.ok(runs[1].args.includes("--refresh"));
+    runs[1].resolve(JSON.stringify([report()]));
+    const reports = await after;
+    assert.equal(needsLogin(accounts[0], reports), false);
+    assert.equal(mapReports(accounts, reports, {}, now).length, 1);
+  }
+
+  // Another provider's report that answers nothing does not hold a Claude session open.
+  let clock = now;
+  const { runs, reader, answered, command, signal } = heldReader(() => clock);
+  const first = reader.read(command, signal);
+  const codex = {
+    ...report("codex@example.test", "codex:account"),
+    sourceId: "codex",
+    report: { status: "unavailable", problem: { kind: "missing" } },
+  };
+  runs[0].resolve(JSON.stringify([report(), codex]));
+  await first;
+  clock = now + 30_000;
+  reader.revalidate();
+  assert.equal(await answered(reader.read(command, signal)), true);
+  runs[1].resolve(JSON.stringify([report(), codex]));
+});
+
+test("로그인 변경 전 보고서가 세션이 열 수 있는 계정을 모두 담지 않으면 강제 조회를 기다린다", async () => {
+  let clock = now;
+  const { runs, reader, answered, command, signal } = heldReader(() => clock);
+  const other: Account = {
+    id: "b",
+    home: "/fixture/b",
+    email: "b@example.test",
+    identity: "org-b|b@example.test",
+  };
+  const covers =
+    (eligible: Account[]) => (previous: Parameters<typeof needsLogin>[1]) =>
+      eligible.every((account) => !needsLogin(account, previous));
+  const first = reader.read(command, signal);
+  runs[0].resolve(JSON.stringify([report()]));
+  const reports = await first;
+  clock = now + 30_000;
+  reader.revalidate();
+  // A login the old reports never saw (a new account in a profile) waits for the lookup.
+  const unseen = reader.read(command, signal, covers([...accounts, other]));
+  assert.equal(await answered(unseen), false);
+  assert.equal(
+    await answered(reader.read(command, signal, covers(accounts))),
+    true,
+  );
+  runs[1].resolve(
+    JSON.stringify([
+      report(),
+      report("b@example.test", "claude:account.org-b"),
+    ]),
+  );
+  assert.equal((await unseen).length, 2);
+});
+
+test("로그인 변경 뒤 배경 강제 조회가 실패해도 유효한 직전 보고서로 15초 안의 열기를 받고 실패 이유를 한 줄 남긴다", async () => {
+  let clock = now;
+  const { runs, reader, answered, command, signal } = heldReader(() => clock);
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (message: string) => void warnings.push(message);
+  try {
+    const first = reader.read(command, signal);
+    runs[0].resolve(JSON.stringify([report()]));
+    await first;
+    clock = now + 30_000;
+    reader.revalidate();
+    // The watch starts the forced lookup with nobody waiting, and it fails.
+    assert.equal(await answered(reader.read(command, signal)), true);
+    runs[1].reject(Error("loopback usage API closed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(warnings, [
+      "[aster] 사용량 강제 새로고침 실패: Error: loopback usage API closed",
+    ]);
+
+    // Within the pause after the failure an open still gets the reports from before the change.
+    clock += 5_000;
+    const during = await reader.read(command, signal);
+    assert.equal(during[0].id, "claude:account.org-a");
+    assert.equal(runs.length, 2);
+
+    // Past the pause the next open asks again, forced, behind the same reports.
+    clock += 11_000;
+    assert.equal(await answered(reader.read(command, signal)), true);
+    assert.equal(runs.length, 3);
+    assert.ok(runs[2].args.includes("--refresh"));
+    runs[2].resolve(JSON.stringify([report()]));
+  } finally {
+    console.warn = warn;
+  }
+});
