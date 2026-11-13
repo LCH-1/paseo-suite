@@ -147,6 +147,9 @@ export default function contribute(server: PluginServerContext) {
   const checkUsageRevision = usageRevision(paseoHome, () =>
     reader.revalidate(),
   );
+  // The marker as the plugin loads is the one it compares with, so a login Settings Sync relays
+  // in the first seconds after (as a daemon starts) still forces the next lookup.
+  void checkUsageRevision().catch(() => undefined);
   const readUsage: UsageReader["read"] = async (command, signal, standIn) => {
     for (;;) {
       signal.throwIfAborted();
