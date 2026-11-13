@@ -15,7 +15,11 @@ import type {
 import { z } from "zod";
 import { createLocalPluginConnection } from "./legacy-credential-rpc";
 import { codexTokens, inspectCodexAccount } from "./codex-runtime.mjs";
-import { chooseCodexAccount, type CodexReading } from "./codex-policy";
+import {
+  chooseCodexAccount,
+  hasCodexSubscription,
+  type CodexReading,
+} from "./codex-policy";
 import { paseoHome, readSettings } from "./accounts";
 import { codexAccessFailure } from "./auth-recovery";
 import { runPaseo } from "./paseo";
@@ -315,12 +319,54 @@ export function resumableCodexAccount(
   return previous ?? accounts[0] ?? null;
 }
 
-export function registerCodexRouting(server: PluginServerContext) {
+/** A reading stands this long before it is renewed. */
+const READING_FRESH = 60_000;
+/**
+ * How old a reading may be to choose an account with, without waiting for a new one.
+ * `codexBudget` drops readings past six minutes, so a choice never rests on one about to go. With
+ * more than one account an old reading could send a new conversation to an account another
+ * client just spent, so it is kept shorter there.
+ */
+export function codexReadingReuse(accounts: number) {
+  return accounts > 1 ? 120_000 : 300_000;
+}
+/** A bound account last seen this close to a limit is checked again before a resume goes to it. */
+const NEAR_LIMIT = 90;
+
+type CodexInspection = Pick<
+  CodexReading,
+  "plan" | "allowed" | "windows" | "blocked"
+>;
+
+/** Seams for tests: every default reaches the real host, Codex CLI and settings. */
+export interface CodexRoutingOptions {
+  inspect?: (
+    command: string[],
+    home: string,
+    identity: string,
+  ) => Promise<CodexInspection>;
+  discover?: (providers: Providers) => Promise<CodexAccount[]>;
+  installBridge?: () => Promise<void>;
+  settings?: () => Promise<{ capacities: Record<string, number> }>;
+  now?: () => number;
+}
+
+export function registerCodexRouting(
+  server: PluginServerContext,
+  options: CodexRoutingOptions = {},
+) {
+  const inspectAccount = options.inspect ?? inspectCodexAccount,
+    discover =
+      options.discover ??
+      ((providers: Providers) => discoverCodexAccounts(providers)),
+    settingsOf = options.settings ?? readSettings,
+    now = options.now ?? Date.now;
   const lifetime = new AbortController(),
     bindings = new Map<string, CodexBinding>(),
     busy = new Set<string>(),
     permissions = new Set<string>();
-  const readings = new Map<string, { value: CodexReading; expires: number }>(),
+  /** The newest reading of each login folder, kept past its freshness so reuse can judge its age. */
+  const readings = new Map<string, CodexReading>(),
     pending = new Map<string, Promise<CodexReading | null>>(),
     revisions = new Map<string, number>();
   const turnIds = new Map<string, string | null>(),
@@ -333,7 +379,7 @@ export function registerCodexRouting(server: PluginServerContext) {
   let serial: Promise<unknown> = Promise.resolve(),
     sequence = 0;
   const bridgeReady = retryingBridge(
-    () => installCodexBridge(),
+    options.installBridge ?? (() => installCodexBridge()),
     (error) => {
       console.error(
         "[aster] Codex 자동 계정 실행 모듈을 초기화하지 못했습니다.",
@@ -347,25 +393,25 @@ export function registerCodexRouting(server: PluginServerContext) {
     serial = result.catch(() => undefined);
     return result;
   };
+  const readingKey = (account: CodexAccount) =>
+    `${account.identity}:${account.home}`;
   const invalidate = (identity: string) => {
     for (const [key, reading] of readings)
-      if (reading.value.identity === identity) readings.delete(key);
+      if (reading.identity === identity) readings.delete(key);
     revisions.set(identity, (revisions.get(identity) ?? 0) + 1);
   };
-  async function inspect(
+  /** A new reading; callers at the same time share one official app-server lookup. */
+  function renew(
     account: CodexAccount,
     providers: Providers,
   ): Promise<CodexReading | null> {
-    const cacheKey = `${account.identity}:${account.home}`;
-    const cached = readings.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.value;
     const version = revisions.get(account.identity) ?? 0,
-      key = `${account.identity}:${account.home}:${version}`;
+      key = `${readingKey(account)}:${version}`;
     const running = pending.get(key);
     if (running) return running;
     const task = (async () => {
       try {
-        const result = await inspectCodexAccount(
+        const result = await inspectAccount(
           codexOriginalCommand(providers.codex?.command),
           account.home,
           account.identity,
@@ -373,7 +419,7 @@ export function registerCodexRouting(server: PluginServerContext) {
         const value: CodexReading = {
           id: account.id,
           identity: account.identity,
-          at: Date.now(),
+          at: now(),
           plan: result.plan,
           allowed: result.allowed,
           windows: result.windows,
@@ -384,9 +430,12 @@ export function registerCodexRouting(server: PluginServerContext) {
           lifetime.signal.aborted
         )
           return null;
-        readings.set(cacheKey, { value, expires: Date.now() + 60000 });
+        readings.set(readingKey(account), value);
         return value;
       } catch {
+        // A failed lookup leaves nothing to choose with, as before: the next choice asks again.
+        if ((revisions.get(account.identity) ?? 0) === version)
+          readings.delete(readingKey(account));
         console.warn(
           `[aster] Codex 계정 ${account.id}: 구독·한도를 확인할 수 없어 자동 선택에서 제외`,
         );
@@ -398,31 +447,43 @@ export function registerCodexRouting(server: PluginServerContext) {
     pending.set(key, task);
     return task;
   }
-  async function choose(agentId: string, providers: Providers) {
-    const accounts = await discoverCodexAccounts(providers),
-      now = Date.now();
-    const available = (
-      await Promise.all(
-        accounts
-          .filter((account) => (blockedHomes.get(account.home) ?? 0) <= now)
-          .map((account) => inspect(account, providers)),
-      )
-    ).filter(
+  /** The reading while it is younger than `maxAge`, else a new one. */
+  async function inspect(
+    account: CodexAccount,
+    providers: Providers,
+    maxAge = READING_FRESH,
+  ): Promise<CodexReading | null> {
+    const cached = readings.get(readingKey(account)),
+      at = now();
+    if (cached && at >= cached.at && at - cached.at < maxAge) return cached;
+    return renew(account, providers);
+  }
+  const unblockedHomes = (accounts: CodexAccount[]) =>
+    accounts.filter(
+      (account) => (blockedHomes.get(account.home) ?? 0) <= now(),
+    );
+  async function select(
+    agentId: string,
+    accounts: CodexAccount[],
+    found: Array<CodexReading | null>,
+  ) {
+    const at = now();
+    const available = found.filter(
       (reading): reading is CodexReading =>
-        reading !== null && (blocked.get(reading.identity) ?? 0) <= now,
+        reading !== null && (blocked.get(reading.identity) ?? 0) <= at,
     );
     const loads = new Map<string, number>();
     for (const [id, binding] of bindings)
-      if (id !== agentId && (busy.has(id) || (reservations.get(id) ?? 0) > now))
+      if (id !== agentId && (busy.has(id) || (reservations.get(id) ?? 0) > at))
         loads.set(
           binding.account.identity,
           (loads.get(binding.account.identity) ?? 0) + 1,
         );
     const current = bindings.get(agentId),
-      settings = await readSettings();
+      settings = await settingsOf();
     const selected = chooseCodexAccount({
       readings: available,
-      now: Date.now(),
+      now: at,
       loads,
       current: current
         ? { identity: current.account.identity, switchedAt: current.switchedAt }
@@ -433,6 +494,95 @@ export function registerCodexRouting(server: PluginServerContext) {
       ? (accounts.find((account) => account.identity === selected.identity) ??
           null)
       : null;
+  }
+  /** The choice from readings at most a minute old, waiting for new ones past that. */
+  async function choose(
+    agentId: string,
+    providers: Providers,
+    accounts?: CodexAccount[],
+  ) {
+    accounts ??= await discover(providers);
+    return select(
+      agentId,
+      accounts,
+      await Promise.all(
+        unblockedHomes(accounts).map((account) => inspect(account, providers)),
+      ),
+    );
+  }
+  /** No block and no reading near a limit: nothing suggests the account would refuse a turn. */
+  const roomLooksLeft = (account: CodexAccount, at: number) => {
+    if (
+      (blockedHomes.get(account.home) ?? 0) > at ||
+      (blocked.get(account.identity) ?? 0) > at
+    )
+      return false;
+    const last = readings.get(readingKey(account));
+    return (
+      !last ||
+      (!last.blocked &&
+        last.allowed !== false &&
+        hasCodexSubscription(last.plan) &&
+        last.windows.every(
+          (window) =>
+            window.usedPercent < NEAR_LIMIT ||
+            (window.resetsAt !== null && window.resetsAt <= at),
+        ))
+    );
+  };
+  /**
+   * The account a session opens on without waiting for a new reading, or null to wait as before:
+   * every account has a reading recent enough to choose with, or an existing conversation goes
+   * back to the only account, or to the one it is bound to unless that one was last seen near a
+   * limit. Readings past a minute are renewed in the background, and a turn that hits a limit or a
+   * failed login still blocks the account and moves the session when it ends.
+   */
+  async function chooseNow(
+    agentId: string,
+    providers: Providers,
+    accounts: CodexAccount[],
+    resuming: boolean,
+  ): Promise<{ account: CodexAccount; how: string } | null> {
+    const at = now(),
+      reuse = codexReadingReuse(accounts.length),
+      candidates = unblockedHomes(accounts);
+    const renewOld = () => {
+      for (const account of candidates) {
+        const reading = readings.get(readingKey(account));
+        if (!reading || at < reading.at || at - reading.at >= READING_FRESH)
+          void renew(account, providers);
+      }
+    };
+    const recent = candidates.map((account) => {
+      const reading = readings.get(readingKey(account));
+      return reading && at >= reading.at && at - reading.at <= reuse
+        ? reading
+        : null;
+    });
+    if (candidates.length && recent.every((reading) => reading !== null)) {
+      const account = await select(agentId, accounts, recent);
+      // Old readings never refuse a session: without a choice it waits for new ones.
+      if (!account) return null;
+      renewOld();
+      return { account, how: "최근 판독" };
+    }
+    if (!resuming) return null;
+    // Whatever the readings say, a resume on the only account goes back to it.
+    if (accounts.length === 1) {
+      renewOld();
+      return { account: accounts[0], how: "유일 계정" };
+    }
+    const previous = bindings.get(agentId)?.account;
+    const bound = previous
+      ? accounts.find(
+          (account) =>
+            account.identity === previous.identity &&
+            account.home === previous.home,
+        )
+      : undefined;
+    if (!bound || !roomLooksLeft(bound, at)) return null;
+    renewOld();
+    return { account: bound, how: "기존 계정" };
   }
   const cleanup = (id: string) => {
     excluded.delete(id);
@@ -469,8 +619,19 @@ export function registerCodexRouting(server: PluginServerContext) {
             "Aster Codex 계정 실행 모듈을 확인하세요. 기존 대화 기록은 유지됩니다.",
           );
         return serialize(async () => {
+          const started = now();
           signal.throwIfAborted();
-          const chosen = await choose(request.agentId, providers);
+          const accounts = await discover(providers);
+          const quick = await chooseNow(
+            request.agentId,
+            providers,
+            accounts,
+            !preflight &&
+              (request.reason === "resume" || request.reason === "refresh"),
+          );
+          const chosen =
+            quick?.account ??
+            (await choose(request.agentId, providers, accounts));
           signal.throwIfAborted();
           lifetime.signal.throwIfAborted();
           const account =
@@ -478,12 +639,21 @@ export function registerCodexRouting(server: PluginServerContext) {
             resumableCodexAccount(
               { reason: request.reason, preflight },
               bindings.get(request.agentId)?.account,
-              await discoverCodexAccounts(providers),
+              accounts,
             );
-          if (!account)
+          // Where the open's time went, once it is decided.
+          const note = (outcome: string) => {
+            if (!preflight)
+              console.info(
+                `[aster] Codex 계정 확인 ${request.agentId} ${now() - started}ms (${request.reason} · ${quick?.how ?? "판독 대기"} · ${outcome})`,
+              );
+          };
+          if (!account) {
+            note("후보 없음");
             throw Error(
               "Aster: 현재 사용할 수 있는 Codex 구독 계정이 없습니다. 구독·로그인·사용 한도를 확인하세요. 기존 대화 기록은 유지됩니다.",
             );
+          }
           if (preflight) return;
           const previous = bindings.get(request.agentId);
           bindings.set(request.agentId, {
@@ -491,9 +661,10 @@ export function registerCodexRouting(server: PluginServerContext) {
             switchedAt:
               previous?.account.identity === account.identity
                 ? previous.switchedAt
-                : Date.now(),
+                : now(),
           });
-          reservations.set(request.agentId, Date.now() + 30000);
+          reservations.set(request.agentId, now() + 30000);
+          note(account.id);
           return {
             ...request,
             env: {
@@ -546,8 +717,8 @@ export function registerCodexRouting(server: PluginServerContext) {
         if (accessFailure && previous) {
           invalidate(previous.account.identity);
           if (accessFailure === "authentication")
-            blockedHomes.set(previous.account.home, Date.now() + 60000);
-          else blocked.set(previous.account.identity, Date.now() + 60000);
+            blockedHomes.set(previous.account.home, now() + 60000);
+          else blocked.set(previous.account.identity, now() + 60000);
         }
         const selected = await choose(agent.id, providers);
         if (
@@ -592,13 +763,13 @@ export function registerCodexRouting(server: PluginServerContext) {
     },
     status: async (providers: Providers) =>
       Promise.all(
-        (await discoverCodexAccounts(providers)).map(async (account) => {
+        (await discover(providers)).map(async (account) => {
           const reading = await inspect(account, providers);
           const eligible =
             reading &&
             chooseCodexAccount({
               readings: [reading],
-              now: Date.now(),
+              now: now(),
               loads: new Map(),
             });
           return {
