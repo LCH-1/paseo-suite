@@ -344,3 +344,103 @@ Assert $script:removed 'task not removed'
 `);
   },
 );
+
+// Seeds updater\v<version> exactly as Save-SuiteRelease leaves it.
+const downloadFixture = `
+function New-Download([string]$Version) {
+  $folder = Join-Path $script:UpdaterRoot "v$Version"
+  New-Item -ItemType Directory -Path $folder -Force | Out-Null
+  foreach ($name in @("Paseo-Suite-$Version-x64.exe", 'install.ps1', 'SHA256SUMS')) { Set-Content (Join-Path $folder $name) 'owned' }
+  $folder
+}
+function Test-Download([string]$Version) { Test-Path (Join-Path $script:UpdaterRoot "v$Version/Paseo-Suite-$Version-x64.exe") }
+`;
+
+test(
+  "Windows 업데이트는 이미 최신이면 예전 도우미가 남긴 설치 파일과 하루 지난 임시 폴더를 지우고 도우미·상태·링크 밖 파일은 남긴다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    await runInstallerProbe(`${downloadFixture}
+$old = New-Download '1.2.2'
+$current = New-Download '1.2.3'
+$stale = Join-Path $current ('a' * 32)
+New-Item -ItemType Directory -Path $stale | Out-Null
+Set-Content (Join-Path $stale 'Paseo-Suite-1.2.3-x64.exe') 'partial'
+(Get-Item $stale).LastWriteTime = (Get-Date).AddDays(-2)
+$fresh = Join-Path $old ('b' * 32)
+New-Item -ItemType Directory -Path $fresh | Out-Null
+Set-Content (Join-Path $fresh 'Paseo-Suite-1.2.2-x64.exe') 'another updater is downloading'
+Set-Content (Join-Path $old 'notes.txt') 'not downloaded by the helper'
+$outside = Join-Path $script:UpdaterRoot 'outside'
+New-Item -ItemType Directory -Path $outside | Out-Null
+Set-Content (Join-Path $outside 'Paseo-Suite-0.9.0-x64.exe') 'linked, never followed'
+New-Item -ItemType Junction -Path (Join-Path $script:UpdaterRoot 'v0.9.0') -Target $outside | Out-Null
+Set-Content (Join-Path $script:UpdaterRoot 'status.json') '{}'
+function Get-SuiteRelease { [pscustomobject]@{ Version=[version]'1.2.3'; Tag='v1.2.3'; Installer='Paseo-Suite-1.2.3-x64.exe' } }
+function Get-InstalledSuiteVersion { [version]'1.2.3' }
+function Save-SuiteRelease { throw 'must not download the installed version' }
+$Action = 'Update'
+Invoke-SuiteSetup
+Assert (-not (Test-Download '1.2.2') -and -not (Test-Download '1.2.3')) 'downloaded installers kept'
+Assert (-not (Test-Path (Join-Path $old 'SHA256SUMS')) -and -not (Test-Path (Join-Path $old 'install.ps1'))) 'release metadata kept'
+Assert (-not (Test-Path $current)) 'empty release folder kept'
+Assert (Test-Path (Join-Path $old 'notes.txt')) 'unknown file removed'
+Assert (Test-Path (Join-Path $fresh 'Paseo-Suite-1.2.2-x64.exe')) 'recent temporary download removed'
+Assert (Test-Path (Join-Path $outside 'Paseo-Suite-0.9.0-x64.exe')) 'junction followed'
+Assert (Test-Path (Join-Path $script:UpdaterRoot 'install.ps1')) 'command helper removed'
+Assert (Test-Path (Join-Path $script:UpdaterRoot 'status.json')) 'status removed'
+`);
+  },
+);
+
+test(
+  "Windows 업데이트는 설치·버전 확인 뒤 받은 설치 파일을 지우고 보류 중이면 최신 설치 파일만 남긴다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    await runInstallerProbe(`${downloadFixture}
+New-Download '1.2.1' | Out-Null
+$script:installed = [version]'1.2.2'
+function Get-SuiteRelease { [pscustomobject]@{ Version=[version]'1.2.3'; Tag='v1.2.3'; Installer='Paseo-Suite-1.2.3-x64.exe' } }
+function Get-InstalledSuiteVersion { $script:installed }
+function Save-SuiteRelease($Release) { Join-Path (New-Download '1.2.3') $Release.Installer }
+function Invoke-SuiteInstaller($Installer) { Assert (Test-Path $Installer) 'installer removed before install'; 'pending' }
+$Action = 'Update'
+Invoke-SuiteSetup
+Assert (Test-Download '1.2.3') 'pending installer removed'
+Assert (-not (Test-Download '1.2.1')) 'older pending installer kept'
+$DownloadOnly = $true
+Invoke-SuiteSetup
+Assert (Test-Download '1.2.3') 'downloaded installer removed'
+$DownloadOnly = $false
+function Invoke-SuiteInstaller($Installer) { $script:installed = [version]'1.2.3'; 'installed' }
+Invoke-SuiteSetup
+Assert (-not (Test-Path (Join-Path $script:UpdaterRoot 'v1.2.3'))) 'installed download kept'
+Assert ((Get-Content (Join-Path $script:UpdaterRoot 'status.json') -Raw) -like '*"installed"*') 'status not written'
+Assert (Test-Path (Join-Path $script:UpdaterRoot 'install.ps1')) 'command helper removed'
+`);
+  },
+);
+
+test(
+  "Windows 업데이트는 정리에 실패해도 설치를 성공으로 기록하고 점검 모드는 아무것도 지우지 않는다",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const { stdout } = await runInstallerProbe(`${downloadFixture}
+New-Download '1.2.2' | Out-Null
+function Get-SuiteRelease { [pscustomobject]@{ Version=[version]'1.2.3'; Tag='v1.2.3'; Installer='Paseo-Suite-1.2.3-x64.exe' } }
+function Get-InstalledSuiteVersion { [version]'1.2.3' }
+$Action = 'Check'
+Invoke-SuiteSetup
+Assert (Test-Download '1.2.2') 'check mode removed a download'
+function Remove-Item { throw 'locked by antivirus' }
+$Action = 'Update'
+Invoke-SuiteSetup
+Assert (Test-Download '1.2.2') 'locked file vanished'
+`);
+    assert.match(
+      stdout,
+      /cleanup skipped; it is retried on the next run: locked by antivirus/,
+    );
+    assert.match(stdout, /already up to date/);
+  },
+);
