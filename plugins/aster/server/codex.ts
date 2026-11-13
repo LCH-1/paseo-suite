@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   rename,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -210,6 +211,23 @@ async function codexNodeCommand(home: string) {
   return codexLauncherCommand(file);
 }
 
+/**
+ * Removes the batch launcher Aster wrote before the PowerShell one, once no provider command
+ * starts Codex through it. Returns whether it was removed.
+ */
+export async function removeOldLauncher(home: string, commands: string[][]) {
+  if (
+    commands.some((command) =>
+      command.some((part) => /(?:^|[\\/])codex-node\.cmd$/i.test(part)),
+    )
+  )
+    return false;
+  const file = join(home, "aster", "codex-node.cmd");
+  if (!(await lstat(file).catch(() => null))?.isFile()) return false;
+  await rm(file, { force: true });
+  return true;
+}
+
 export function codexLauncherCommand(
   file: string,
   platform: NodeJS.Platform = process.platform,
@@ -264,6 +282,13 @@ export async function installCodexBridge(home = paseoHome) {
     }
     if (Object.keys(patch).length)
       await client.patchDaemonConfig({ providers: patch });
+    if (node.some((part) => /codex-node\.ps1$/i.test(part))) {
+      const commands = Object.keys(providers).map(
+        (id) => patch[id]?.command ?? providers[id]?.command ?? [],
+      );
+      if (await removeOldLauncher(home, commands).catch(() => false))
+        console.info("[aster] 이전 Codex 실행기 codex-node.cmd 삭제");
+    }
   } finally {
     client.close();
   }

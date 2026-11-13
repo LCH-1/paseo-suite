@@ -86,6 +86,22 @@ async function json(file: string, fallback: unknown): Promise<unknown> {
     throw error;
   }
 }
+/** Backups taken before each provider cleanup: the newest few are enough to undo the last ones. */
+const KEPT_POLICY_BACKUPS = 3;
+async function pruneBackups(directory: string) {
+  const names = (await readdir(directory)).filter((name) =>
+    /^provider-policy-before-[0-9a-f-]{36}\.json$/.test(name),
+  );
+  const dated = await Promise.all(
+    names.map(async (name) => ({
+      name,
+      at: (await lstat(join(directory, name)).catch(() => null))?.mtimeMs ?? 0,
+    })),
+  );
+  dated.sort((a, b) => b.at - a.at || b.name.localeCompare(a.name));
+  for (const { name } of dated.slice(KEPT_POLICY_BACKUPS))
+    await rm(join(directory, name), { force: true }).catch(() => undefined);
+}
 async function writeJson(file: string, value: unknown) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, JSON.stringify(value), {
@@ -578,6 +594,8 @@ export function registerAccountManagement(
         join(stateDirectory, `provider-policy-before-${randomUUID()}.json`),
         providers,
       );
+      // A cleanup that fails to prune its old backups still applies.
+      await pruneBackups(stateDirectory).catch(() => undefined);
       const removeProviders = Object.keys(providers).filter(
         (id) =>
           providers[id].extends &&
