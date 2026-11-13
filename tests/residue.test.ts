@@ -62,7 +62,7 @@ function sandbox() {
     "0",
   ];
   let system: System = { items: [], errors: [], processIds: [1234] };
-  const run = (...argv: string[]) => {
+  const runWith = (extra: Record<string, unknown>, ...argv: string[]) => {
     const lines: string[] = [];
     const errors: string[] = [];
     const code = residue.run([...argv, ...base], {
@@ -70,9 +70,11 @@ function sandbox() {
       log: (line: string) => lines.push(line),
       error: (line: string) => errors.push(line),
       collectSystem: () => structuredClone(system),
+      ...extra,
     });
     return { code, output: lines.join("\n"), errors: errors.join("\n") };
   };
+  const run = (...argv: string[]) => runWith({}, ...argv);
   const plan = (kinds: string, ...extra: string[]) => {
     const file = path.join(box, `plan-${kinds.replaceAll(",", "-")}.json`);
     const result = run("plan", "--kind", kinds, "--out", file, ...extra);
@@ -100,6 +102,7 @@ function sandbox() {
     write,
     age,
     run,
+    runWith,
     plan,
     setSystem(next: Partial<System>) {
       system = { items: [], errors: [], processIds: [1234], ...next };
@@ -842,3 +845,149 @@ test("도움말은 아무것도 수집하지 않고 사용법만 출력한다", 
     assert.match(lines.join("\n"), /사용법/);
   }
 });
+
+test("격리는 이름 바꾸기마다 먼저 manifest 를 써서 도중에 끊겨도 옮긴 폴더를 모두 되돌린다", () => {
+  const t = sandbox();
+  try {
+    seed(t);
+    const { file } = t.plan("installs", "--keep-install", "rollback");
+    const moved = ["old-a", "old-b", "busy"].map((name) =>
+      path.join(t.installs, name),
+    );
+    // The disk state if the process died right after the second rename.
+    let crash: string | undefined;
+    let manifestFile = "";
+    const result = t.runWith(
+      {
+        rename: (from: string, to: string) => {
+          manifestFile = path.join(
+            path.dirname(path.dirname(to)),
+            "manifest-installs.json",
+          );
+          const before = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+          const intent = before.moved.find(
+            (entry: { from: string }) => entry.from === from,
+          );
+          assert.equal(intent?.state, "moving", `no intent before ${from}`);
+          fs.renameSync(from, to);
+          if (!crash && before.moved.length === 2)
+            crash = fs.readFileSync(manifestFile, "utf8");
+        },
+      },
+      "quarantine",
+      "--plan",
+      file,
+      "--kind",
+      "installs",
+      "--execute",
+    );
+    assert.equal(result.code, 0, result.errors);
+    assert.doesNotMatch(result.output, /rename 실패/);
+    for (const folder of moved)
+      assert.equal(fs.existsSync(folder), false, folder);
+    const done = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+    assert.deepEqual(
+      done.moved.map((entry: { state?: string }) => entry.state),
+      [undefined, undefined, undefined],
+    );
+
+    assert.ok(crash, "second rename never happened");
+    fs.writeFileSync(manifestFile, crash);
+    const restored = t.run("restore", "--manifest", manifestFile, "--execute");
+    assert.equal(restored.code, 0, restored.errors);
+    const recorded = JSON.parse(crash).moved.map(
+      (entry: { from: string }) => entry.from,
+    );
+    assert.equal(recorded.length, 2);
+    for (const folder of recorded)
+      assert.ok(fs.existsSync(path.join(folder, "Paseo.exe")), folder);
+  } finally {
+    t.dispose();
+  }
+});
+
+test("하나도 옮기지 못한 격리는 빈 묶음을 남기지 않고 purge 는 manifest 가 없는 폴더를 지우지 않는다", () => {
+  const t = sandbox();
+  try {
+    seed(t);
+    const { file } = t.plan("installs", "--keep-install", "rollback");
+    const result = t.runWith(
+      {
+        rename: () => {
+          throw Object.assign(new Error("in use"), { code: "EBUSY" });
+        },
+      },
+      "quarantine",
+      "--plan",
+      file,
+      "--kind",
+      "installs",
+      "--execute",
+    );
+    assert.equal(result.code, 0, result.errors);
+    assert.match(result.output, /old-a: rename 실패 EBUSY/);
+    assert.deepEqual(fs.readdirSync(t.trash), []);
+
+    // A wrong --trash may point at the user's own dated backups.
+    const backup = path.join(t.trash, "20200101-000000");
+    t.write(path.join(backup, "notes.txt"), "user data");
+    const purged = t.run("purge", "--older-than-days", "0", "--execute");
+    assert.equal(purged.code, 0, purged.errors);
+    assert.ok(fs.existsSync(path.join(backup, "notes.txt")), "backup purged");
+    assert.match(purged.output, /20200101-000000: manifest 없음/);
+  } finally {
+    t.dispose();
+  }
+});
+
+test("되돌리기는 manifest 가 격리 폴더 밖을 가리키면 옮기지 않는다", () => {
+  const t = sandbox();
+  try {
+    const batch = path.join(t.trash, "20260101-000000");
+    const outside = path.join(t.box, "outside");
+    t.write(path.join(outside, "keep.txt"), "not quarantined");
+    const manifest = path.join(batch, "manifest-installs.json");
+    t.write(
+      manifest,
+      JSON.stringify({
+        moved: [
+          {
+            name: "outside",
+            from: path.join(t.box, "victim"),
+            to: path.join(batch, "..", "..", "outside"),
+          },
+        ],
+      }),
+    );
+    const result = t.run("restore", "--manifest", manifest, "--execute");
+    assert.equal(result.code, 0, result.errors);
+    assert.match(result.output, /outside: 격리 폴더 밖 경로/);
+    assert.ok(fs.existsSync(path.join(outside, "keep.txt")));
+    assert.equal(fs.existsSync(path.join(t.box, "victim")), false);
+  } finally {
+    t.dispose();
+  }
+});
+
+test(
+  "되돌리기는 Windows 에서 manifest 경로의 대소문자가 달라도 같은 격리 묶음으로 본다",
+  { skip: process.platform !== "win32" },
+  () => {
+    const t = sandbox();
+    try {
+      seed(t);
+      const { file } = t.plan("installs", "--keep-install", "rollback");
+      t.run("quarantine", "--plan", file, "--kind", "installs", "--execute");
+      const batch = fs.readdirSync(t.trash)[0];
+      const manifest = path
+        .join(t.trash, batch, "manifest-installs.json")
+        .toUpperCase();
+      const restored = t.run("restore", "--manifest", manifest, "--execute");
+      assert.equal(restored.code, 0, restored.errors);
+      assert.doesNotMatch(restored.output, /격리 폴더 밖/);
+      assert.ok(fs.existsSync(path.join(t.installs, "old-a", "Paseo.exe")));
+    } finally {
+      t.dispose();
+    }
+  },
+);

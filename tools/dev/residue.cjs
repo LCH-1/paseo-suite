@@ -7,6 +7,8 @@
  * 프로세스를 종료하지 않고 데몬·앱을 재시작하지 않는다. 이름 바꾸기가 거부되면(사용 중) 건너뛴다.
  * 지우기는 2단계다: quarantine 이 같은 볼륨의 격리 폴더로 이름만 바꾸고, 유예(기본 7일)가
  * 지난 격리분만 purge 가 영구 삭제한다. 격리분은 restore 로 제자리에 되돌린다.
+ * manifest 는 이름 바꾸기 전후로 쓰므로 도중에 끊겨도 원래 자리가 남고, purge 는 manifest 가
+ * 있는 격리 묶음만 지운다.
  *
  *   node tools/dev/residue.cjs plan [--kind installs,renderer,hotfixes,releases,checkpoints,attachments,linux-core]
  *        [--out plan.json] [--json] [--verbose] [--measure] [--sizes installs.csv] [--keep-install <폴더명>]...
@@ -53,6 +55,7 @@ const HEX64 = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PLAN_TTL_MS = 60 * 60000;
 const STAMP = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(?:-\d+)?$/;
+const MANIFEST = /^manifest-[a-z-]+\.json$/;
 
 // ---------------------------------------------------------------- options
 function parseArgs(argv, env = process.env, platform = process.platform) {
@@ -1108,6 +1111,15 @@ function cmdQuarantine(o, deps) {
     moved: [],
     skipped: [],
   };
+  const file = path.join(batch, `manifest-${kind}.json`);
+  // 이름 바꾸기 전후로 manifest 를 쓴다. 도중에 끊겨도 옮긴 폴더마다 원래 자리가 남는다.
+  const save = () => {
+    fs.mkdirSync(batch, { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(manifest, null, 1));
+    fs.renameSync(temporary, file);
+  };
+  const rename = deps.rename ?? fs.renameSync;
   for (const entry of saved.kinds[kind].items) {
     if (entry.action !== "PRUNE" || (match && !match.test(entry.name)))
       continue;
@@ -1134,22 +1146,38 @@ function cmdQuarantine(o, deps) {
       });
       continue;
     }
+    const record = {
+      name: entry.name,
+      from: entry.path,
+      to: destination,
+      sizeMb: entry.sizeMb,
+      state: "moving",
+    };
+    manifest.moved.push(record);
+    save();
     try {
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       // 같은 볼륨 rename 만 쓴다. 사용 중(EBUSY/EPERM/EACCES)이거나 볼륨이 다르면(EXDEV) 건너뛴다. 복사 후 삭제는 하지 않는다.
-      fs.renameSync(entry.path, destination);
-      manifest.moved.push({
-        name: entry.name,
-        from: entry.path,
-        to: destination,
-        sizeMb: entry.sizeMb,
-      });
+      rename(entry.path, destination);
+      delete record.state;
     } catch (error) {
+      manifest.moved.pop();
       manifest.skipped.push({
         name: entry.name,
         why: `rename 실패 ${error.code ?? error.message}`,
       });
     }
+    save();
+  }
+  if (execute && !manifest.moved.length && fs.existsSync(file)) {
+    // 하나도 옮기지 못했으면 빈 격리 묶음을 남기지 않는다.
+    fs.rmSync(file, { force: true });
+    for (const folder of [path.join(batch, kind), batch])
+      try {
+        fs.rmdirSync(folder);
+      } catch {
+        // 다른 종류가 같은 묶음을 쓰면 그대로 둔다.
+      }
   }
   const total =
     Math.round(
@@ -1161,8 +1189,6 @@ function cmdQuarantine(o, deps) {
   for (const entry of manifest.skipped)
     deps.log(`  건너뜀 ${entry.name}: ${entry.why}`);
   if (execute && manifest.moved.length) {
-    const file = path.join(batch, `manifest-${kind}.json`);
-    fs.writeFileSync(file, JSON.stringify(manifest, null, 1));
     deps.log(
       `되돌리기: node tools/dev/residue.cjs restore --manifest "${file}" --execute`,
     );
@@ -1179,9 +1205,11 @@ function cmdRestore(o, deps) {
   if (!manifest?.moved) throw new Error("--manifest <파일> 이 필요하다");
   const batch = path.resolve(path.dirname(file));
   const execute = o.has("--execute");
+  // Windows 경로는 대소문자를 가리지 않는다. manifest 경로를 다르게 적어도 같은 묶음이다.
+  const fold = (value) => (o.win ? value.toLowerCase() : value);
   for (const entry of manifest.moved) {
     const to = path.resolve(entry.to);
-    if (!to.startsWith(batch + path.sep)) {
+    if (!fold(to).startsWith(fold(batch + path.sep))) {
       deps.log(`  건너뜀 ${entry.name}: 격리 폴더 밖 경로`);
       continue;
     }
@@ -1214,6 +1242,11 @@ function cmdPurge(o, deps) {
     ).getTime();
     const ageDays = (o.now - at) / 864e5;
     const target = path.join(o.trash, name);
+    // 이 도구가 만든 격리 묶음(manifest 가 있는 것)만 지운다. --trash 를 잘못 줘도 남의 폴더는 그대로다.
+    if (!listFiles(target).some((file) => MANIFEST.test(file))) {
+      deps.log(`  건너뜀 ${name}: manifest 없음(이 도구가 격리한 묶음이 아님)`);
+      continue;
+    }
     if (ageDays < o.graceDays)
       deps.log(
         `  유예 중 ${name} (${ageDays.toFixed(1)}일 / ${o.graceDays}일)`,
