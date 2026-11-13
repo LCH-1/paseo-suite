@@ -257,6 +257,11 @@ async function reloginFixture() {
     registry,
     call,
     dispose,
+    /** Stops the registration and removes the fixture's temporary folder. */
+    cleanup: async () => {
+      dispose();
+      await rm(root, { recursive: true, force: true });
+    },
   };
 }
 
