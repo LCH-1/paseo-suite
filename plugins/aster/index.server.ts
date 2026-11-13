@@ -140,8 +140,11 @@ export default function contribute(server: PluginServerContext) {
   void syncHooks();
   const hookTimer = setInterval(() => void syncHooks(), 120_000);
   hookTimer.unref?.();
+  const lifetime = new AbortController();
+  // A login change elsewhere does not hold the next session open: the reports from just before
+  // it decide while the forced lookup runs, and the watch below starts that lookup early.
   const checkUsageRevision = usageRevision(paseoHome, () =>
-    reader.invalidate(),
+    reader.revalidate(),
   );
   const readUsage: UsageReader["read"] = async (command, signal) => {
     for (;;) {
@@ -151,6 +154,17 @@ export default function contribute(server: PluginServerContext) {
       if (!(await checkUsageRevision())) return reports;
     }
   };
+  const revisionTimer = setInterval(
+    () =>
+      void checkUsageRevision()
+        .then(async (changed) => {
+          if (changed)
+            await reader.read((await readSettings()).command, lifetime.signal);
+        })
+        .catch(() => undefined),
+    30_000,
+  );
+  revisionTimer.unref?.();
   const controller = new Controller();
   const subscriptions = new SubscriptionGuard(
     join(stateDirectory, "subscription-access"),
@@ -441,6 +455,13 @@ export default function contribute(server: PluginServerContext) {
           await routes.exclude(request.agentId);
           return;
         }
+        // Where the open's time goes, for one log line once it is decided.
+        const timing = {
+          started: Date.now(),
+          subscription: 0,
+          usage: 0,
+          background: 0,
+        };
         try {
           return await controller.serialize(async () => {
             signal.throwIfAborted();
@@ -448,11 +469,19 @@ export default function contribute(server: PluginServerContext) {
             const accounts = await discoverAccounts();
             if (!preflight)
               await restoreRoute(request.agentId, accounts, false);
+            const subscriptionStarted = Date.now();
+            // A known allowed subscription opens the session while its due check runs behind it;
+            // a denial or an account never checked is still waited for.
             const eligible = await subscriptions.filter(
               accounts,
               async () => (await paseo.config.get()).config.providers ?? {},
               signal,
+              {
+                reuse: true,
+                onWait: ({ background }) => (timing.background = background),
+              },
             );
+            timing.subscription = Date.now() - subscriptionStarted;
             if (!eligible.length && accounts.length)
               throw new AccountUnavailable(
                 "Aster: 현재 Claude Code 구독을 사용할 수 있는 계정이 없습니다. 기존 대화와 로그인은 유지됩니다.",
@@ -515,9 +544,12 @@ export default function contribute(server: PluginServerContext) {
                 knownFamilies.set(request.agentId, family);
             };
             let reports;
+            const usageStarted = Date.now();
             try {
               reports = await readUsage(settings.command, signal);
+              timing.usage = Date.now() - usageStarted;
             } catch (error) {
+              timing.usage = Date.now() - usageStarted;
               signal.throwIfAborted();
               if (request.reason === "create") throw error;
               console.warn(
@@ -783,6 +815,13 @@ export default function contribute(server: PluginServerContext) {
             `[aster] session ${request.agentId}: 자동 계정 설정 오류, 기존 실행 환경으로 재개`,
           );
           return;
+        } finally {
+          if (!preflight)
+            console.info(
+              `[aster] 계정 확인 ${request.agentId} ${Date.now() - timing.started}ms (${request.reason} · 구독 ${timing.subscription}ms${
+                timing.background ? `·배경 확인 ${timing.background}` : ""
+              } · 사용량 ${timing.usage}ms)`,
+            );
         }
       },
     ),
@@ -1113,6 +1152,8 @@ export default function contribute(server: PluginServerContext) {
   ];
   return () => {
     clearInterval(hookTimer);
+    clearInterval(revisionTimer);
+    lifetime.abort();
     reader.dispose();
     subscriptions.dispose();
     unregister.forEach((remove) => remove());

@@ -1976,3 +1976,61 @@ test("소진된 창의 복귀 시각은 같은 시각 보고서 중 늦은 초�
   const passed = entry("claude", 0, weekly(100, hours(-1)));
   assert.equal(exhaustedUntil(accounts[0], [passed, known], now), null);
 });
+
+test("다른 곳의 로그인 변경 뒤에는 직전 보고서로 바로 답하고 강제 조회는 배경에서 한 번만 실행", async () => {
+  const runs: Array<{ args: string[]; resolve: (value: string) => void }> = [];
+  let clock = now;
+  const reader = new UsageReader(
+    async (_command, args) =>
+      new Promise<string>((resolve) => {
+        runs.push({ args, resolve });
+      }),
+    () => clock,
+  );
+  const command = { file: "fixture-cli", args: [] };
+  const signal = new AbortController().signal;
+  const answered = async <T>(promise: Promise<T>) =>
+    Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+  const first = reader.read(command, signal);
+  runs[0].resolve(JSON.stringify([{ ...report(), id: "before" }]));
+  assert.equal((await first)[0].id, "before");
+
+  clock = now + 30_000;
+  reader.revalidate();
+  const during = reader.read(command, signal);
+  assert.equal(await answered(during), true);
+  assert.equal((await during)[0].id, "before");
+  assert.equal(runs.length, 2);
+  assert.ok(runs[1].args.includes("--refresh"));
+  // Another open while it runs shares that lookup and is not held either.
+  assert.equal((await reader.read(command, signal))[0].id, "before");
+  assert.equal(runs.length, 2);
+  runs[1].resolve(
+    JSON.stringify([
+      { ...report(), id: "after", fetchedAt: new Date(clock).toISOString() },
+    ]),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await reader.read(command, signal))[0].id, "after");
+  assert.equal(runs.length, 2);
+
+  // Reports the scheduler would soon drop do not stand in: the open waits for the new lookup.
+  clock = now + 30_000 + 5 * 60_000 + 1;
+  reader.revalidate();
+  const stale = reader.read(command, signal);
+  assert.equal(await answered(stale), false);
+  assert.equal(runs.length, 3);
+  runs[2].resolve(JSON.stringify([{ ...report(), id: "renewed" }]));
+  assert.equal((await stale)[0].id, "renewed");
+
+  // A limit, authentication or relogin result still drops the reports and waits.
+  reader.invalidate();
+  const forced = reader.read(command, signal);
+  assert.equal(await answered(forced), false);
+  assert.ok(runs[3].args.includes("--refresh"));
+  runs[3].resolve(JSON.stringify([{ ...report(), id: "forced" }]));
+  assert.equal((await forced)[0].id, "forced");
+});

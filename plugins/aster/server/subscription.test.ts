@@ -308,3 +308,180 @@ test("구독 검증 해제는 대기자를 종료하고 늦은 응답으로 캐�
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+/** A profile reader whose answers a test releases one at a time. */
+function gatedProfiles() {
+  const waiting: Array<(value: CoreProfiles) => void> = [];
+  return {
+    calls: () => waiting.length,
+    read: async (): Promise<CoreProfiles> =>
+      new Promise((resolve) => {
+        waiting.push(resolve);
+      }),
+    /** Answers the oldest lookup, once one has been asked. */
+    answer: async (paid: boolean | 402) => {
+      for (let turn = 0; !waiting.length && turn < 50; turn++)
+        await new Promise((resolve) => setImmediate(resolve));
+      waiting.shift()!(
+        paid === 402
+          ? [{ providerId: "claude", status: 402 }]
+          : [
+              {
+                providerId: "claude",
+                status: "ready",
+                identity,
+                profile: profile(paid),
+              },
+            ],
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+/** Whether the call answers while its lookup is still unanswered (disk reads take real time). */
+const settles = async <T>(promise: Promise<T>, ms = 300) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  const done = await Promise.race([
+    promise.then(
+      () => true,
+      () => true,
+    ),
+    late,
+  ]);
+  clearTimeout(timer);
+  return done;
+};
+/** Until the background check has recorded its answer. */
+const until = async (done: () => Promise<boolean>) => {
+  for (let turn = 0; turn < 100; turn++) {
+    if (await done()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw Error("condition not reached");
+};
+
+test("세션 열기는 허용 판정이 있으면 지난 구독 확인을 기다리지 않고 배경에서 확인하며 거부로 바뀌면 다음 열기부터 제외", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-subscription-reuse-"));
+  const account = {
+    id: "claude",
+    home: directory,
+    email: "synthetic@example.invalid",
+    identity: "organization|account",
+  };
+  let now = 1800000000000;
+  const profiles = gatedProfiles();
+  const guard = new SubscriptionGuard(join(directory, "cache"), directory, {
+    now: () => now,
+    readProfiles: profiles.read,
+  });
+  const open = (plans?: { waited: number; background: number }[]) =>
+    guard.filter([account], async () => ({}), new AbortController().signal, {
+      reuse: true,
+      onWait: (plan) => plans?.push(plan),
+    });
+  try {
+    // Never answered: the first open waits for the official profile.
+    const first = open();
+    assert.equal(await settles(first), false);
+    await profiles.answer(true);
+    assert.deepEqual(await first, [account]);
+
+    now += 61_000;
+    const plans: { waited: number; background: number }[] = [];
+    const reused = open(plans);
+    assert.equal(await settles(reused), true);
+    assert.deepEqual(await reused, [account]);
+    assert.deepEqual(plans, [{ waited: 0, background: 1 }]);
+    assert.equal(profiles.calls(), 1);
+    // The background check finds the subscription ended: the next open leaves the account out.
+    await profiles.answer(402);
+    await until(async () => (await open()).length === 0);
+    assert.deepEqual(await open(), []);
+    assert.equal(profiles.calls(), 0);
+
+    // A denial is checked again before it refuses, so a renewed subscription opens at once.
+    now += 61_000;
+    const denied = open();
+    assert.equal(await settles(denied), false);
+    await profiles.answer(true);
+    assert.deepEqual(await denied, [account]);
+
+    // Turn ends and the status screen still wait for every due check.
+    now += 61_000;
+    const waiting = guard.filter(
+      [account],
+      async () => ({}),
+      new AbortController().signal,
+    );
+    assert.equal(await settles(waiting), false);
+    await profiles.answer(true);
+    assert.deepEqual(await waiting, [account]);
+  } finally {
+    guard.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("재시작 뒤에도 디스크의 최근 허용 판정으로 바로 열고 오래된 판정은 기다려 다시 확인", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-subscription-disk-"));
+  const cache = join(directory, "cache");
+  const account = {
+    id: "claude",
+    home: directory,
+    email: "synthetic@example.invalid",
+    identity: "organization|account",
+  };
+  let now = 1800000000000;
+  const profiles = gatedProfiles();
+  const guards: SubscriptionGuard[] = [];
+  const restart = () => {
+    guards.at(-1)?.dispose();
+    const guard = new SubscriptionGuard(cache, directory, {
+      now: () => now,
+      readProfiles: profiles.read,
+    });
+    guards.push(guard);
+    return (reuse = true) =>
+      guard.filter([account], async () => ({}), new AbortController().signal, {
+        reuse,
+      });
+  };
+  try {
+    let open = restart();
+    const first = open(false);
+    await profiles.answer(true);
+    assert.deepEqual(await first, [account]);
+    // The same answer again is written once it is ten minutes newer than the one on disk.
+    now += 11 * 60_000;
+    const again = open(false);
+    await profiles.answer(true);
+    assert.deepEqual(await again, [account]);
+    const [key] = await readdir(cache);
+    assert.equal((await readdir(join(cache, key))).length, 2);
+
+    // Six hours after the first answer, but not after the one written again.
+    now += 5 * 3_600_000 + 55 * 60_000;
+    open = restart();
+    const restarted = open();
+    assert.equal(await settles(restarted), true);
+    assert.deepEqual(await restarted, [account]);
+    await profiles.answer(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    // Only the newest observations stay.
+    assert.equal((await readdir(join(cache, key))).length, 2);
+
+    // Past six hours without an answer the open waits again.
+    now += 6 * 3_600_000 + 1;
+    open = restart();
+    const stale = open();
+    assert.equal(await settles(stale), false);
+    await profiles.answer(true);
+    assert.deepEqual(await stale, [account]);
+  } finally {
+    guards.at(-1)?.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

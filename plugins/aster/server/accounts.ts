@@ -892,11 +892,29 @@ export function bootstrapAccounts(
     : startable.filter((account) => !throttled.has(account));
 }
 
+/**
+ * Whether reports from before a login change can still decide while the forced lookup it needs
+ * runs: every report must stay current for the scheduler (`policy.maxAge`) with a minute to spare.
+ */
+function stillCurrent(reports: z.infer<typeof reportsSchema>, now: number) {
+  return (
+    reports.length > 0 &&
+    reports.every((report) => {
+      const at = Date.parse(report.fetchedAt);
+      return (
+        Number.isFinite(at) && at <= now && now - at <= policy.maxAge - 60_000
+      );
+    })
+  );
+}
+
 export class UsageReader {
   private readonly lifetime = new AbortController();
   private cached: {
     at: number;
     reports: z.infer<typeof reportsSchema>;
+    /** Read before the latest login change: it stands in only while the forced lookup runs. */
+    superseded?: boolean;
   } | null = null;
   private pending: {
     generation: number;
@@ -918,6 +936,18 @@ export class UsageReader {
     this.forceRefresh = true;
   }
 
+  /**
+   * A login changed elsewhere (Settings Sync renewed or restored a token): the next lookup must
+   * reach the vendor again, but nobody waits for it while the reports from just before the change
+   * are still current. A limit, authentication or relogin result still calls `invalidate`.
+   */
+  revalidate() {
+    this.generation++;
+    this.failed = null;
+    this.forceRefresh = true;
+    if (this.cached) this.cached = { ...this.cached, superseded: true };
+  }
+
   dispose() {
     this.lifetime.abort();
     this.generation++;
@@ -931,8 +961,9 @@ export class UsageReader {
   ): Promise<z.infer<typeof reportsSchema>> {
     signal = AbortSignal.any([signal, this.lifetime.signal]);
     signal.throwIfAborted();
-    if (this.cached && this.now() - this.cached.at < 60_000)
-      return this.cached.reports;
+    const cached = this.cached;
+    if (cached && !cached.superseded && this.now() - cached.at < 60_000)
+      return cached.reports;
     // Session opens run one at a time, so each would otherwise wait out its own failing
     // lookup behind the previous one and run past the host's hook time limit.
     const elapsed = this.failed ? this.now() - this.failed.at : -1;
@@ -976,6 +1007,11 @@ export class UsageReader {
         if (this.pending === request) this.pending = null;
       });
       this.pending = request;
+    }
+    // After a login change the reports from just before it decide while the forced lookup runs.
+    if (cached?.superseded && stillCurrent(cached.reports, this.now())) {
+      this.pending.task.catch(() => undefined);
+      return cached.reports;
     }
     const reports = await sharedResult(this.pending.task, signal);
     signal.throwIfAborted();
