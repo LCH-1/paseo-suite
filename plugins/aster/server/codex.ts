@@ -1,12 +1,12 @@
 import {
-  chmod,
-  lstat,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { lstat, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
@@ -195,20 +195,55 @@ exit $child.ExitCode
   };
 }
 
-async function codexNodeCommand(home: string) {
-  if (!process.versions.electron) return [process.execPath];
-  const launcher = codexNodeLauncher(process.execPath),
+/** Where the launcher runs from and what it starts: this process's own executable by default. */
+export interface CodexLauncherTarget {
+  home?: string;
+  execPath?: string;
+  /** Only an Electron host needs the launcher; plain Node runs Codex directly. */
+  electron?: boolean;
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * Points the launcher at the executable this process runs, written beside it and renamed over it
+ * so a reader never sees half a file. An upgrade installs Paseo in a new folder while the provider
+ * command keeps starting Codex through this file, so it is aligned as the plugin starts, before the
+ * daemon can start Codex through it, and not only once the daemon accepts connections. Returns the
+ * launcher's path, or null where none is needed.
+ */
+export function alignCodexLauncher({
+  home = paseoHome,
+  execPath = process.execPath,
+  electron = Boolean(process.versions.electron),
+  platform = process.platform,
+}: CodexLauncherTarget = {}) {
+  if (!electron) return null;
+  const launcher = codexNodeLauncher(execPath, platform),
     directory = join(home, "aster"),
     file = join(directory, launcher.file);
-  const current = await readFile(file, "utf8").catch(() => null);
-  if (current !== launcher.content) {
-    await mkdir(directory, { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    await writeFile(temporary, launcher.content);
-    await chmod(temporary, 0o755);
-    await rename(temporary, file);
+  let current: string | null = null;
+  try {
+    current = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return codexLauncherCommand(file);
+  if (current !== launcher.content) {
+    mkdirSync(directory, { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, launcher.content);
+      chmodSync(temporary, 0o755);
+      renameSync(temporary, file);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  }
+  return file;
+}
+
+async function codexNodeCommand(home: string) {
+  const file = alignCodexLauncher({ home });
+  return file ? codexLauncherCommand(file) : [process.execPath];
 }
 
 /**
@@ -443,6 +478,8 @@ export interface CodexRoutingOptions {
   reload?: (agentId: string, signal: AbortSignal) => Promise<void>;
   /** Whether the opt-in Codex history retention runs (at start and daily). */
   retention?: boolean;
+  /** The launcher aligned as routing registers. */
+  launcher?: CodexLauncherTarget;
 }
 
 const DAY = 86_400_000;
@@ -468,6 +505,15 @@ export function registerCodexRouting(
           20000,
         );
       });
+  // Before the bridge waits for the daemon: the daemon may start Codex through the launcher
+  // as soon as plugins have loaded, and after an upgrade it still names the old install.
+  try {
+    alignCodexLauncher(options.launcher);
+  } catch (error) {
+    console.warn(
+      `[aster] Codex 실행기를 지금 실행 파일로 맞추지 못했습니다. 데몬 연결 뒤 다시 맞춥니다: ${String(error).slice(0, 200)}`,
+    );
+  }
   const lifetime = new AbortController(),
     bindings = new Map<string, CodexBinding>(),
     busy = new Set<string>(),
