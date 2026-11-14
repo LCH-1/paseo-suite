@@ -263,7 +263,7 @@ const dirty = execFileSync("git", ["status", "--porcelain"], {
 }).trim();
 const lock = {
   schemaVersion: 1,
-  suiteVersion: "1.0.13",
+  suiteVersion: "1.0.14",
   core: {
     repository: "https://github.com/LCH-1/paseo",
     revision,
