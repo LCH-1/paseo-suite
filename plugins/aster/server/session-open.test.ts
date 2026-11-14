@@ -138,6 +138,8 @@ async function openFixture(
     /** How the usage cache was dropped, and the login change notice Aster registered. */
     usageDrops: [] as string[],
     revisionChanged: (() => {}) as () => void,
+    /** The next marker check finds a login change, without a marker file to watch. */
+    loginRelayed: false,
     revisionHome: options.revisionHome,
     /** How many marker checks have finished, and how many usage reads started. */
     revisionChecks: 0,
@@ -201,7 +203,7 @@ async function openFixture(
     ],
     [
       "./server/usage-revision",
-      `import {usageRevision as actualRevision} from ${actual("./usage-revision.ts")}; export const usageRevision=(_home,onChange)=>{const shared=globalThis[${JSON.stringify(key)}]; shared.revisionChanged=onChange; const check=shared.revisionHome?actualRevision(shared.revisionHome,onChange):async()=>false; return async()=>{try{return await check()}finally{shared.revisionChecks++}}}`,
+      `import {usageRevision as actualRevision} from ${actual("./usage-revision.ts")}; export const usageRevision=(_home,onChange)=>{const shared=globalThis[${JSON.stringify(key)}]; shared.revisionChanged=onChange; const check=shared.revisionHome?actualRevision(shared.revisionHome,onChange):async()=>{if(!shared.loginRelayed) return false; shared.loginRelayed=false; onChange(); return true}; return async()=>{try{return await check()}finally{shared.revisionChecks++}}}`,
     ],
     [
       "./server/legacy-credential-rpc",
@@ -362,6 +364,10 @@ async function openFixture(
     subscriptionCalls: () => shared.subscriptionCalls,
     usageDrops: () => shared.usageDrops,
     changeLogin: () => shared.revisionChanged(),
+    /** Settings Sync relays a login: the next marker check, the thirty-second watch's, finds it. */
+    relayLogin: () => {
+      shared.loginRelayed = true;
+    },
     revisionChecks: () => shared.revisionChecks,
     usageReads: () => shared.usageReads,
     hostReads: () => shared.hostReads,
@@ -612,6 +618,44 @@ test("Claude 세션 열기가 사용량 배경 갱신을 켜 창이 끝난 뒤 �
   for (let turn = 0; turn < 5; turn++)
     await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(warnings, []);
+});
+
+test("30초 감시가 로그인 변경 뒤 배경에서 다시 읽은 사용량은 사용량 배경 갱신의 2시간 활동 창을 늘리지 않아, 세션 열기가 없으면 2시간 뒤 멈춘다", async (t) => {
+  t.mock.timers.enable({
+    apis: ["setTimeout", "setInterval", "Date"],
+    now: Date.now(),
+  });
+  const fixture = await openFixture("two-available");
+  const turns = async () => {
+    for (let turn = 0; turn < 5; turn++)
+      await new Promise((resolve) => setImmediate(resolve));
+  };
+  /** Settings Sync relays a login every thirty seconds for `span`, and the watch reads again. */
+  const relay = async (span: number) => {
+    for (let elapsed = 0; elapsed < span; elapsed += 30_000) {
+      fixture.relayLogin();
+      t.mock.timers.tick(30_000);
+      await turns();
+    }
+  };
+  try {
+    fixture.refreshReports();
+    await fixture.open({ reason: "create" });
+    logged(fixture, /^\[aster\] 사용량 배경 갱신 시작/);
+    const reads = fixture.usageReads();
+    await relay(2 * 3_600_000 + 10 * 60_000);
+    assert.ok(
+      fixture.usageReads() - reads >= 250,
+      String(fixture.usageReads()),
+    );
+    assert.ok(fixture.hostReads().length > 0);
+    logged(fixture, /^\[aster\] 사용량 배경 갱신 멈춤/);
+    const hostReads = fixture.hostReads().length;
+    await relay(30 * 60_000);
+    assert.equal(fixture.hostReads().length, hostReads);
+  } finally {
+    fixture.dispose();
+  }
 });
 
 test("주간 창이 빠진 불완전한 사용량뿐인 계정으로도 기존 소진 대화를 CLI 정상 확인 경로로 재개한다", async () => {

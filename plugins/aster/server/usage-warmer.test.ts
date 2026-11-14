@@ -4,9 +4,12 @@ import { UsageReader } from "./accounts.ts";
 import {
   HOST_WINDOW,
   IDLE_LIMIT,
+  LATE_CHECK,
   RENEW_AT,
   RETRY_AFTER,
+  TRUSTED,
   UsageWarmer,
+  realClock,
   type HostRead,
   type WarmedReport,
   type WarmerClock,
@@ -14,16 +17,25 @@ import {
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
+/** The longest delay Node's `setTimeout` keeps: it runs a longer one after a millisecond. */
+const TIMEOUT_MAX = 2 ** 31 - 1;
+const DAY = 86_400_000;
+
 /** Fake time: `run` fires timers in order, settling what each one started before the next. */
 class Time {
   now = Date.parse("2026-11-14T00:00:00Z");
+  /** The longest delay a timer was asked for. */
+  longest = 0;
   private seq = 0;
   private readonly timers = new Map<number, { at: number; run: () => void }>();
   readonly clock: WarmerClock = {
     now: () => this.now,
     setTimer: (run, ms) => {
       const id = ++this.seq;
-      this.timers.set(id, { at: this.now + Math.max(0, ms), run });
+      this.longest = Math.max(this.longest, ms);
+      // As Node runs a delay it cannot keep.
+      const delay = ms > TIMEOUT_MAX ? 1 : Math.max(0, ms);
+      this.timers.set(id, { at: this.now + delay, run });
       return id;
     },
     clearTimer: (id) => void this.timers.delete(id as number),
@@ -37,6 +49,11 @@ class Time {
   /** The machine sleeps: the clock moves on, and the timers due meanwhile fire late, on waking. */
   suspend(ms: number) {
     this.now += ms;
+  }
+  /** The clock is set back (NTP): timers keep their delays, as Node's run on a steady clock. */
+  setBack(ms: number) {
+    this.now -= ms;
+    for (const timer of this.timers.values()) timer.at -= ms;
   }
   async run(ms: number) {
     assert.ok(ms >= 0, "time only moves forward");
@@ -807,4 +824,227 @@ test("배경 갱신의 호스트 조회는 Aster 가 세션 열기에 쓰는 사
   assert.ok(!calls.at(-1)?.includes("--refresh"));
   reader.dispose();
   await assert.rejects(reader.lookup(command, signal));
+});
+
+test("앞서간 시계로 만들어 조회 시각이 30일 뒤인 보고서로는 단계를 잡지 않아 데몬 조회를 되풀이하지 않고, 지금 시각에 조회한 보고서가 오면 다시 데움", async () => {
+  const time = new Time();
+  const ahead = {
+    fetchedAt: time.now + 30 * DAY,
+    endedAt: time.now + 30 * DAY + FETCH,
+  };
+  let answer = ahead;
+  let reads = 0;
+  const warmer: UsageWarmer = new UsageWarmer(
+    async () => {
+      // Ends a loop the warmer would not leave on its own.
+      if (++reads > 100) warmer.dispose();
+      return [report("claude:fixture", answer)];
+    },
+    time.clock,
+    () => undefined,
+  );
+  warmer.noteActivity([report("claude:fixture", ahead)]);
+  await time.run(10 * minute);
+  assert.equal(reads, 0);
+  assert.equal(time.pending, 0);
+  // Looked up since, by the clock as it is: looked at once its window is over, as before.
+  answer = { fetchedAt: time.now, endedAt: time.now + FETCH };
+  warmer.noteActivity([report("claude:fixture", answer)]);
+  await time.run(FETCH + HOST_WINDOW + LATE_CHECK - 1_000);
+  assert.equal(reads, 0);
+  await time.run(2_000);
+  assert.equal(reads, 1);
+  warmer.dispose();
+  assert.ok(time.longest <= TIMEOUT_MAX, String(time.longest));
+});
+
+test("시계가 30일 뒤로 바뀌어도 그 전에 본 보고서·배운 것·활동 시각으로 단계를 잡지 않아 미리 갱신하지 않는 호스트에 조회를 되풀이하지 않고, 다시 조회된 뒤로는 데움", async () => {
+  const { time, host, warmer, logs, open } = setup(LinuxHost);
+  for (let index = 0; index < 4; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(logs.some((line) => /10초 전에 강제 갱신/.test(line)));
+  const reads = host.reads.length;
+  host.onRead = () => {
+    // Ends a loop the warmer would not leave on its own.
+    if (host.reads.length - reads > 100) warmer.dispose();
+  };
+  // NTP sets the clock back thirty days. The host's cache, timed by that clock, answers what it
+  // looked up before as current until the clock catches up.
+  time.setBack(30 * DAY);
+  await time.run(3 * 3_600_000);
+  assert.ok(host.reads.length - reads <= 2, String(host.reads.length - reads));
+  assert.equal(time.pending, 0);
+  // Looked up anew (the app's refresh button): sessions find the cache current again.
+  await time.timed(() => host.list(true));
+  for (let index = 0; index < 9; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.deepEqual(new Set(await probe(time, host, 30 * minute)), new Set([0]));
+  warmer.dispose();
+  assert.ok(time.longest <= TIMEOUT_MAX, String(time.longest));
+});
+
+test("시계가 30일 뒤로 바뀐 뒤 다시 조회된 보고서는 데우되, 그 전에 배운 호스트 방식은 다시 배우고 세션 열기가 없으면 2시간 안에 멈춤", async () => {
+  for (const HostType of [LinuxHost, WindowsHost]) {
+    const { time, host, warmer, logs, open } = setup(HostType);
+    for (let index = 0; index < 4; index++) {
+      await open();
+      await time.run(7 * minute);
+    }
+    time.setBack(30 * DAY);
+    const setBack = time.now;
+    // Someone looks the reports up anew (the app's refresh button); no session opens since.
+    await time.timed(() => host.list(true));
+    const reads: number[] = [];
+    host.onRead = (refresh) => {
+      if (!refresh) reads.push(time.now);
+      // Ends a loop the warmer would not leave on its own.
+      if (reads.length > 200) warmer.dispose();
+    };
+    await time.run(3 * 3_600_000);
+    // What it learned before may be of any age now, so the next window teaches it again: a nudge
+    // before the window ends, and a look after it. The first read is timed from before.
+    assert.ok(
+      reads.some(
+        (at, index) =>
+          index >= 2 &&
+          at < setBack + 15 * minute &&
+          at - reads[index - 1] < minute,
+      ),
+      `${HostType.name} ${reads.slice(0, 4).map((at) => at - setBack)}`,
+    );
+    assert.ok(
+      reads.every((at) => at < setBack + IDLE_LIMIT + 10 * minute),
+      HostType.name,
+    );
+    assert.ok(
+      logs.some((line) => /배경 갱신 멈춤/.test(line)),
+      HostType.name,
+    );
+    assert.equal(time.pending, 0, HostType.name);
+    warmer.dispose();
+  }
+});
+
+test("멈춰 있던 사이 시계가 30일 뒤로 바뀌어도, 다시 연 세션이 읽은 보고서로 단계를 잡아 데움", async () => {
+  const { time, host, warmer, logs, open } = setup(LinuxHost);
+  for (let index = 0; index < 4; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  await time.run(IDLE_LIMIT);
+  assert.ok(logs.some((line) => /배경 갱신 멈춤/.test(line)));
+  assert.equal(time.pending, 0);
+  time.setBack(30 * DAY);
+  // Looked up anew (the app's refresh button), then a session opens.
+  await time.timed(() => host.list(true));
+  const reads = host.reads.length;
+  await open();
+  // Timed from the report the session read: nothing is due before its window nears its end.
+  await time.run(4 * minute);
+  assert.equal(host.reads.length, reads);
+  for (let index = 0; index < 9; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.deepEqual(new Set(await probe(time, host, 30 * minute)), new Set([0]));
+  warmer.dispose();
+  assert.ok(time.longest <= TIMEOUT_MAX, String(time.longest));
+});
+
+test("시계가 30일 뒤로 바뀌기 전에 잡은 창 뒤 확인은 버려, 그 뒤 다시 조회된 보고서를 2초마다 다시 읽지 않음", async () => {
+  const { time, host, warmer, open } = setup(WindowsHost);
+  let polling = true;
+  const poll = () => {
+    if (!polling) return;
+    void host.list(false);
+    time.clock.setTimer(poll, minute);
+  };
+  poll();
+  await open();
+  await time.run(2 * minute);
+  const reads = host.reads.length;
+  host.onRead = () => {
+    // Ends a loop the warmer would not leave on its own.
+    if (host.reads.length - reads > 100) warmer.dispose();
+  };
+  time.setBack(30 * DAY);
+  // Someone looks the reports up anew (the app's refresh button), and the app polls on.
+  await time.timed(() => host.list(true));
+  await time.run(30 * minute);
+  polling = false;
+  warmer.dispose();
+  // It only looks, about once a window.
+  assert.ok(host.reads.length - reads <= 8, String(host.reads.length - reads));
+  assert.deepEqual(host.reads.filter(Boolean), []);
+  assert.ok(time.longest <= TIMEOUT_MAX, String(time.longest));
+});
+
+test("실제 타이머는 setTimeout 이 담지 못하는 지연을 담을 수 있는 최대로 줄여 곧바로 돌지 않음", async (t) => {
+  const warnings: string[] = [];
+  t.mock.method(
+    process,
+    "emitWarning",
+    (warning: unknown) => void warnings.push(String(warning)),
+  );
+  let ran = false;
+  const timer = realClock.setTimer(() => {
+    ran = true;
+  }, 30 * DAY);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  realClock.clearTimer(timer);
+  assert.equal(ran, false);
+  assert.deepEqual(warnings, []);
+});
+
+test("배운 지 1시간이 되는 경계를 두 출처의 보고서가 사이에 두어도 1초 간격 조회를 되풀이하지 않음", async () => {
+  const time = new Time();
+  // A host whose lookups end at once, each looked up again once its window is over or when forced,
+  // and so renewing nothing ahead.
+  const at = { claude: time.now, codex: time.now };
+  const sources = Object.keys(at) as (keyof typeof at)[];
+  const answer = () =>
+    sources.map((source) =>
+      report(`${source}:fixture`, {
+        fetchedAt: at[source],
+        endedAt: at[source],
+      }),
+    );
+  const reads: { at: number; refresh: boolean }[] = [];
+  let learnedAt = NaN;
+  const warmer = new UsageWarmer(
+    async (refresh) => {
+      reads.push({ at: time.now, refresh });
+      for (const source of sources)
+        if (refresh || time.now - at[source] >= HOST_WINDOW)
+          at[source] = time.now;
+      return answer();
+    },
+    time.clock,
+    (line) => {
+      if (/10초 전에 강제 갱신/.test(line)) learnedAt = time.now;
+    },
+  );
+  warmer.noteActivity(answer());
+  await time.run(15 * minute);
+  assert.ok(Number.isFinite(learnedAt));
+  // Someone refreshes each source alone, fifteen seconds apart, either side of an hour since the
+  // warmer learned the host renews nothing ahead, and Aster reads them in the background.
+  await time.run(learnedAt + TRUSTED - 10_000 - time.now);
+  at.claude = time.now;
+  await time.run(15_000);
+  at.codex = time.now;
+  warmer.observe(answer());
+  const from = reads.length;
+  await time.run(10 * minute);
+  warmer.dispose();
+  const plain = reads.filter((read) => !read.refresh).map((read) => read.at);
+  const gaps = plain.slice(1).map((read, index) => read - plain[index]);
+  assert.ok(Math.min(...gaps) >= 10_000, String(gaps));
+  // Both forced together once the older is due, then learned again.
+  assert.equal(reads.slice(from).filter((read) => read.refresh).length, 1);
+  assert.ok(reads.length - from <= 5, String(reads.length - from));
 });
