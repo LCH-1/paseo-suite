@@ -34,6 +34,10 @@ class Time {
   get pending() {
     return this.timers.size;
   }
+  /** The machine sleeps: the clock moves on, and the timers due meanwhile fire late, on waking. */
+  suspend(ms: number) {
+    this.now += ms;
+  }
   async run(ms: number) {
     assert.ok(ms >= 0, "time only moves forward");
     const end = this.now + ms;
@@ -42,12 +46,12 @@ class Time {
       let next: [number, { at: number; run: () => void }] | undefined;
       for (const entry of this.timers)
         if (!next || entry[1].at < next[1].at) next = entry;
-      if (!next || next[1].at > end) break;
+      if (!next || next[1].at > Math.max(end, this.now)) break;
       this.timers.delete(next[0]);
       this.now = Math.max(this.now, next[1].at);
       next[1].run();
     }
-    this.now = end;
+    this.now = Math.max(this.now, end);
     await settle();
   }
   /** Starts `task` now and tells how long it took in fake time. */
@@ -90,13 +94,23 @@ abstract class Host {
   constructor(protected readonly time: Time) {}
   /** Who made each read that started a renewal (Windows build only). */
   renewedBy: string[] = [];
+  /** Told of each read the warmer makes, as it makes it. */
+  onRead?: (refresh: boolean) => void;
   abstract list(refresh: boolean, by?: string): Promise<WarmedReport[]>;
   /** What the warmer is given: the same reads, recorded. */
   readonly warmerRead: HostRead = (refresh) => {
     this.reads.push(refresh);
     this.lastRead = this.time.now;
+    this.onRead?.(refresh);
     return this.list(refresh, "warmer");
   };
+  /** When the window of the reports cached last ends. */
+  windowEnd() {
+    return (
+      Math.max(...[...this.cache.values()].map((lookup) => lookup.endedAt)) +
+      HOST_WINDOW
+    );
+  }
   protected async lookup(id: string) {
     const fetchedAt = this.time.now;
     this.vendor++;
@@ -215,6 +229,21 @@ class SplitWindowsHost extends WindowsHost {
   renewOnly(index: number) {
     return this.renew(this.groups[index]);
   }
+}
+
+/**
+ * The Windows build with a discovery of twelve seconds each time: a renewal behind a read ten
+ * seconds before the window ends begins its lookup after the window.
+ */
+class SlowWindowsHost extends WindowsHost {
+  protected readonly groups = [
+    {
+      ids: this.ids,
+      discovery: 12_000,
+      discoveredAt: -Infinity,
+      renewal: null,
+    },
+  ];
 }
 
 function setup(HostType: new (time: Time) => Host, warm = true) {
@@ -448,7 +477,149 @@ test("앱 폴링이 없는 Windows 형 호스트에서 Aster 세션 열기가 �
   warmer.dispose();
 });
 
-test("세션 열기·사용량 조회가 2시간 없으면 공급사 호출과 조회를 멈추고 다시 쓰면 배운 대로 이어감", async () => {
+/**
+ * Has the machine sleep from two seconds after the warmer's first nudge, once it knows nobody else
+ * renews ahead, until `wake` tells.
+ */
+function sleepAfterFirstNudge(
+  { time, host, logs }: ReturnType<typeof setup>,
+  wake: (nudgedAt: number) => number,
+) {
+  let slept = false;
+  host.onRead = (refresh) => {
+    if (slept || refresh || !logs.some((line) => /다른 조회가 없어/.test(line)))
+      return;
+    slept = true;
+    const until = wake(time.now);
+    time.clock.setTimer(() => time.suspend(until - time.now), 2_000);
+  };
+  return () => slept;
+}
+
+test("Windows 형 호스트에서 배우려고 보낸 조회 2초 뒤 기계가 30분 잠들어 창 뒤 확인이 늦게 돌면 그 확인으로는 배우지 않아, 강제 조회 없이 창마다 공급사 호출이 한 번", async () => {
+  const run = setup(WindowsHost);
+  const { time, host, warmer, logs, open } = run;
+  const slept = sleepAfterFirstNudge(run, (at) => at + 2_000 + 30 * minute);
+  for (let index = 0; index < 6; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  // The renewal behind the nudge began on waking, after the window, and so did the look after it.
+  assert.ok(slept());
+  for (let index = 0; index < 12; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  const vendor = host.vendor;
+  for (let index = 0; index < 9; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  const perAccount = (host.vendor - vendor) / host.ids.length;
+  assert.ok(
+    perAccount <= Math.ceil((63 * minute) / RENEW_AT) + 1,
+    String(perAccount),
+  );
+  assert.deepEqual(new Set(await probe(time, host, 30 * minute)), new Set([0]));
+  warmer.dispose();
+  assert.deepEqual(host.reads.filter(Boolean), []);
+  assert.ok(!logs.some((line) => /강제 갱신/.test(line)));
+});
+
+test("Windows 형 호스트가 창이 끝날 때까지 잠든 탓에 미리 갱신하지 않는 호스트로 잘못 배워도 한 시간 뒤 다시 확인해 강제 조회를 멈추고 창마다 공급사 호출이 한 번으로 돌아옴", async () => {
+  const run = setup(WindowsHost);
+  const { time, host, warmer, logs, open } = run;
+  // Asleep until just after the window ends, so the look after it runs on time.
+  const slept = sleepAfterFirstNudge(run, () => host.windowEnd() + 100);
+  for (let index = 0; index < 4; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(slept());
+  assert.ok(logs.some((line) => /10초 전에 강제 갱신/.test(line)));
+  // Forcing, the Windows build renews twice a window: behind the plain read, then again.
+  const vendor = host.vendor;
+  await time.run(20 * minute);
+  assert.ok(host.reads.some(Boolean));
+  assert.ok(
+    (host.vendor - vendor) / host.ids.length >=
+      2 * Math.floor((20 * minute) / HOST_WINDOW),
+  );
+  for (let index = 0; index < 7; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(logs.some((line) => /강제 갱신을 멈춤/.test(line)));
+  const forced = host.reads.filter(Boolean).length;
+  const relearned = host.vendor;
+  for (let index = 0; index < 9; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  const perAccount = (host.vendor - relearned) / host.ids.length;
+  assert.ok(
+    perAccount <= Math.ceil((63 * minute) / RENEW_AT) + 1,
+    String(perAccount),
+  );
+  assert.deepEqual(new Set(await probe(time, host, 30 * minute)), new Set([0]));
+  warmer.dispose();
+  assert.equal(host.reads.filter(Boolean).length, forced);
+});
+
+test("Linux 형 호스트에서 배우는 창 안에 다른 쪽이 강제 갱신해 미리 갱신하는 호스트로 잘못 배워도 한 시간 뒤 다시 확인해 강제 갱신으로 돌아감", async () => {
+  const { time, host, warmer, logs, open } = setup(LinuxHost);
+  let refreshed = false;
+  host.onRead = (refresh) => {
+    if (
+      refreshed ||
+      refresh ||
+      !logs.some((line) => /다른 조회가 없어/.test(line))
+    )
+      return;
+    refreshed = true;
+    // Someone else forces a lookup ten seconds after the nudge, inside the window.
+    time.clock.setTimer(() => void host.list(true), 10_000);
+  };
+  for (let index = 0; index < 7; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(refreshed);
+  assert.ok(!logs.some((line) => /강제 갱신/.test(line)));
+  for (let index = 0; index < 7; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(logs.some((line) => /10초 전에 강제 갱신/.test(line)));
+  assert.deepEqual(new Set(await probe(time, host, 30 * minute)), new Set([0]));
+  warmer.dispose();
+});
+
+test("Windows 형 호스트의 탐색이 매번 12초 걸려 창이 끝나기 10초 전 조회 뒤의 갱신이 창이 끝난 뒤에 시작해도, 미리 갱신하지 않는 호스트로 배우지 않아 강제 조회가 없고 창마다 공급사 호출은 한 번", async () => {
+  const { time, host, warmer, logs, open } = setup(SlowWindowsHost);
+  const waits: number[] = [];
+  // Three and a half hours: the lesson lapses and is learned again three times.
+  for (let index = 0; index < 30; index++) {
+    waits.push(await open());
+    await time.run(7 * minute);
+  }
+  warmer.dispose();
+  assert.deepEqual(host.reads.filter(Boolean), []);
+  assert.ok(!logs.some((line) => /강제 갱신/.test(line)));
+  const perAccount = host.vendor / host.ids.length;
+  assert.ok(
+    perAccount <= Math.ceil((210 * minute) / RENEW_AT) + 1,
+    String(perAccount),
+  );
+  // Only the first open, on an empty cache, waits for the whole lookup.
+  assert.equal(waits[0], 12_000 + FETCH);
+  assert.ok(
+    waits.slice(1).every((ms) => ms < 12_000),
+    String(waits),
+  );
+});
+
+test("세션 열기·사용량 조회가 2시간 없으면 공급사 호출과 조회를 멈추고 다시 쓰면 첫 창부터 데움", async () => {
   const { time, host, warmer, logs, open } = setup(LinuxHost);
   await open();
   await time.run(IDLE_LIMIT - minute);
@@ -469,7 +640,8 @@ test("세션 열기·사용량 조회가 2시간 없으면 공급사 호출과 �
   assert.equal(host.reads.length, stoppedReads);
   assert.equal(time.pending, 0);
   assert.ok(logs.some((line) => /배경 갱신 멈춤/.test(line)));
-  // Back in use: the host is already known, so the first window is warmed.
+  // Back in use: the lesson has lapsed, so the first window is nudged and looked at once it ends,
+  // and that look renews it before the next session opens.
   assert.equal(await open(), FETCH);
   await time.run(7 * minute);
   assert.equal(await open(), 0);
