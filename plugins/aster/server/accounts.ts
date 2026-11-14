@@ -1002,6 +1002,31 @@ export class UsageReader {
   }
 
   /**
+   * One host read that neither uses nor keeps the reports above: how the usage warmer looks at
+   * the host's own cache. `refresh` makes the host ask the vendor; otherwise it answers from its
+   * cache, or asks for what is past its window there.
+   */
+  async lookup(command: Command, signal: AbortSignal, refresh = false) {
+    signal = AbortSignal.any([signal, this.lifetime.signal]);
+    signal.throwIfAborted();
+    return parseReports(
+      JSON.parse(
+        await this.run(
+          command,
+          [
+            "usage",
+            "--json",
+            "--home",
+            paseoHome,
+            ...(refresh ? ["--refresh"] : []),
+          ],
+          signal,
+        ),
+      ),
+    );
+  }
+
+  /**
    * The current reports. `standIn` decides whether the reports from before a login change may
    * answer while the forced lookup runs (by default whenever they are still current), so a caller
    * that knows its accounts can make it wait for one of them the old reports do not cover.
