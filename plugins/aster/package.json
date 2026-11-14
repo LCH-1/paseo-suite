@@ -31,6 +31,7 @@
     "server/usage-revision.ts",
     "server/usage-warmer.ts",
     "server/legacy-credential-rpc.ts",
+    "server/local-daemon.ts",
     "server/core-profiles.ts",
     "server/host-usage.ts",
     "server/shared-result.ts",

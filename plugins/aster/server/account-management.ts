@@ -22,7 +22,7 @@ import {
 } from "./accounts";
 import { codexOriginalCommand } from "./codex";
 import { codexTokens } from "./codex-runtime.mjs";
-import { createLocalPluginConnection } from "./legacy-credential-rpc";
+import { localDaemon } from "./local-daemon";
 import {
   providerFamily,
   providerPolicy,
@@ -430,17 +430,11 @@ export function registerAccountManagement(
   }
   async function pluginPath() {
     if (options.pluginPath) return options.pluginPath();
-    const client = await createLocalPluginConnection(paseoHome);
-    try {
-      await client.connect();
-      const plugin = (await client.listPlugins()).find(
-        (entry) => entry.id === "aster",
-      );
-      if (!plugin?.path) throw Error("Aster 설치 경로를 확인할 수 없습니다.");
-      return plugin.path;
-    } finally {
-      client.close();
-    }
+    const plugin = (
+      await localDaemon(paseoHome).use((client) => client.listPlugins())
+    ).find((entry) => entry.id === "aster");
+    if (!plugin?.path) throw Error("Aster 설치 경로를 확인할 수 없습니다.");
+    return plugin.path;
   }
   server.handle(accountsRpc.add, async (input, { paseo }) =>
     serialize(async () => {

@@ -209,6 +209,7 @@ async function openFixture(
       "./server/legacy-credential-rpc",
       `export const registerLegacyCredentialRpc=()=>${noOp}`,
     ],
+    ["./server/local-daemon", `export const closeLocalDaemons=${noOp}`],
     [
       "./server/codex",
       `export const registerCodexRouting=()=>({dispose:${noOp},status:async()=>[]})`,
