@@ -88,13 +88,18 @@ class Time {
 
 const FETCH = 1_300;
 const DISCOVERY = 2_500;
-const report = (
-  id: string,
-  lookup: { fetchedAt: number; endedAt: number },
-) => ({
+/** A lookup, and whether it failed: a failed one's report does not tell when it ended. */
+interface Lookup {
+  fetchedAt: number;
+  endedAt: number;
+  failed?: boolean;
+}
+const report = (id: string, lookup: Lookup) => ({
   id,
   fetchedAt: new Date(lookup.fetchedAt).toISOString(),
-  successfulAt: new Date(lookup.endedAt).toISOString(),
+  ...(lookup.failed
+    ? {}
+    : { successfulAt: new Date(lookup.endedAt).toISOString() }),
 });
 
 /** A host that counts what reaches the vendor and which reads the warmer made. */
@@ -104,10 +109,11 @@ abstract class Host {
   /** When the warmer last read. */
   lastRead = -Infinity;
   readonly ids = ["claude:fixture", "codex:fixture"];
-  protected readonly cache = new Map<
-    string,
-    { fetchedAt: number; endedAt: number }
-  >();
+  protected readonly cache = new Map<string, Lookup>();
+  /** Accounts whose lookups fail this long after they begin, as a vendor that times out. */
+  readonly failing = new Map<string, number>();
+  /** When each account's lookups began. */
+  readonly lookups = new Map<string, number[]>();
   constructor(protected readonly time: Time) {}
   /** Who made each read that started a renewal (Windows build only). */
   renewedBy: string[] = [];
@@ -131,8 +137,15 @@ abstract class Host {
   protected async lookup(id: string) {
     const fetchedAt = this.time.now;
     this.vendor++;
-    await this.time.sleep(FETCH);
-    const lookup = { fetchedAt, endedAt: this.time.now };
+    this.lookups.set(id, [...(this.lookups.get(id) ?? []), fetchedAt]);
+    const failing = this.failing.get(id);
+    await this.time.sleep(failing ?? FETCH);
+    // Both builds time the window from when the lookup ended, failed or not.
+    const lookup = {
+      fetchedAt,
+      endedAt: this.time.now,
+      failed: failing !== undefined,
+    };
     this.cache.set(id, lookup);
     return report(id, lookup);
   }
@@ -163,8 +176,9 @@ class LinuxHost extends Host {
 
 /**
  * The Windows build (the fork's usage-sources): discovery and the reports share one window, a plain
- * read in its last minute renews them behind the answer, a read after it waits for the renewal, and
- * a forced read renews again after any renewal under way.
+ * read in its last minute renews them behind the answer, a read after it waits for the discovery and
+ * then for each report past its window (one still in it answers from the cache while its lookup
+ * runs), and a forced read renews again after any renewal under way.
  */
 class WindowsHost extends Host {
   /** Sources that share a discovery, each renewed apart, and how long its discovery takes. */
@@ -173,6 +187,8 @@ class WindowsHost extends Host {
     discovery: number;
     discoveredAt: number;
     renewal: Promise<void> | null;
+    /** The discovery of the renewal under way. */
+    discovering?: Promise<void>;
   }[] = [
     {
       ids: this.ids,
@@ -181,6 +197,8 @@ class WindowsHost extends Host {
       renewal: null,
     },
   ];
+  /** Each report's lookup under way. */
+  private readonly running = new Map<string, Promise<unknown>>();
   async list(refresh: boolean, by = "other") {
     await Promise.all(
       this.groups.map(async (group) => {
@@ -189,13 +207,21 @@ class WindowsHost extends Host {
             ? group.renewal.then(() => this.renew(group, by))
             : this.renew(group, by));
         const state = this.state(group);
-        if (group.renewal) {
-          if (state === "expired") await group.renewal;
-        } else if (state === "expired") await this.renew(group, by);
-        else if (state === "due") void this.renew(group, by);
+        if (!group.renewal && state === "due") void this.renew(group, by);
+        else if (state === "expired") {
+          if (!group.renewal) void this.renew(group, by);
+          await group.discovering;
+        }
       }),
     );
-    return this.ids.map((id) => report(id, this.cache.get(id)!));
+    return Promise.all(
+      this.ids.map(async (id) => {
+        const cached = this.cache.get(id);
+        if (!cached || this.time.now - cached.endedAt >= HOST_WINDOW)
+          await this.running.get(id);
+        return report(id, this.cache.get(id)!);
+      }),
+    );
   }
   private state(group: WindowsHost["groups"][number]) {
     const ages = [
@@ -210,15 +236,23 @@ class WindowsHost extends Host {
   }
   protected renew(group: WindowsHost["groups"][number], by = "other") {
     this.renewedBy.push(by);
-    const task = (async () => {
-      await this.time.sleep(group.discovery);
+    const discovering = this.time.sleep(group.discovery).then(() => {
       group.discoveredAt = this.time.now;
-      await Promise.all(group.ids.map((id) => this.lookup(id)));
-    })();
-    const running: Promise<void> = task.finally(() => {
-      if (group.renewal === running) group.renewal = null;
+      for (const id of group.ids) {
+        const lookup: Promise<unknown> = this.lookup(id).finally(() => {
+          if (this.running.get(id) === lookup) this.running.delete(id);
+        });
+        this.running.set(id, lookup);
+      }
     });
+    const running: Promise<void> = discovering
+      .then(() => Promise.all(group.ids.map((id) => this.running.get(id))))
+      .then(() => undefined)
+      .finally(() => {
+        if (group.renewal === running) group.renewal = null;
+      });
     group.renewal = running;
+    group.discovering = discovering;
     return running;
   }
 }
@@ -634,6 +668,183 @@ test("Windows 형 호스트의 탐색이 매번 12초 걸려 창이 끝나기 10
     waits.slice(1).every((ms) => ms < 12_000),
     String(waits),
   );
+});
+
+test("앱이 60초마다 폴링하는 Windows 형 호스트에서 한 계정의 조회가 15초 걸려 실패해 끝난 시각을 알리지 않아도, 6시간 동안 다른 조회가 갱신한다는 판단을 바꾸지 않고 공급사 호출을 하나도 더하지 않음", async () => {
+  const runs = [];
+  for (const warm of [false, true]) {
+    const { time, host, warmer, logs, open } = setup(WindowsHost, warm);
+    // The vendor times out on one account: the host answers its report for five minutes from when
+    // the lookup failed, fifteen seconds after it began, which the report does not tell.
+    host.failing.set("codex:fixture", 15_000);
+    let polling = true;
+    const poll = () => {
+      if (!polling) return;
+      void host.list(false);
+      time.clock.setTimer(poll, minute);
+    };
+    poll();
+    const waits: number[] = [];
+    for (const end = time.now + 6 * 3_600_000; time.now < end; ) {
+      waits.push(await open());
+      await time.run(7 * minute);
+    }
+    polling = false;
+    warmer.dispose();
+    runs.push({
+      vendor: host.vendor,
+      renewals: host.renewedBy.length,
+      reads: host.reads,
+      waits,
+      logs,
+    });
+  }
+  const [without, warmed] = runs;
+  assert.equal(warmed.vendor, without.vendor);
+  assert.deepEqual(warmed.waits, without.waits);
+  assert.deepEqual(warmed.reads.filter(Boolean), []);
+  assert.deepEqual(
+    warmed.logs.filter((line) => /다른 조회|호스트가/.test(line)),
+    [],
+  );
+  // It only looked, once a window: the app's polls renew it in its last minute.
+  assert.ok(
+    warmed.reads.length <= warmed.renewals,
+    `${warmed.reads.length} ${warmed.renewals}`,
+  );
+});
+
+test("Linux 형 호스트에서 한 계정의 조회가 15초 걸려 실패해 그 창이 늦게 끝나도, 매시간 다시 배우는 창에서 세션 열기가 그 계정의 조회를 기다리지 않음(그 대가로 다른 계정은 배울 때마다 한 번 더 조회)", async () => {
+  const { time, host, warmer, logs, open } = setup(LinuxHost);
+  host.failing.set("codex:fixture", 15_000);
+  for (let index = 0; index < 4; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(logs.some((line) => /10초 전에 강제 갱신/.test(line)));
+  // A session opens every ten seconds for two and a half hours: the lesson lapses and is learned
+  // again twice, each time with a look after Claude's window, the failed lookup's still answered.
+  const from = time.now;
+  const waits: number[] = [];
+  while (time.now - from < 150 * minute) {
+    const ms = await open();
+    waits.push(ms);
+    await time.run(Math.max(0, 10_000 - ms));
+  }
+  warmer.dispose();
+  // Looked at only once its window has surely ended, the failed lookup would leave the next session
+  // open waiting for it in every hour; forced instead, it is renewed with Claude again.
+  assert.ok(Math.max(...waits) < 5_000, String(Math.max(...waits)));
+  const claude = host.lookups.get("claude:fixture")!.filter((at) => at >= from);
+  const again = claude
+    .slice(1)
+    .filter((at, index) => at - claude[index] < RENEW_AT - 1_000).length;
+  assert.ok(again <= 2, String(again));
+});
+test("앱 폴링이 없는 Windows 형 호스트에서 한 계정의 조회가 마감 20초까지 걸려 실패해도, 그 창이 끝나기 전에 시작한 갱신을 늦은 갱신으로 보지 않아 미리 갱신하지 않는 호스트로 배우지 않고 강제 조회가 없음", async () => {
+  const { time, host, warmer, logs, open } = setup(WindowsHost);
+  host.failing.set("codex:fixture", 20_000);
+  for (let index = 0; index < 30; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  warmer.dispose();
+  assert.deepEqual(host.reads.filter(Boolean), []);
+  assert.ok(!logs.some((line) => /강제 갱신/.test(line)));
+  const perAccount = host.vendor / host.ids.length;
+  assert.ok(
+    perAccount <= Math.ceil((210 * minute) / RENEW_AT) + 1,
+    String(perAccount),
+  );
+});
+
+test("Linux 형 호스트의 계정이 모두 로그인 거부처럼 곧바로 실패해 보고서가 끝난 시각을 알리지 않아도, 본 때로 창 끝을 좁혀 미리 갱신하지 않는 호스트로 배우고 세션 열기가 기다리지 않음", async () => {
+  const { time, host, warmer, logs, open } = setup(LinuxHost);
+  for (const id of host.ids) host.failing.set(id, 500);
+  for (let index = 0; index < 9; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(logs.some((line) => /10초 전에 강제 갱신/.test(line)));
+  assert.deepEqual(new Set(await probe(time, host, 30 * minute)), new Set([0]));
+  warmer.dispose();
+});
+
+test("앱이 60초마다 폴링하는 Windows 형 호스트에서 모든 계정의 조회가 15초 걸려 실패해도, 창 뒤 확인이 갱신이 끝날 때까지 2초마다 다시 읽지 않고 공급사 호출을 더하지 않음", async () => {
+  const runs = [];
+  for (const warm of [false, true]) {
+    const { time, host, warmer, logs, open } = setup(WindowsHost, warm);
+    for (const id of host.ids) host.failing.set(id, 15_000);
+    let polling = true;
+    const poll = () => {
+      if (!polling) return;
+      void host.list(false);
+      time.clock.setTimer(poll, minute);
+    };
+    poll();
+    for (const end = time.now + 3 * 3_600_000; time.now < end; ) {
+      await open();
+      await time.run(7 * minute);
+    }
+    polling = false;
+    warmer.dispose();
+    runs.push({
+      vendor: host.vendor,
+      renewals: host.renewedBy.length,
+      reads: host.reads,
+      logs,
+    });
+  }
+  const [without, warmed] = runs;
+  assert.equal(warmed.vendor, without.vendor);
+  assert.deepEqual(warmed.reads.filter(Boolean), []);
+  assert.deepEqual(
+    warmed.logs.filter((line) => /다른 조회|호스트가/.test(line)),
+    [],
+  );
+  // A look that finds the renewal still running reads again once it may have ended, not sooner.
+  assert.ok(
+    warmed.reads.length <= 1.5 * warmed.renewals,
+    `${warmed.reads.length} ${warmed.renewals}`,
+  );
+});
+
+test("끝난 시각을 모르는 실패 보고서가 그 창이 끝났을 수도 있는 사이에 갱신되고 다른 보고서는 아직 창 안이면, 그 확인을 끝내 2초마다 다시 읽지 않음", async () => {
+  const time = new Time();
+  const start = time.now;
+  // Codex failed a hundred seconds ago, as its report tells; Claude was just looked up.
+  let codex: Lookup = {
+    fetchedAt: start - 100_000,
+    endedAt: start - 99_500,
+    failed: true,
+  };
+  const claude: Lookup = { fetchedAt: start, endedAt: start + FETCH };
+  const answer = () => [
+    report("claude:fixture", claude),
+    report("codex:fixture", codex),
+  ];
+  const reads: number[] = [];
+  const warmer = new UsageWarmer(
+    async () => {
+      reads.push(time.now - start);
+      return answer();
+    },
+    time.clock,
+    () => undefined,
+  );
+  await time.run(FETCH);
+  warmer.noteActivity(answer());
+  // Someone renews Codex just after its window may have ended, as the app's polls do.
+  await time.run(205_000 - FETCH);
+  codex = {
+    fetchedAt: time.now,
+    endedAt: time.now + 500,
+    failed: true,
+  };
+  await time.run(95_000);
+  warmer.dispose();
+  // It looked once Codex's window may have ended, and next after Claude's.
+  assert.deepEqual(reads, [210_000]);
 });
 
 test("호스트가 끝났어야 할 창을 계속 답하면 2초 간격 재확인은 조회 마감까지만 하고 그 뒤로는 1분 간격", async () => {

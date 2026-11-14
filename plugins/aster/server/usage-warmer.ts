@@ -3,7 +3,7 @@ export interface WarmedReport {
   id: string;
   /** When the host's lookup began. */
   fetchedAt: string;
-  /** When a lookup that answered with usage ended. */
+  /** When a lookup that answered with usage ended; a failed one does not tell. */
   successfulAt?: string;
 }
 
@@ -63,8 +63,10 @@ const NUDGE_SETTLE = 5_000;
 const RENEW_LAG = 25_000;
 /** How soon a host that still answers a window it should have ended is asked again. */
 const RECHECK = 2_000;
-/** How long after a lookup began the host may still answer it: its 20-second deadline and more. */
-const CHECK_LIMIT = HOST_WINDOW + 25_000;
+/** How long a host lookup may take: its 20-second deadline and more. */
+const LOOKUP_LIMIT = 25_000;
+/** How long after a lookup began the host may still answer it. */
+const CHECK_LIMIT = HOST_WINDOW + LOOKUP_LIMIT;
 /** No step follows another sooner than this. */
 const MIN_DELAY = 1_000;
 /** The longest delay `setTimeout` keeps: Node runs a longer one after a millisecond, and warns. */
@@ -84,7 +86,16 @@ export const realClock: WarmerClock = {
 interface Seen {
   /** When the lookup began. */
   at: number;
-  /** When the host stops answering it from its cache, as far as the report tells. */
+  /**
+   * When the host stops answering it from its cache, as far as the report tells, which times the
+   * steps. A failed lookup's report does not tell when the lookup ended: this is then the earliest
+   * its window may end, and it ends by `until`.
+   */
+  soonest: number;
+  /**
+   * When the host stops answering it at the latest. A renewal from `soonest` until then is not
+   * known to be ahead of the window or late.
+   */
   until: number;
 }
 
@@ -203,14 +214,24 @@ export class UsageWarmer {
     if (this.aheadAt > now) this.aheadAt = -Infinity;
   }
 
-  /** While someone else renews the reports, the next step only looks after the window ends. */
+  /**
+   * While someone else renews the reports, the next step only looks after the window ends. A failed
+   * lookup still answered past the look its window was due for may be renewed meanwhile, as long as
+   * the lookup took: while others are watched it is left out, so the next look is not timed by it,
+   * at once and again until that renewal ends.
+   */
   private arm() {
     if (!this.others || this.check || !this.seen.size) return;
+    const now = this.clock.now();
+    const open = [...this.seen].filter(
+      ([, seen]) =>
+        seen.soonest === seen.until || seen.soonest + LATE_CHECK > now,
+    );
+    const watched = open.length ? open : [...this.seen];
     this.check = {
-      before: new Map(this.seen),
+      before: new Map(watched),
       at: this.quietAfter(
-        Math.min(...[...this.seen.values()].map((seen) => seen.until)) +
-          LATE_CHECK,
+        Math.min(...watched.map(([, seen]) => seen.soonest)) + LATE_CHECK,
       ),
       nudged: false,
     };
@@ -224,8 +245,8 @@ export class UsageWarmer {
     for (let moved = true; moved; ) {
       moved = false;
       for (const seen of this.seen.values())
-        if (at >= seen.at + RENEWS_FROM && at < seen.until + LATE_CHECK) {
-          at = seen.until + LATE_CHECK;
+        if (at >= seen.at + RENEWS_FROM && at < seen.soonest + LATE_CHECK) {
+          at = seen.soonest + LATE_CHECK;
           moved = true;
         }
     }
@@ -333,7 +354,14 @@ export class UsageWarmer {
     if (!refresh) this.noteOwnRead();
     const reports = await this.read(refresh, this.lifetime.signal);
     this.lifetime.signal.throwIfAborted();
-    this.seen = windows(reports, this.clock.now());
+    const seen = windows(reports, this.clock.now());
+    // Seen earlier, a report whose lookup does not tell when it ended had ended by then.
+    for (const [id, fresh] of seen) {
+      const known = this.seen.get(id);
+      if (known?.at === fresh.at && known.until < fresh.until)
+        seen.set(id, known);
+    }
+    this.seen = seen;
     for (const [id, deferred] of this.deferred)
       if (this.seen.get(id)?.at !== deferred.at) this.deferred.delete(id);
   }
@@ -383,7 +411,7 @@ export class UsageWarmer {
     }
     this.check = {
       before: new Map(due),
-      at: Math.max(...due.map(([, seen]) => seen.until)) + 250,
+      at: Math.max(...due.map(([, seen]) => seen.soonest)) + 250,
       nudged: true,
     };
     return undefined;
@@ -392,6 +420,7 @@ export class UsageWarmer {
   /**
    * After a window: a report fetched again before it ended was renewed ahead, by the host behind
    * a nudge or by someone else; one fetched again after it was waited for, at least by this read.
+   * One fetched again while a window of unknown end may still have run tells neither.
    * A look after a stall only reads the reports anew: the host may have slept through the window.
    */
   private async verify(check: Check, stalled: boolean) {
@@ -403,22 +432,33 @@ export class UsageWarmer {
     let ahead = false;
     let late = false;
     let waiting = false;
+    let renewed = false;
     for (const [id, before] of check.before) {
       const seen = this.seen.get(id);
       if (!seen) continue;
       if (seen.at <= before.at) waiting = true;
-      else if (seen.at < before.until) ahead = true;
-      else late = true;
+      else if (seen.at < before.soonest) ahead = true;
+      else if (seen.at >= before.until) late = true;
+      else renewed = true;
     }
-    if (waiting && !ahead && !late) {
+    if (waiting && !ahead && !late && !renewed) {
       const limit =
         Math.min(...[...check.before.values()].map((seen) => seen.at)) +
         CHECK_LIMIT;
-      // The host still answers a window the report says has ended: its lookup ended later.
+      // The host still answers a window the report says has ended: its lookup ended later. Failed
+      // lookups' windows may run until `until`, so those alone are looked at again then.
       if (this.clock.now() < limit) {
-        check.at = check.nudged
-          ? this.clock.now() + RECHECK
-          : this.quietAfter(this.clock.now() + RECHECK);
+        const held = [...check.before.entries()].flatMap(([id, before]) => {
+          const seen = this.seen.get(id);
+          return seen && seen.at <= before.at ? [before] : [];
+        });
+        const again = Math.max(
+          this.clock.now() + RECHECK,
+          held.every((seen) => seen.soonest < seen.until)
+            ? Math.min(...held.map((seen) => seen.until)) + 250
+            : -Infinity,
+        );
+        check.at = check.nudged ? again : this.quietAfter(again);
         return undefined;
       }
       this.check = null;
@@ -458,9 +498,11 @@ export class UsageWarmer {
 }
 
 /**
- * Each report's lookup and the window the host answers it for, by id. A report looked up ahead of
- * `now`, by a clock set back since, tells nothing of when its window ends: the host's cache, timed
- * by that clock, holds it until the clock catches up.
+ * Each report's lookup and the window the host answers it for, by id, read at `now`. Both host
+ * builds time a window from when its lookup ended, which a failed one's report does not tell: that
+ * was within the lookup's deadline, and before `now`. A report looked up ahead of `now`, by a clock
+ * set back since, tells nothing of when its window ends: the host's cache, timed by that clock,
+ * holds it until the clock catches up.
  */
 function windows(reports: readonly WarmedReport[], now: number) {
   const seen = new Map<string, Seen>();
@@ -468,10 +510,16 @@ function windows(reports: readonly WarmedReport[], now: number) {
     const at = Date.parse(report.fetchedAt);
     if (!Number.isFinite(at) || at > now) continue;
     const ended = Date.parse(report.successfulAt ?? "");
+    const told = Number.isFinite(ended) && ended >= at;
     const until =
-      (Number.isFinite(ended) && ended >= at ? ended : at) + HOST_WINDOW;
+      (told ? ended : Math.min(at + LOOKUP_LIMIT, now)) + HOST_WINDOW;
     const known = seen.get(report.id);
-    if (!known || known.at < at) seen.set(report.id, { at, until });
+    if (!known || known.at < at)
+      seen.set(report.id, {
+        at,
+        until,
+        soonest: told ? until : at + HOST_WINDOW,
+      });
   }
   return seen;
 }
