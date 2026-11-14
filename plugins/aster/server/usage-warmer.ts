@@ -24,6 +24,13 @@ export const HOST_WINDOW = 300_000;
 /** The warmer renews a report this old: a forced lookup then ends inside the window it replaces. */
 export const RENEW_AT = HOST_WINDOW - 10_000;
 /**
+ * How old a report is when the warmer nudges to learn how the host renews it. The Windows build
+ * renews behind a read in the last minute of the window, and its lookup begins once its discovery
+ * answers, which takes seconds and at times more: nudged this early, a renewal behind it still begins
+ * before the window ends, so a slow discovery is not taken for a host that renews nothing ahead.
+ */
+export const LEARN_AT = HOST_WINDOW - 40_000;
+/**
  * A nudge covers every report this much younger than the oldest, as the Windows build renews them
  * behind it too: the last minute of their windows, though their sources answer seconds apart.
  */
@@ -39,8 +46,17 @@ const RENEWS_FROM = HOST_WINDOW - 65_000;
 export const IDLE_LIMIT = 2 * 3_600_000;
 /** A failed read, or a host that renews nothing, is asked again this much later. */
 export const RETRY_AFTER = 60_000;
-/** How long a host seen renewing behind a nudge is trusted to, without a look after the window. */
-const AHEAD_TRUSTED = 3_600_000;
+/**
+ * How long what the warmer learned of the host is trusted: that it renews behind a nudge, or that it
+ * renews nothing ahead. A report looked up later is nudged early and looked at after its window
+ * again, so a wrong lesson (a look the machine slept through) lasts an hour and a window at most.
+ */
+export const TRUSTED = 3_600_000;
+/**
+ * A step this much later than its timer was set for ran after the machine slept or the process
+ * stalled, which may have held up the host's renewal too: a look then tells nothing of the host.
+ */
+export const STALL = 5_000;
 /** How long after a trusted nudge the renewal behind it is taken to begin: its discovery's time. */
 const NUDGE_SETTLE = 5_000;
 /** How long after a read the lookup it made the host renew may begin: discovery, and its deadline. */
@@ -88,11 +104,12 @@ interface Check {
  *
  * The warmer first only looks, ten seconds after a window ends, whether someone renewed its reports
  * before it ended. While someone does, it asks the vendor for nothing. Once nobody does, it nudges:
- * a plain read ten seconds before the window ends, which the Windows build renews behind and the
+ * a plain read forty seconds before the window ends, which the Windows build renews behind and the
  * Linux build answers from its cache. When the read after that window is what fetched the reports
- * again, the host renews nothing ahead, and from then on the warmer forces the lookup ten seconds
- * before the window ends. The reports it reads only time its steps: Aster's sessions read theirs
- * as before, under the same age limit.
+ * again, the host renews nothing ahead, and the warmer forces the lookup ten seconds before the
+ * window ends; when the host renewed behind the nudge, a plain read then is enough. Either lesson
+ * holds for an hour, and a look the machine may have slept through teaches nothing. The reports it
+ * reads only time its steps: Aster's sessions read theirs as before, under the same age limit.
  */
 export class UsageWarmer {
   private lastActive = -Infinity;
@@ -100,8 +117,8 @@ export class UsageWarmer {
   private ownReads: number[] = [];
   /** The reports the host holds, by id, as last seen. */
   private seen = new Map<string, Seen>();
-  /** Reports a trusted nudge left to the host: as they were then, and when to nudge them next. */
-  private deferred = new Map<string, { at: number; next: number }>();
+  /** Reports a trusted nudge left to the host: as they were then, and when it began renewing them. */
+  private deferred = new Map<string, { at: number; renewedAt: number }>();
   private timer: unknown;
   private timerAt = Infinity;
   private running = false;
@@ -109,8 +126,10 @@ export class UsageWarmer {
   private readonly lifetime = new AbortController();
   /** Someone else renews the reports before their window ends, as an app polling the host does. */
   private others = true;
-  /** The host renews nothing ahead: the warmer forces the lookup inside the window. */
+  /** The host was last seen renewing nothing ahead: the warmer forces the lookup inside the window. */
   private forcing = false;
+  /** When the host was last seen renewing nothing ahead. */
+  private forcingAt = -Infinity;
   /** When the host was last seen renewing behind a nudge. */
   private aheadAt = -Infinity;
   private check: Check | null = null;
@@ -188,18 +207,25 @@ export class UsageWarmer {
     return at;
   }
 
-  /** A pending look, else the nudge when the oldest report reaches `RENEW_AT`. */
+  /** A pending look, else the nudge when the oldest report reaches its nudge age. */
   private nextStep() {
     if (this.check) return this.check.at;
     let next = Infinity;
     for (const [id, seen] of this.seen) {
       const deferred = this.deferred.get(id);
-      next = Math.min(
-        next,
-        deferred?.at === seen.at ? deferred.next : seen.at + RENEW_AT,
-      );
+      const from = deferred?.at === seen.at ? deferred.renewedAt : seen.at;
+      next = Math.min(next, from + (this.trust(from) ? RENEW_AT : LEARN_AT));
     }
     return next;
+  }
+
+  /**
+   * What the warmer trusts of the host for a report whose lookup began at `from`: the last lesson,
+   * unless it is `TRUSTED` older than the report, which is then nudged early to learn again.
+   */
+  private trust(from: number) {
+    if (this.forcing) return from - this.forcingAt < TRUSTED ? "forcing" : null;
+    return from - this.aheadAt < TRUSTED ? "ahead" : null;
   }
 
   private noteOwnRead() {
@@ -225,11 +251,12 @@ export class UsageWarmer {
     this.timer = this.clock.setTimer(() => {
       this.timer = undefined;
       this.timerAt = Infinity;
-      void this.step();
+      void this.step(this.clock.now() - at > STALL);
     }, at - this.clock.now());
   }
 
-  private async step() {
+  /** `stalled`: the timer fired well after its time, as after the machine slept. */
+  private async step(stalled = false) {
     if (this.running || this.disposed) return;
     if (!this.active()) {
       this.check = null;
@@ -241,7 +268,9 @@ export class UsageWarmer {
     this.running = true;
     let next: number | undefined;
     try {
-      next = this.check ? await this.verify(this.check) : await this.nudge();
+      next = this.check
+        ? await this.verify(this.check, stalled)
+        : await this.nudge();
       if (this.failing) this.log("[aster] 사용량 배경 갱신 복구");
       this.failing = false;
     } catch (error) {
@@ -273,8 +302,8 @@ export class UsageWarmer {
 
   /**
    * The plain read before the oldest report's window ends. What is due then is forced on a host
-   * known to renew nothing ahead, and otherwise left to the look after its window, unless the host
-   * was seen renewing behind a nudge within the hour.
+   * seen within the hour renewing nothing ahead, taken as renewed on a host seen within the hour
+   * renewing behind a nudge, and otherwise nudged early and left to the look after its window.
    */
   private async nudge() {
     const before = this.seen;
@@ -282,11 +311,19 @@ export class UsageWarmer {
     const now = this.clock.now();
     const age = ([, seen]: [string, Seen]) =>
       seen.at <= now ? now - seen.at : -Infinity;
+    const trust = this.trust(
+      Math.min(
+        ...[...this.seen.values()]
+          .filter((seen) => seen.at <= now)
+          .map((seen) => seen.at),
+      ),
+    );
+    const nudgeAge = trust ? RENEW_AT : LEARN_AT;
     // Due once the oldest is, and then with every report the nudge also reaches.
     const due = [...this.seen].some(
-      (entry) => age(entry) >= RENEW_AT - MIN_DELAY,
+      (entry) => age(entry) >= nudgeAge - MIN_DELAY,
     )
-      ? [...this.seen].filter((entry) => age(entry) >= RENEW_AT - NUDGE_REACH)
+      ? [...this.seen].filter((entry) => age(entry) >= nudgeAge - NUDGE_REACH)
       : [];
     if (!due.length) {
       // Renewed before the warmer asked, and not behind a read of Aster's own (a nudge or a
@@ -300,19 +337,16 @@ export class UsageWarmer {
         this.setOthers(true);
       return undefined;
     }
-    if (this.forcing) {
+    if (trust === "forcing") {
       await this.lookup(true);
       return undefined;
     }
     // A host seen renewing behind a nudge lately needs no look after the window to tell: what was
     // due is taken as renewed, so the next nudge comes a window later instead of reading again
     // while the renewal runs. Should the host not renew it, that nudge finds the window over.
-    if (now - this.aheadAt < AHEAD_TRUSTED) {
+    if (trust === "ahead") {
       for (const [id, seen] of due)
-        this.deferred.set(id, {
-          at: seen.at,
-          next: now + NUDGE_SETTLE + RENEW_AT,
-        });
+        this.deferred.set(id, { at: seen.at, renewedAt: now + NUDGE_SETTLE });
       return undefined;
     }
     this.check = {
@@ -326,9 +360,14 @@ export class UsageWarmer {
   /**
    * After a window: a report fetched again before it ended was renewed ahead, by the host behind
    * a nudge or by someone else; one fetched again after it was waited for, at least by this read.
+   * A look after a stall only reads the reports anew: the host may have slept through the window.
    */
-  private async verify(check: Check) {
+  private async verify(check: Check, stalled: boolean) {
     await this.lookup(false);
+    if (stalled) {
+      this.check = null;
+      return undefined;
+    }
     let ahead = false;
     let late = false;
     let waiting = false;
@@ -355,9 +394,9 @@ export class UsageWarmer {
     }
     this.check = null;
     if (late && !ahead) {
-      if (check.nudged) this.setForcing();
+      if (check.nudged) this.learned(true);
       else this.setOthers(false);
-    } else if (ahead && !late && check.nudged) this.aheadAt = this.clock.now();
+    } else if (ahead && !late && check.nudged) this.learned(false);
     return undefined;
   }
 
@@ -371,11 +410,17 @@ export class UsageWarmer {
     );
   }
 
-  private setForcing() {
-    if (this.forcing) return;
-    this.forcing = true;
+  /** What a look after a nudged window showed: the host renews nothing ahead, or renews behind it. */
+  private learned(forcing: boolean) {
+    const now = this.clock.now();
+    this.forcingAt = forcing ? now : -Infinity;
+    this.aheadAt = forcing ? -Infinity : now;
+    if (this.forcing === forcing) return;
+    this.forcing = forcing;
     this.log(
-      "[aster] 사용량 배경 갱신: 호스트가 창이 끝나기 전에 스스로 갱신하지 않아 창이 끝나기 10초 전에 강제 갱신",
+      forcing
+        ? "[aster] 사용량 배경 갱신: 호스트가 창이 끝나기 전에 스스로 갱신하지 않아 창이 끝나기 10초 전에 강제 갱신"
+        : "[aster] 사용량 배경 갱신: 호스트가 창이 끝나기 전에 스스로 갱신해 강제 갱신을 멈춤",
     );
   }
 }
