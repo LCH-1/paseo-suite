@@ -67,11 +67,14 @@ const RECHECK = 2_000;
 const CHECK_LIMIT = HOST_WINDOW + 25_000;
 /** No step follows another sooner than this. */
 const MIN_DELAY = 1_000;
+/** The longest delay `setTimeout` keeps: Node runs a longer one after a millisecond, and warns. */
+const TIMEOUT_MAX = 2 ** 31 - 1;
 
-const realClock: WarmerClock = {
+export const realClock: WarmerClock = {
   now: () => Date.now(),
   setTimer: (run, ms) => {
-    const timer = setTimeout(run, ms);
+    // Cut short, the timer runs a step early, which finds nothing due and waits again.
+    const timer = setTimeout(run, Math.min(ms, TIMEOUT_MAX));
     timer.unref?.();
     return timer;
   },
@@ -156,8 +159,9 @@ export class UsageWarmer {
   /** Reports Aster read in the background: they move the warmer's steps, not its idle limit. */
   observe(reports: readonly WarmedReport[]) {
     if (this.disposed) return;
+    this.forgetAhead();
     this.noteOwnRead();
-    for (const [id, seen] of windows(reports)) {
+    for (const [id, seen] of windows(reports, this.clock.now())) {
       const known = this.seen.get(id);
       if (!known || known.at < seen.at) this.seen.set(id, seen);
     }
@@ -176,6 +180,27 @@ export class UsageWarmer {
 
   private active() {
     return this.clock.now() - this.lastActive < IDLE_LIMIT;
+  }
+
+  /**
+   * Forgets the times a clock set back since left ahead of now. A step timed from a report looked
+   * up there would wait for the clock to catch up or, past what a timer holds, run at once and
+   * again, and a look comparing with one would read every two seconds until then; reports looked
+   * up ahead are not taken either (`windows`), so the warmer waits for one looked up since. A use
+   * there counts as made now, so the warmer stops two hours later at most; a lesson there may be
+   * of any age, so it is learned again.
+   */
+  private forgetAhead() {
+    const now = this.clock.now();
+    for (const [id, seen] of this.seen) if (seen.at > now) this.seen.delete(id);
+    if (
+      this.check &&
+      [...this.check.before.values()].some((seen) => seen.at > now)
+    )
+      this.check = null;
+    this.lastActive = Math.min(this.lastActive, now);
+    if (this.forcingAt > now) this.forcingAt = -Infinity;
+    if (this.aheadAt > now) this.aheadAt = -Infinity;
   }
 
   /** While someone else renews the reports, the next step only looks after the window ends. */
@@ -207,16 +232,28 @@ export class UsageWarmer {
     return at;
   }
 
-  /** A pending look, else the nudge when the oldest report reaches its nudge age. */
+  /**
+   * A pending look, else the nudge when the oldest report reaches its nudge age. Every report is
+   * timed by what is trusted of the oldest, as the nudge decides what is due by it: timed by its
+   * own, a report looked up past the hour would wake the nudge every second until the oldest is due.
+   */
   private nextStep() {
     if (this.check) return this.check.at;
-    let next = Infinity;
-    for (const [id, seen] of this.seen) {
-      const deferred = this.deferred.get(id);
-      const from = deferred?.at === seen.at ? deferred.renewedAt : seen.at;
-      next = Math.min(next, from + (this.trust(from) ? RENEW_AT : LEARN_AT));
-    }
-    return next;
+    const age = this.trust(this.oldest()) ? RENEW_AT : LEARN_AT;
+    return Math.min(
+      ...[...this.seen].map(([id, seen]) => this.from(id, seen) + age),
+    );
+  }
+
+  /** When a report's lookup began, or for one a trusted nudge left to the host, its renewal. */
+  private from(id: string, seen: Seen) {
+    const deferred = this.deferred.get(id);
+    return deferred?.at === seen.at ? deferred.renewedAt : seen.at;
+  }
+
+  /** The earliest `from` of the reports the warmer knows. */
+  private oldest() {
+    return Math.min(...[...this.seen].map(([id, seen]) => this.from(id, seen)));
   }
 
   /**
@@ -258,6 +295,7 @@ export class UsageWarmer {
   /** `stalled`: the timer fired well after its time, as after the machine slept. */
   private async step(stalled = false) {
     if (this.running || this.disposed) return;
+    this.forgetAhead();
     if (!this.active()) {
       this.check = null;
       this.log(
@@ -295,7 +333,7 @@ export class UsageWarmer {
     if (!refresh) this.noteOwnRead();
     const reports = await this.read(refresh, this.lifetime.signal);
     this.lifetime.signal.throwIfAborted();
-    this.seen = windows(reports);
+    this.seen = windows(reports, this.clock.now());
     for (const [id, deferred] of this.deferred)
       if (this.seen.get(id)?.at !== deferred.at) this.deferred.delete(id);
   }
@@ -311,13 +349,7 @@ export class UsageWarmer {
     const now = this.clock.now();
     const age = ([, seen]: [string, Seen]) =>
       seen.at <= now ? now - seen.at : -Infinity;
-    const trust = this.trust(
-      Math.min(
-        ...[...this.seen.values()]
-          .filter((seen) => seen.at <= now)
-          .map((seen) => seen.at),
-      ),
-    );
+    const trust = this.trust(this.oldest());
     const nudgeAge = trust ? RENEW_AT : LEARN_AT;
     // Due once the oldest is, and then with every report the nudge also reaches.
     const due = [...this.seen].some(
@@ -425,12 +457,16 @@ export class UsageWarmer {
   }
 }
 
-/** Each report's lookup and the window the host answers it for, by id. */
-function windows(reports: readonly WarmedReport[]) {
+/**
+ * Each report's lookup and the window the host answers it for, by id. A report looked up ahead of
+ * `now`, by a clock set back since, tells nothing of when its window ends: the host's cache, timed
+ * by that clock, holds it until the clock catches up.
+ */
+function windows(reports: readonly WarmedReport[], now: number) {
   const seen = new Map<string, Seen>();
   for (const report of reports) {
     const at = Date.parse(report.fetchedAt);
-    if (!Number.isFinite(at)) continue;
+    if (!Number.isFinite(at) || at > now) continue;
     const ended = Date.parse(report.successfulAt ?? "");
     const until =
       (Number.isFinite(ended) && ended >= at ? ended : at) + HOST_WINDOW;
