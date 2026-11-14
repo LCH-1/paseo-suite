@@ -5,28 +5,62 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { coreProfileReader } from "../plugins/aster/server/core-profiles";
+import { LocalDaemon } from "../plugins/aster/server/local-daemon";
 import { SubscriptionGuard } from "../plugins/aster/server/subscription";
 
-test("core reader falls back only for an explicitly unsupported old host and closes every connection", async () => {
-  let closed = 0;
+test("core reader falls back only for an explicitly unsupported old host and asks every read over one kept connection", async () => {
+  let created = 0,
+    closed = 0,
+    asked = 0;
   let failure =
     "Plugin claude-usage-source does not contribute RPC claude.profiles.read.request";
-  const read = coreProfileReader("synthetic", async () => ({
-    connect: async () => {},
-    close: () => {
-      closed++;
-    },
-    invokePluginRpc: async () => {
-      throw Error(failure);
-    },
-  }));
+  const daemon = new LocalDaemon("synthetic", async () => {
+    created++;
+    return {
+      connect: async () => {},
+      close: () => {
+        closed++;
+      },
+      invokePluginRpc: async () => {
+        asked++;
+        throw Error(failure);
+      },
+    } as never;
+  });
+  const read = coreProfileReader("synthetic", daemon);
   assert.equal(await read(["claude"], new AbortController().signal), null);
   failure = "connection closed";
   await assert.rejects(
     read(["claude"], new AbortController().signal),
     /connection closed/,
   );
-  assert.equal(closed, 2);
+  assert.equal(asked, 2);
+  assert.equal(created, 1);
+  assert.equal(closed, 0);
+  daemon.close();
+  assert.equal(closed, 1);
+});
+
+test("a profile read the subscription check stops waiting for leaves the kept connection open", async () => {
+  let closed = 0;
+  const daemon = new LocalDaemon(
+    "synthetic",
+    async () =>
+      ({
+        connect: async () => {},
+        close: () => {
+          closed++;
+        },
+        invokePluginRpc: () => new Promise(() => {}),
+      }) as never,
+  );
+  const read = coreProfileReader("synthetic", daemon);
+  const stop = new AbortController();
+  const reading = read(["claude"], stop.signal);
+  stop.abort(Error("synthetic disposal"));
+  await assert.rejects(reading, /synthetic disposal/);
+  assert.equal(closed, 0);
+  daemon.close();
 });
 
 test("two accounts use one core profile batch; authentication is never re-read and a failure retains known denials", async (context) => {

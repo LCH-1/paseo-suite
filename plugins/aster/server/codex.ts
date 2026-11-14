@@ -14,7 +14,7 @@ import type {
   PluginSessionOpenRequest,
 } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { createLocalPluginConnection } from "./legacy-credential-rpc";
+import { localDaemon } from "./local-daemon";
 import {
   CodexAccountClient,
   codexTokens,
@@ -287,10 +287,11 @@ export function codexLauncherCommand(
     : [file];
 }
 
-export async function installCodexBridge(home = paseoHome) {
-  const client = await createLocalPluginConnection(home);
-  try {
-    await client.connect();
+export async function installCodexBridge(
+  home = paseoHome,
+  daemon = localDaemon(home),
+) {
+  await daemon.use(async (client) => {
     const plugin = (await client.listPlugins()).find(
       (entry) => entry.id === "aster",
     );
@@ -324,9 +325,7 @@ export async function installCodexBridge(home = paseoHome) {
       if (await removeOldLauncher(home, commands).catch(() => false))
         console.info("[aster] 이전 Codex 실행기 codex-node.cmd 삭제");
     }
-  } finally {
-    client.close();
-  }
+  });
 }
 
 /** The first attempt can run before the daemon accepts connections, so a failure is not final. */
@@ -434,14 +433,10 @@ export async function deleteCodexThreads(
 }
 
 async function daemonProviders(home = paseoHome) {
-  const client = await createLocalPluginConnection(home);
-  try {
-    await client.connect();
-    const { config } = await client.getDaemonConfig();
-    return providersSchema.parse(config.providers ?? {});
-  } finally {
-    client.close();
-  }
+  const { config } = await localDaemon(home).use((client) =>
+    client.getDaemonConfig(),
+  );
+  return providersSchema.parse(config.providers ?? {});
 }
 
 /** A reading stands this long before it is renewed. */

@@ -45,6 +45,7 @@ import {
 import { usageRevision } from "./server/usage-revision";
 import { UsageWarmer } from "./server/usage-warmer";
 import { registerLegacyCredentialRpc } from "./server/legacy-credential-rpc";
+import { closeLocalDaemons } from "./server/local-daemon";
 import { registerCodexRouting } from "./server/codex";
 import { keepAliasesHidden } from "./server/hidden-aliases";
 import { registerAccountManagement } from "./server/account-management";
@@ -1181,5 +1182,7 @@ export default function contribute(server: PluginServerContext) {
     reader.dispose();
     subscriptions.dispose();
     unregister.forEach((remove) => remove());
+    // The kept daemon connection would hold the plugin process open past its shutdown.
+    closeLocalDaemons();
   };
 }

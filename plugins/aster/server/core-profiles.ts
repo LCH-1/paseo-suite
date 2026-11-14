@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Account } from "./accounts";
-import { createLocalPluginConnection } from "./legacy-credential-rpc";
+import { localDaemon } from "./local-daemon";
 
 const profile = z.object({
   account: z.object({
@@ -54,21 +54,18 @@ export function matchesAccount(
 
 export function coreProfileReader(
   home: string,
-  connect = createLocalPluginConnection,
+  daemon = localDaemon(home),
 ): ReadProfiles {
   return async (providerIds, signal) => {
-    signal.throwIfAborted();
-    const client = await connect(home);
-    const abort = () => client.close();
-    const timer = setTimeout(abort, 20000);
-    signal.addEventListener("abort", abort, { once: true });
     try {
-      signal.throwIfAborted();
-      await client.connect();
-      const value = await client.invokePluginRpc(
-        "claude-usage-source",
-        "claude.profiles.read.request",
-        { providerIds },
+      const value = await daemon.use(
+        (client) =>
+          client.invokePluginRpc(
+            "claude-usage-source",
+            "claude.profiles.read.request",
+            { providerIds },
+          ),
+        { signal, timeoutMs: 20000 },
       );
       signal.throwIfAborted();
       return result.parse(value).profiles;
@@ -84,10 +81,6 @@ export function coreProfileReader(
       )
         return null;
       throw error;
-    } finally {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
-      client.close();
     }
   };
 }
