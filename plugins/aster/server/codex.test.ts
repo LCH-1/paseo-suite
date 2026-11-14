@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1584,4 +1584,81 @@ test("이전 배치 실행기는 어떤 프로바이더 명령도 가리키지 �
     assert.equal(existsSync(old), false);
     assert.ok(existsSync(join(home, "aster", "codex-node.ps1")));
     assert.equal(await removeOldLauncher(home, [current]), false);
+  }));
+
+test("업그레이드 뒤 시작할 때 데몬에 붙기 전에 옛 설치 경로를 가리키는 Codex 실행기를 지금 실행 파일로 맞추고 Linux .sh도 같은 방식으로 바꾼다", async () =>
+  fixture(async (home) => {
+    const cases = [
+      {
+        platform: "win32" as const,
+        old: "C:\Paseo\app-1.0.13\Paseo.exe",
+        current: "C:\Paseo\app-1.0.14\Paseo.exe",
+      },
+      {
+        platform: "linux" as const,
+        old: "/opt/paseo-1.0.13/paseo",
+        current: "/opt/paseo-1.0.14/paseo",
+      },
+    ];
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => void warnings.push(message);
+    try {
+      for (const { platform, old, current } of cases) {
+        const stale = codexNodeLauncher(old, platform);
+        const file = join(home, "aster", stale.file);
+        await mkdir(join(home, "aster"), { recursive: true });
+        await writeFile(file, stale.content);
+        let installs = 0;
+        // The daemon does not accept connections yet, as when plugins load at its start.
+        const routing = registerCodexRouting(
+          { before: () => () => {}, on: () => () => {} } as never,
+          {
+            installBridge: async () => {
+              installs++;
+              throw Error("not listening");
+            },
+            retention: false,
+            launcher: { home, execPath: current, electron: true, platform },
+          },
+        );
+        try {
+          // Already when registration returns, before any provider could start Codex through it.
+          assert.equal(
+            readFileSync(file, "utf8"),
+            codexNodeLauncher(current, platform).content,
+          );
+          assert.deepEqual(
+            readdirSync(join(home, "aster")).filter((name) =>
+              name.endsWith(".tmp"),
+            ),
+            [],
+          );
+        } finally {
+          routing.dispose();
+        }
+        assert.ok(installs <= 1);
+      }
+      // A launcher that cannot be written leaves the bridge to try again and never stops the start.
+      const blocked = join(home, "blocked");
+      await writeFile(blocked, "not a folder");
+      const routing = registerCodexRouting(
+        { before: () => () => {}, on: () => () => {} } as never,
+        {
+          installBridge: async () => {},
+          retention: false,
+          launcher: {
+            home: blocked,
+            execPath: "C:\Paseo\app-1.0.14\Paseo.exe",
+            electron: true,
+            platform: "win32",
+          },
+        },
+      );
+      routing.dispose();
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /Codex 실행기/);
+    } finally {
+      console.warn = warn;
+    }
   }));
