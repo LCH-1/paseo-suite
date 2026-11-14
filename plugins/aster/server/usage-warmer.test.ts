@@ -577,6 +577,24 @@ test("Windows 형 호스트에서 배우려고 보낸 조회 2초 뒤 기계가 
   assert.ok(!logs.some((line) => /강제 갱신/.test(line)));
 });
 
+test("Windows 형 호스트에서 배우려고 보낸 조회 뒤 기계가 3시간 잠들어 깨어난 배경 갱신이 멈추면 그 창 뒤 확인도 버려, 다시 연 세션 뒤에 그 확인으로 미리 갱신하지 않는 호스트로 배우지 않음", async () => {
+  const run = setup(WindowsHost);
+  const { time, host, warmer, logs, open } = run;
+  const slept = sleepAfterFirstNudge(run, (at) => at + 2_000 + 3 * 3_600_000);
+  while (!slept()) {
+    await open();
+    await time.run(7 * minute);
+  }
+  assert.ok(logs.some((line) => /배경 갱신 멈춤/.test(line)));
+  for (let index = 0; index < 9; index++) {
+    await open();
+    await time.run(7 * minute);
+  }
+  warmer.dispose();
+  assert.deepEqual(host.reads.filter(Boolean), []);
+  assert.ok(!logs.some((line) => /강제 갱신/.test(line)));
+});
+
 test("Windows 형 호스트가 창이 끝날 때까지 잠든 탓에 미리 갱신하지 않는 호스트로 잘못 배워도 한 시간 뒤 다시 확인해 강제 조회를 멈추고 창마다 공급사 호출이 한 번으로 돌아옴", async () => {
   const run = setup(WindowsHost);
   const { time, host, warmer, logs, open } = run;
