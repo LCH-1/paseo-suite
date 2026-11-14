@@ -47,6 +47,13 @@ const stateSchema = z
 type AccessState = z.infer<typeof stateSchema>;
 const interval = 60_000;
 /**
+ * How long an allowed answer stands before the profile is asked again. Each check makes the core
+ * read the account's credential (0.7–1 s on Windows), and a turn's end waits for a due one; an
+ * ended subscription still shows in the meantime as a failed turn, which denies the account at once.
+ * Denials and checks that answered nothing are asked again every `interval`.
+ */
+const allowedInterval = 10 * 60_000;
+/**
  * How long an allowed answer may open sessions while a due check runs in the background. A denial
  * is always checked again before it refuses, so a renewed subscription is not turned away, and an
  * account never answered is waited for. Checks stay due every `interval`; only who waits changes.
@@ -332,13 +339,25 @@ export class SubscriptionGuard {
         this.loaded.add(key);
       }
     signal.throwIfAborted();
-    const due = unique.filter(
-      ([key]) =>
-        this.pending.has(key) ||
-        !this.checked.has(key) ||
-        this.now() - this.checked.get(key)! >= interval ||
-        this.now() < this.checked.get(key)!,
-    );
+    // Counted from the allowed answer itself, as `settled` below: a check that answered nothing
+    // never stretches it.
+    const recentlyAllowed = (key: string, at: number) => {
+      const state = this.states.get(key);
+      return (
+        !!state &&
+        !state.denied &&
+        at >= state.at &&
+        at - state.at < allowedInterval
+      );
+    };
+    const due = unique.filter(([key]) => {
+      if (this.pending.has(key) || !this.checked.has(key)) return true;
+      const at = this.now(),
+        checked = this.checked.get(key)!;
+      return (
+        at < checked || (at - checked >= interval && !recentlyAllowed(key, at))
+      );
+    });
     let snapshot: Promise<CredentialState> | undefined;
     const capture = () => (snapshot ??= providers().then(this.capture));
     const requested = accounts

@@ -118,7 +118,8 @@ test("two accounts use one core profile batch; authentication is never re-read a
   assert.equal(batches, 1);
   await check();
   assert.equal(batches, 1);
-  now += 60001;
+  // Past the allowed answer's ten minutes both accounts are due again, still in one batch.
+  now += 10 * 60_000 + 1;
   fail = true;
   assert.deepEqual(
     (await check()).map((account) => account.id),

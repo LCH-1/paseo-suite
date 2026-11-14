@@ -389,7 +389,8 @@ test("세션 열기는 허용 판정이 있으면 지난 구독 확인을 기다
     await profiles.answer(true);
     assert.deepEqual(await first, [account]);
 
-    now += 61_000;
+    // An allowed answer is asked again ten minutes after it.
+    now += 10 * 60_000;
     const plans: { waited: number; background: number }[] = [];
     const reused = open(plans);
     assert.equal(await settles(reused), true);
@@ -410,7 +411,7 @@ test("세션 열기는 허용 판정이 있으면 지난 구독 확인을 기다
     assert.deepEqual(await denied, [account]);
 
     // Turn ends and the status screen still wait for every due check.
-    now += 61_000;
+    now += 10 * 60_000;
     const waiting = guard.filter(
       [account],
       async () => ({}),
@@ -532,6 +533,83 @@ test("허용 판정 뒤 결론 없는 확인만 이어져도 그 판정에서 6�
     assert.equal(await settles(late), false);
     await profiles.answer(true);
     assert.deepEqual(await late, [account]);
+  } finally {
+    guard.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("허용으로 확인된 계정은 그 답에서 10분 동안 턴 끝·상태 화면·세션 열기 어디서도 구독을 다시 묻지 않고, 거부·결론 없는 확인은 1분마다 그대로 다시 물으며 턴 실패의 구독 거부는 곧바로 제외한다", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "aster-subscription-allowed-"),
+  );
+  const account = {
+    id: "claude",
+    home: directory,
+    email: "synthetic@example.invalid",
+    identity: "organization|account",
+  };
+  let now = 1800000000000;
+  const profiles = gatedProfiles();
+  const guard = new SubscriptionGuard(join(directory, "cache"), directory, {
+    now: () => now,
+    readProfiles: profiles.read,
+  });
+  const turnEnd = () =>
+    guard.filter([account], async () => ({}), new AbortController().signal);
+  const plans: { waited: number; background: number }[] = [];
+  const open = () =>
+    guard.filter([account], async () => ({}), new AbortController().signal, {
+      reuse: true,
+      onWait: (plan) => plans.push(plan),
+    });
+  try {
+    const first = turnEnd();
+    await profiles.answer(true);
+    assert.deepEqual(await first, [account]);
+    const allowedAt = now;
+
+    // A minute, five, almost ten after the allowed answer: nobody waits and nothing is asked.
+    for (const after of [61_000, 5 * 60_000, 10 * 60_000 - 1]) {
+      now = allowedAt + after;
+      const ended = turnEnd();
+      assert.equal(await settles(ended), true);
+      assert.deepEqual(await ended, [account]);
+      assert.deepEqual(await open(), [account]);
+    }
+    assert.equal(profiles.calls(), 0);
+    assert.deepEqual(plans.at(-1), { waited: 0, background: 0 });
+
+    // Ten minutes after it the turn end waits for the official profile again.
+    now = allowedAt + 10 * 60_000;
+    const due = turnEnd();
+    assert.equal(await settles(due), false);
+    await profiles.answer(true);
+    assert.deepEqual(await due, [account]);
+
+    // A check that answers nothing never stretches the allowed answer: the next one is a minute on.
+    now += 10 * 60_000;
+    const unsettled = turnEnd();
+    await profiles.answer("unknown");
+    assert.deepEqual(await unsettled, [account]);
+    now += 61_000;
+    const again = turnEnd();
+    assert.equal(await settles(again), false);
+    await profiles.answer(true);
+    assert.deepEqual(await again, [account]);
+
+    // A turn the subscription refused takes the account out at once, within the ten minutes.
+    now += 61_000;
+    await guard.deny(account);
+    assert.deepEqual(await turnEnd(), []);
+    assert.deepEqual(await open(), []);
+    assert.equal(profiles.calls(), 0);
+    // A denial is asked again a minute later, so a renewed subscription comes back.
+    now += 61_000;
+    const renewed = turnEnd();
+    assert.equal(await settles(renewed), false);
+    await profiles.answer(true);
+    assert.deepEqual(await renewed, [account]);
   } finally {
     guard.dispose();
     await rm(directory, { recursive: true, force: true });
