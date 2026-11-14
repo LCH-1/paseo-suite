@@ -43,6 +43,7 @@ import {
   SubscriptionGuard,
 } from "./server/subscription";
 import { usageRevision } from "./server/usage-revision";
+import { UsageWarmer } from "./server/usage-warmer";
 import { registerLegacyCredentialRpc } from "./server/legacy-credential-rpc";
 import { registerCodexRouting } from "./server/codex";
 import { keepAliasesHidden } from "./server/hidden-aliases";
@@ -150,12 +151,21 @@ export default function contribute(server: PluginServerContext) {
   // The marker as the plugin loads is the one it compares with, so a login Settings Sync relays
   // in the first seconds after (as a daemon starts) still forces the next lookup.
   void checkUsageRevision().catch(() => undefined);
+  // While Aster is in use the host's usage cache is kept current, so a session open does not wait
+  // for the vendor after a quiet spell on a host no app polls.
+  const warmer = new UsageWarmer(async (refresh, signal) =>
+    reader.lookup((await readSettings()).command, signal, refresh),
+  );
+  /** A usage read made for the user: a session open, a turn's end, or the account screen. */
   const readUsage: UsageReader["read"] = async (command, signal, standIn) => {
     for (;;) {
       signal.throwIfAborted();
       await checkUsageRevision();
       const reports = await reader.read(command, signal, standIn);
-      if (!(await checkUsageRevision())) return reports;
+      if (!(await checkUsageRevision())) {
+        warmer.noteActivity(reports);
+        return reports;
+      }
     }
   };
   const revisionTimer = setInterval(
@@ -163,7 +173,12 @@ export default function contribute(server: PluginServerContext) {
       void checkUsageRevision()
         .then(async (changed) => {
           if (changed)
-            await reader.read((await readSettings()).command, lifetime.signal);
+            warmer.observe(
+              await reader.read(
+                (await readSettings()).command,
+                lifetime.signal,
+              ),
+            );
         })
         .catch(() => undefined),
     30_000,
@@ -1162,6 +1177,7 @@ export default function contribute(server: PluginServerContext) {
     clearInterval(hookTimer);
     clearInterval(revisionTimer);
     lifetime.abort();
+    warmer.dispose();
     reader.dispose();
     subscriptions.dispose();
     unregister.forEach((remove) => remove());

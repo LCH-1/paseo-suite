@@ -142,6 +142,8 @@ async function openFixture(
     /** How many marker checks have finished, and how many usage reads started. */
     revisionChecks: 0,
     usageReads: 0,
+    /** The usage warmer's own host reads: whether each one was forced. */
+    hostReads: [] as boolean[],
     /** Whether each usage read let the reports from before a login change stand in. */
     standIns: [] as Array<boolean | undefined>,
     /** What the host adds to the refresh request of a reload, such as the `model` it opens with. */
@@ -164,7 +166,7 @@ async function openFixture(
       export const paseoHome="/fixture", stateDirectory="/fixture";
       export async function discoverAccounts(){return ${JSON.stringify(accounts)}}
       export async function readSettings(){return {command:{file:"mock-only",args:[]},capacities:{},...globalThis[${JSON.stringify(key)}].settings}}
-      export class UsageReader{async read(_command,_signal,standIn){globalThis[${JSON.stringify(key)}].usageReads++; await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); globalThis[${JSON.stringify(key)}].standIns.push(standIn?.(reports)); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
+      export class UsageReader{async read(_command,_signal,standIn){globalThis[${JSON.stringify(key)}].usageReads++; await globalThis[${JSON.stringify(key)}].usageGate?.(); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); globalThis[${JSON.stringify(key)}].standIns.push(standIn?.(reports)); return reports} async lookup(_command,_signal,refresh){globalThis[${JSON.stringify(key)}].hostReads.push(refresh); const reports=globalThis[${JSON.stringify(key)}].reports; if(reports===null) throw Error("usage unavailable"); return reports} invalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("invalidate")} revalidate(){globalThis[${JSON.stringify(key)}].usageDrops.push("revalidate")} dispose(){}}
     `,
     ],
     [
@@ -215,6 +217,7 @@ async function openFixture(
       `export const registerAccountManagement=(_server,status)=>{globalThis[${JSON.stringify(key)}].status=status; return ${noOp}}`,
     ],
     ["./server/provider-policy", "export const providerFamily=id=>id"],
+    ["./server/usage-warmer", `export * from ${actual("./usage-warmer.ts")}`],
   ]);
   const bundled = await build({
     entryPoints: [
@@ -361,6 +364,7 @@ async function openFixture(
     changeLogin: () => shared.revisionChanged(),
     revisionChecks: () => shared.revisionChecks,
     usageReads: () => shared.usageReads,
+    hostReads: () => shared.hostReads,
     standIns: () => shared.standIns,
     setGate: (next: typeof shared.gate) => {
       shared.gate = next;
@@ -573,6 +577,41 @@ test("30초 감시는 인증 변경 표식이 바뀌면 세션 열기 전에 배
     fixture.dispose();
     await marker.remove();
   }
+});
+
+test("Claude 세션 열기가 사용량 배경 갱신을 켜 창이 끝난 뒤 호스트를 다시 보고, 플러그인 종료는 그 타이머를 정리한다", async (t) => {
+  const fixture = await openFixture("two-available");
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    // Loading the plugin alone starts nothing.
+    t.mock.timers.tick(3_600_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(fixture.hostReads(), []);
+    fixture.refreshReports();
+    await fixture.open({ reason: "create" });
+    logged(fixture, /^\[aster\] 사용량 배경 갱신 시작/);
+    // The reports' window ends five minutes after their lookup; ten seconds later the host is read.
+    t.mock.timers.tick(300_000 + 9_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(fixture.hostReads(), []);
+    t.mock.timers.tick(2_000);
+    for (let turn = 0; turn < 5; turn++)
+      await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(fixture.hostReads(), [false]);
+  } finally {
+    fixture.dispose();
+  }
+  // A step left behind would read through the plugin it outlived, fail, and say so.
+  const warnings: string[] = [];
+  t.mock.method(
+    console,
+    "warn",
+    (line: unknown) => void warnings.push(String(line)),
+  );
+  t.mock.timers.tick(3_600_000);
+  for (let turn = 0; turn < 5; turn++)
+    await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(warnings, []);
 });
 
 test("주간 창이 빠진 불완전한 사용량뿐인 계정으로도 기존 소진 대화를 CLI 정상 확인 경로로 재개한다", async () => {
