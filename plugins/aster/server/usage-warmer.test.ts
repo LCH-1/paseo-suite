@@ -619,6 +619,49 @@ test("Windows 형 호스트의 탐색이 매번 12초 걸려 창이 끝나기 10
   );
 });
 
+test("호스트가 끝났어야 할 창을 계속 답하면 2초 간격 재확인은 조회 마감까지만 하고 그 뒤로는 1분 간격", async () => {
+  const time = new Time();
+  let reads = 0;
+  const fetched = { fetchedAt: time.now, endedAt: time.now + FETCH };
+  const warmer = new UsageWarmer(
+    async () => {
+      reads++;
+      return [report("claude:fixture", fetched)];
+    },
+    time.clock,
+    () => undefined,
+  );
+  warmer.noteActivity([report("claude:fixture", fetched)]);
+  await time.run(HOST_WINDOW + 10_000 + FETCH);
+  const first = reads;
+  // The lookup's twenty-second deadline and more, read every two seconds at most.
+  await time.run(30_000);
+  assert.ok(reads - first <= 9, String(reads - first));
+  const capped = reads;
+  await time.run(30 * minute);
+  warmer.dispose();
+  assert.ok(reads - capped <= 31, String(reads - capped));
+});
+
+test("로그인 변경 감시처럼 배경에서 읽은 사용량은 2시간 활동 창을 늘리지 않음", async () => {
+  const { time, host, warmer, logs, open } = setup(LinuxHost);
+  await open();
+  /** Reads in the background every thirty seconds for `span`, as after a login change. */
+  const watch = async (span: number) => {
+    for (const end = time.now + span; time.now < end; ) {
+      const { value, ms } = await time.timed(() => host.list(false));
+      warmer.observe(value);
+      await time.run(Math.max(0, 30_000 - ms));
+    }
+  };
+  await watch(3 * 3_600_000);
+  assert.ok(logs.some((line) => /배경 갱신 멈춤/.test(line)));
+  const reads = host.reads.length;
+  await watch(3_600_000);
+  warmer.dispose();
+  assert.equal(host.reads.length, reads);
+});
+
 test("세션 열기·사용량 조회가 2시간 없으면 공급사 호출과 조회를 멈추고 다시 쓰면 첫 창부터 데움", async () => {
   const { time, host, warmer, logs, open } = setup(LinuxHost);
   await open();
